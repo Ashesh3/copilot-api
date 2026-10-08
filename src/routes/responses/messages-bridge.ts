@@ -51,6 +51,12 @@ import {
   isAnthropicUserMessage,
 } from "../messages/anthropic-types"
 import { normalizeResponsesAgentMessage } from "./agent-message"
+import { messagesCompactionSummary } from "./compact-summary"
+import {
+  hasCompactionTrigger,
+  toCompactionSummaryRequest,
+  toRemoteCompactionResult,
+} from "./compaction-trigger"
 import {
   decodeAnthropicReasoningEnvelope,
   encodeAnthropicReasoningEnvelope,
@@ -577,7 +583,9 @@ export async function adaptResponsesToMessagesCandidate(options: {
   readonly signal?: AbortSignal
   readonly source: ResponsesWireBody
 }): Promise<ResponsesMessagesCandidate> {
-  const source = createResponsesMessagesToolMap(options.source).source
+  const source = createResponsesMessagesToolMap(
+    toCompactionSummaryRequest(options.source),
+  ).source
   source.model = options.finalModel ?? source.model
   if (options.finalReasoningEffort !== undefined) {
     source.reasoning = {
@@ -718,11 +726,12 @@ export async function executePreparedResponsesMessagesBridge(options: {
       signal: options.signal,
     },
   )) as AnthropicResponse
-  return anthropicResponseToResponsesResult(
+  const result = anthropicResponseToResponsesResult(
     response,
     options.nativeOptions.requestedModel ?? options.responseContext.model,
     structuredClone(options.responseContext),
   )
+  return completeCompactionTrigger(options.responseContext, response, result)
 }
 
 export async function executeResponsesMessagesBridge(options: {
@@ -748,18 +757,33 @@ export async function executeResponsesMessagesBridge(options: {
       signal: options.signal,
     },
   )) as AnthropicResponse
-  return anthropicResponseToResponsesResult(
+  const result = anthropicResponseToResponsesResult(
     response,
     options.nativeOptions.requestedModel ?? options.payload.model,
     options.payload,
   )
+  return completeCompactionTrigger(options.payload, response, result)
+}
+
+/** Answer a Codex compaction trigger with the validated summary item. */
+function completeCompactionTrigger(
+  request: ResponsesPayload,
+  response: AnthropicResponse,
+  result: ResponsesResult,
+): ResponsesResult {
+  if (!hasCompactionTrigger(request)) return result
+  return toRemoteCompactionResult(
+    result,
+    messagesCompactionSummary(response, result),
+  )
 }
 
 export async function responsesPayloadToAnthropic(
-  payload: ResponsesPayload,
+  sourcePayload: ResponsesPayload,
   signal?: AbortSignal,
   options?: ResponsesMessagesBridgeOptions,
 ): Promise<AnthropicMessagesPayload> {
+  const payload = toCompactionSummaryRequest(sourcePayload)
   const findings: Array<TranslationFinding> = []
   const translatedPayload = {
     ...payload,

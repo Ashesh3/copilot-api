@@ -103,11 +103,14 @@ Model availability is account-specific and changes upstream. Query
 Compaction preserves the final summary across multiple output blocks and
 reports incomplete or empty summaries as failures, so clients can retain their
 original history. Models advertising only Messages use that endpoint for
-compaction. When native Chat would lose an attachment, routing prefers an
-advertised endpoint that can carry it; text fallback remains available when no
-compatible representation exists. Translated signed Anthropic reasoning uses
-an opaque round-trip representation in `reasoning_opaque`; clients should echo
-it unchanged with the assistant message.
+compaction. Codex `compaction_trigger` requests on Messages or Chat routes
+receive that summary as one proxy-generated `compaction` output item, while
+native Responses models handle the trigger themselves. When native Chat would
+lose an attachment, routing prefers an advertised endpoint that can carry it;
+text fallback remains available when no compatible representation exists.
+Translated signed Anthropic reasoning uses an opaque round-trip representation
+in `reasoning_opaque`; clients should echo it unchanged with the assistant
+message.
 
 ### Model control
 

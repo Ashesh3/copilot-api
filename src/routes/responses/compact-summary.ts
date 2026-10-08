@@ -7,8 +7,6 @@ import type {
 
 import { LocalHTTPError } from "~/lib/error"
 
-import { anthropicResponseToResponsesResult } from "./messages-bridge"
-
 export interface CompactionSummary {
   summaryText: string
   usage: ResponseUsage | null
@@ -73,7 +71,9 @@ export function responsesCompactionSummary(
     failCompactionSummary(result.status)
   }
   if (
-    result.output?.some((item) => item.status && item.status !== "completed")
+    result.output?.some(
+      (item) => "status" in item && item.status && item.status !== "completed",
+    )
   ) {
     failCompactionSummary("incomplete output")
   }
@@ -107,16 +107,19 @@ export function chatCompactionSummary(
   }
 }
 
+/**
+ * Validate a Messages summary turn. `translated` is the same response after
+ * Responses translation, which carries the summary text.
+ */
 export function messagesCompactionSummary(
-  result: AnthropicResponse,
+  response: Pick<AnthropicResponse, "stop_reason">,
+  translated: Partial<ResponsesResult>,
 ): CompactionSummary {
   if (
-    result.stop_reason
-    && !["end_turn", "stop_sequence"].includes(result.stop_reason)
+    response.stop_reason
+    && !["end_turn", "stop_sequence"].includes(response.stop_reason)
   ) {
-    failCompactionSummary(result.stop_reason)
+    failCompactionSummary(response.stop_reason)
   }
-  return responsesCompactionSummary(
-    anthropicResponseToResponsesResult(result, result.model),
-  )
+  return responsesCompactionSummary(translated)
 }
