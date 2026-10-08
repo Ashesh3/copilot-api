@@ -52,6 +52,7 @@ import { environmentsRoutes } from "./routes/environments/route"
 import { googleAIRoutes } from "./routes/google-ai/route"
 import { growthbookRoutes } from "./routes/growthbook/route"
 import { healthRoutes } from "./routes/health/route"
+import { imageRoutes } from "./routes/images/route"
 import { messageRoutes } from "./routes/messages/route"
 import { modelRoutes } from "./routes/models/route"
 import {
@@ -83,6 +84,8 @@ export function getRoutingSourceProtocol(path: string): string {
   if (path.includes("/chat/completions")) return "Chat Completions"
   if (path.includes("/embeddings")) return "Embeddings"
   if (/^\/(?:v1\/)?decisions\/?$/.test(path)) return "Decisions"
+  if (/^\/(?:v1\/)?images\/(?:generations|edits)\/?$/.test(path))
+    return "Images"
   if (path.includes("/audio/transcriptions")) return "Audio Transcriptions"
   if (path.endsWith("/complete")) return "Legacy Complete"
   if (path.includes("/search")) return "Search"
@@ -257,6 +260,7 @@ server.route("/chat/completions", completionRoutes)
 server.route("/models", modelRoutes)
 server.route("/embeddings", embeddingRoutes)
 server.route("/decisions", decisionRoutes)
+server.route("/images", imageRoutes)
 server.route("/usage", usageRoute)
 // Traffic-shaping config (replacements / model-redirects) is admin-only via
 // /dashboard/api/* (admin session cookie + CSRF). Do not re-expose under
@@ -270,6 +274,7 @@ server.route("/v1/models", modelRoutes)
 server.route("/v1beta/models", modelRoutes)
 server.route("/v1/embeddings", embeddingRoutes)
 server.route("/v1/decisions", decisionRoutes)
+server.route("/v1/images", imageRoutes)
 server.route("/v1/audio/transcriptions", audioTranscriptionRoutes)
 server.route("/v1/responses", responsesRoutes)
 server.route("/v1/alpha/search", codexSearchRoutes)

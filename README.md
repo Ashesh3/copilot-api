@@ -74,6 +74,7 @@ feature-flag limitations.
 | Responses WebSocket | WebSocket upgrade on `/v1/responses` or `/responses` | Stateful Responses-style streaming over WebSocket; this is not the OpenAI Realtime API |
 | OpenAI Embeddings | `POST /v1/embeddings` | Copilot embeddings or a configured custom embedding provider |
 | Copilot Decisions | `POST /v1/decisions` | Native structured predicate, choice, and score evaluations for models that advertise `/v1/decisions` |
+| Copilot Images | `POST /v1/images/generations`, `POST /v1/images/edits` | Native non-streaming image generation and JSON or multipart editing for models that advertise those endpoints |
 | OpenAI Audio Transcriptions | `POST /v1/audio/transcriptions` | OpenAI-compatible multipart transcription backed by Groq; `whisper-1` maps to the configured Groq Whisper model |
 | Anthropic Messages | `POST /v1/messages` | Streaming and non-streaming Messages translation, including native routing where available |
 | Anthropic token count | `POST /v1/messages/count_tokens` | Compatibility token counting |
@@ -127,7 +128,7 @@ it unchanged with the assistant message.
 
 Redirects apply to Chat Completions, Messages, Responses HTTP/WebSocket, Google
 translation, and Messages token counting. They do not apply to embeddings,
-Decisions, or Responses compaction.
+Decisions, Images, or Responses compaction.
 
 ### Provider and account routing
 
@@ -269,12 +270,37 @@ curl http://127.0.0.1:4141/v1/decisions \
 ```
 
 The response returns `answers` with probabilities and confidence values, plus
-token `usage`; match answers by question `name`. Copilot currently marks
-Decisions models picker-hidden, so generic `GET /v1/models` omits them. Send a
-`Copilot-Integration-Id` header to list the full catalog, where these models
-advertise `/v1/decisions` in `supported_endpoints`. Request fields and response
-bytes pass through unchanged. Malformed question lists, and models whose live
-record lacks `/v1/decisions`, receive a local `400`.
+token `usage`; match answers by question `name`. Malformed question lists
+receive a local `400`.
+
+Copilot image models generate and edit images through the OpenAI-style Images
+API on the same base URL:
+
+```sh
+curl http://127.0.0.1:4141/v1/images/generations \
+  -H "Authorization: Bearer replace-with-gateway-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-image-2.5-sunburst", "prompt": "A watercolor fox",
+       "size": "1024x1024", "quality": "low", "output_format": "png"}'
+
+curl http://127.0.0.1:4141/v1/images/edits \
+  -H "Authorization: Bearer replace-with-gateway-key" \
+  -F "model=gpt-image-2.5-sunburst" \
+  -F "prompt=Give the fox a red scarf" \
+  -F "image[]=@fox.png"
+```
+
+Each response carries base64 images in `data[].b64_json`, native token `usage`,
+and Copilot's `copilot_usage` billing details. Edits also accept a JSON body
+whose `images` array holds `image_url` data URLs. Copilot rejects
+`stream: true` and limits an edit request to 32 MiB.
+
+Copilot currently marks Decisions and image models picker-hidden, so generic
+`GET /v1/models` omits them. Send a `Copilot-Integration-Id` header to list the
+full catalog, where each model advertises its route in `supported_endpoints`.
+Request fields, multipart upload bytes, and response bytes pass through
+unchanged. A model whose live record lacks the requested route receives a
+local `400`.
 
 ### Anthropic-compatible clients and Claude Code
 

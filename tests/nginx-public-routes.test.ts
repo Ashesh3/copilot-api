@@ -108,11 +108,14 @@ nginxTest.each([
   ["POST", "/models/model-name/policy"],
   ["POST", "/v1/decisions"],
   ["POST", "/decisions"],
+  ["POST", "/v1/images/generations"],
+  ["POST", "/images/edits"],
   ["OPTIONS", "/v1/chat/completions"],
   ["OPTIONS", "/v1/responses"],
   ["OPTIONS", "/v1/messages"],
   ["OPTIONS", "/v1/audio/transcriptions"],
   ["OPTIONS", "/v1/decisions"],
+  ["OPTIONS", "/v1/images/edits"],
   ["OPTIONS", "/v1beta/models"],
 ] as const)(
   "public ingress forwards supported %s %s",
@@ -129,6 +132,8 @@ nginxTest.each([
 nginxTest.each([
   ["GET", "/v1/responses"],
   ["GET", "/v1/decisions"],
+  ["GET", "/v1/images/generations"],
+  ["POST", "/v1/images/variations"],
   ["GET", "/auto"],
   ["GET", "/models/session"],
   ["DELETE", "/v1/models/model-name"],

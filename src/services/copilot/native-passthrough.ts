@@ -1,27 +1,35 @@
 import { routedFetch } from "~/lib/account-router"
 import { HTTPError } from "~/lib/error"
 
-export const COPILOT_DECISIONS_ENDPOINT = "/v1/decisions"
+/** Copilot APIs whose JSON responses the gateway relays without translation. */
+export type NativeCopilotEndpoint =
+  | "/v1/decisions"
+  | "/v1/images/edits"
+  | "/v1/images/generations"
 
-/**
- * Copilot's OpenAI-compatible Decisions request. The gateway reads only the
- * routing and validation fields; questions and future fields stay native JSON.
- */
-export interface DecisionsRequest {
-  [key: string]: unknown
+export interface NativeCopilotRequest {
+  body: string | Uint8Array<ArrayBuffer>
+  contentType: string
+  endpoint: NativeCopilotEndpoint
   model: string
-  questions: Array<Record<string, unknown>>
+  signal?: AbortSignal
 }
 
-export interface DecisionsUsage {
+export interface NativeCopilotUsage {
   inputTokens: number
   outputTokens: number
 }
 
-export interface DecisionsResult {
+export interface NativeCopilotResult {
   body: Uint8Array<ArrayBuffer>
   contentType: string
-  usage?: DecisionsUsage
+  usage?: NativeCopilotUsage
+}
+
+const FAILURE_MESSAGES: Record<NativeCopilotEndpoint, string> = {
+  "/v1/decisions": "Failed to create decisions",
+  "/v1/images/edits": "Failed to edit images",
+  "/v1/images/generations": "Failed to generate images",
 }
 
 function tokenCount(value: unknown): number | undefined {
@@ -32,7 +40,8 @@ function tokenCount(value: unknown): number | undefined {
     : undefined
 }
 
-function readDecisionsUsage(body: Uint8Array): DecisionsUsage | undefined {
+/** Decisions and Images both report `usage.input_tokens` and `output_tokens`. */
+function readUsage(body: Uint8Array): NativeCopilotUsage | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(new TextDecoder().decode(body))
@@ -54,21 +63,24 @@ function readDecisionsUsage(body: Uint8Array): DecisionsUsage | undefined {
 }
 
 /** Returns Copilot's response bytes unchanged; decimals such as 1.0 survive. */
-export async function createDecisions(
-  payload: DecisionsRequest,
-  options?: { signal?: AbortSignal },
-): Promise<DecisionsResult> {
+export async function forwardNativeCopilotRequest(
+  request: NativeCopilotRequest,
+): Promise<NativeCopilotResult> {
   const { response } = await routedFetch(
-    COPILOT_DECISIONS_ENDPOINT,
-    { method: "POST", body: JSON.stringify(payload), signal: options?.signal },
-    { modelId: payload.model },
+    request.endpoint,
+    { method: "POST", body: request.body, signal: request.signal },
+    {
+      modelId: request.model,
+      headerOptions: { contentType: request.contentType },
+    },
   )
-  if (!response.ok) throw new HTTPError("Failed to create decisions", response)
+  if (!response.ok)
+    throw new HTTPError(FAILURE_MESSAGES[request.endpoint], response)
 
   const body = new Uint8Array(await response.arrayBuffer())
   return {
     body,
     contentType: response.headers.get("content-type") ?? "application/json",
-    usage: readDecisionsUsage(body),
+    usage: readUsage(body),
   }
 }

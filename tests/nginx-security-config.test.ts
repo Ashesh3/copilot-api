@@ -318,6 +318,16 @@ test("public template publishes Decisions as a POST-only JSON route", async () =
   )
 })
 
+test("public template publishes Images as POST-only unbuffered uploads", async () => {
+  const publicTemplate = await read(
+    "sites-available/public-domain.conf.template",
+  )
+
+  expect(publicTemplate).toMatch(
+    /location ~ \^\/\(\?:v1\/\)\?images\/\(\?:generations\|edits\)\/\?\$ \{[^{}]*limit_except POST OPTIONS \{ deny all; \}[^{}]*proxy_pass \{\{UPSTREAM_URL\}\};[^{}]*proxy_request_buffering off;/,
+  )
+})
+
 test("authenticated generation streams disable buffering without timeouts", async () => {
   const [publicTemplate, spoofTemplate] = await Promise.all([
     read("sites-available/public-domain.conf.template"),

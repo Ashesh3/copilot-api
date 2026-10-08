@@ -120,6 +120,8 @@ export interface CopilotHeaderOptions {
   /** Set the anthropic-version header (native /v1/messages requests). */
   anthropicVersion?: string
   attribution?: CopilotRequestAttribution
+  /** Override the JSON default, e.g. multipart image edits with a boundary. */
+  contentType?: string
   copilotSessionToken?: string
   copilotToken?: string
   integrationId?: string | null
@@ -224,7 +226,8 @@ export function copilotHeaders(
   const agentTaskId = attribution.agentTaskId ?? upstreamSessionId
 
   const headers: Record<string, string> = {
-    "content-type": "application/json",
+    "content-type":
+      sanitizeCopilotHeaderValue(options?.contentType) ?? "application/json",
     accept: "application/json",
     Authorization: `Bearer ${token}`,
     "User-Agent": "copilot-api",
@@ -325,6 +328,8 @@ function isLlmDebugPath(path: string): boolean {
     || path === "/responses"
     || path === "/embeddings"
     || path === "/v1/decisions"
+    || path === "/v1/images/generations"
+    || path === "/v1/images/edits"
     || path === "/v1/messages"
   )
 }

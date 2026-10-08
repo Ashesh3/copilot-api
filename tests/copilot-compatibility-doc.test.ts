@@ -103,6 +103,12 @@ const routeMatrix = [
   { method: "POST", canonical: "/v1/decisions", alias: "/decisions" },
   {
     method: "POST",
+    canonical: "/v1/images/generations",
+    alias: "/images/generations",
+  },
+  { method: "POST", canonical: "/v1/images/edits", alias: "/images/edits" },
+  {
+    method: "POST",
     canonical: "/v1/alpha/search",
     alias: "/alpha/search",
   },

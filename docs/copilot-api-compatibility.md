@@ -44,6 +44,8 @@ authentication model is documented in the main README.
 | Anthropic token count | `POST /v1/messages/count_tokens` | No prefix-free alias |
 | Embeddings | `POST /v1/embeddings` | `POST /embeddings` |
 | Decisions | `POST /v1/decisions` | `POST /decisions`; native JSON passthrough, no dialect translation |
+| Image generation | `POST /v1/images/generations` | `POST /images/generations`; native JSON passthrough, no streaming |
+| Image editing | `POST /v1/images/edits` | `POST /images/edits`; native JSON or multipart passthrough, no streaming |
 | Audio transcriptions | `POST /v1/audio/transcriptions` | No prefix-free alias; Groq-backed Whisper compatibility |
 | Search compatibility | `POST /v1/alpha/search` | `POST /alpha/search` |
 | Google-style generation | `POST /v1beta/models/:model:generateContent` | `POST /v1/models/:model:generateContent`; `POST /models/:model:generateContent` |
@@ -83,32 +85,37 @@ authentication, console, and Sentry diagnostics use the Google route template
 instead of the model/action segment, and debug logging does not inspect bodies
 for unsupported actions.
 
-## Decisions compatibility
+## Decisions and Images compatibility
 
-`POST /v1/decisions` forwards Copilot's native Decisions API. A request
+`POST /v1/decisions`, `POST /v1/images/generations`, and `POST /v1/images/edits`
+forward Copilot's native Decisions and Images APIs. A Decisions request
 evaluates one `input` against named `predicate`, `choice`, and `score`
-questions; the response contains structured `answers` with probabilities and
-token `usage`. It is not a generation API, so the gateway never translates it
-to or from Chat, Responses, Messages, or Google requests.
+questions and returns structured `answers`. Images requests return base64
+image data in `data`, with native `usage` and Copilot `copilot_usage`. Neither
+is a chat API, so the gateway never translates them to or from Chat, Responses,
+Messages, or Google requests.
 
 Local validation is limited to routing needs and to checks the upstream service
-rejects with a bare `Bad Request`: the body must be a JSON object with a
-non-blank `model` and a nonempty `questions` array whose entries are objects
-with non-blank `type` and unique non-blank `name` values. Failures return a
-local `400` naming the field. Instructions, choices, levels, `input`, and any
-other fields are forwarded unchanged.
+rejects with a bare `Bad Request`. Every route requires a non-blank `model`.
+Decisions also requires a nonempty `questions` array whose entries are objects
+with non-blank `type` and unique non-blank `name` values. Image edits accept
+JSON or `multipart/form-data`; any other content type receives a local `400`.
+Failures return a local `400` naming the field. Multipart uploads are parsed
+only to read `model` and are forwarded byte for byte with their original
+boundary. JSON fields are forwarded unchanged. The upstream service validates
+prompts, image references, options, streaming, and its edit size limit.
 
 Endpoint authority follows live metadata. When the selected account's model
-record omits `/v1/decisions` from `supported_endpoints`, the gateway returns a
-local `400` with `model_not_supported` before dispatch. A model absent from
+record omits the requested route from `supported_endpoints`, the gateway returns
+a local `400` with `model_not_supported` before dispatch. A model absent from
 every live catalog is still forwarded, and the upstream service decides.
 Successful response bytes and content type are returned unchanged, including
 the upstream `model` value and decimal spellings. Reported input and output
 tokens count toward gateway usage, and attempts appear in LLM Debug without
-replay. Generic discovery follows the picker flag, which currently hides
-Decisions models; Copilot catalog requests list them without long-context
-aliases. Model redirects, fallbacks, replacements, and custom providers do not
-apply.
+replay; binary multipart uploads are recorded by size only. Generic discovery
+follows the picker flag, which currently hides these models; Copilot catalog
+requests list them without long-context aliases. Model redirects, fallbacks,
+replacements, and custom providers do not apply.
 
 ## Model discovery and endpoint routing
 

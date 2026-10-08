@@ -598,6 +598,8 @@ test("labels supported client protocol paths before provider routing", () => {
   expect(getRoutingSourceProtocol("/v1/embeddings")).toBe("Embeddings")
   expect(getRoutingSourceProtocol("/v1/decisions")).toBe("Decisions")
   expect(getRoutingSourceProtocol("/decisions")).toBe("Decisions")
+  expect(getRoutingSourceProtocol("/v1/images/generations")).toBe("Images")
+  expect(getRoutingSourceProtocol("/images/edits")).toBe("Images")
   expect(getRoutingSourceProtocol("/v1/audio/transcriptions")).toBe(
     "Audio Transcriptions",
   )
