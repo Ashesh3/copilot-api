@@ -71,6 +71,14 @@ const GENERATION_ONLY_MODEL = {
   version: "generation-only-image",
 } satisfies Model
 
+// A future catalog row for the OpenAI name that Codex hard-codes.
+const LISTED_CODEX_IMAGE_MODEL = {
+  ...IMAGE_MODEL,
+  id: "gpt-image-2",
+  name: "GPT Image 2",
+  version: "gpt-image-2",
+} satisfies Model
+
 const CHAT_MODEL = {
   capabilities: {
     family: "gpt-6-luna",
@@ -105,6 +113,24 @@ const GENERATION_REQUEST = {
   size: "1024x1024",
   quality: "low",
   output_format: "png",
+}
+
+// Codex 0.160.0's built-in image tool sends these bodies, field for field.
+const CODEX_GENERATION_REQUEST = {
+  prompt: "A dog and a cat sitting in a wicker basket.",
+  background: "opaque",
+  model: "gpt-image-2",
+  quality: "auto",
+  size: "auto",
+}
+
+const CODEX_EDIT_REQUEST = {
+  images: [{ image_url: `data:image/png;base64,${PNG_BASE64}` }],
+  prompt: "Give the cat a red bow.",
+  background: "opaque",
+  model: "gpt-image-2",
+  quality: "auto",
+  size: "auto",
 }
 
 interface UpstreamRequest {
@@ -396,3 +422,98 @@ test("requires an inference credential before image dispatch", async () => {
   expect(response.status).toBe(401)
   expect(upstreamRequests).toHaveLength(0)
 })
+
+test.each([
+  [
+    "/v1/images/generations",
+    CODEX_GENERATION_REQUEST,
+    GENERATION_ONLY_MODEL.id,
+  ],
+  ["/v1/images/edits", CODEX_EDIT_REQUEST, IMAGE_MODEL.id],
+] as const)(
+  "%s routes Codex's gpt-image-2 to the first live model serving the route",
+  async (path, request, model) => {
+    state.models = {
+      object: "list",
+      data: [CHAT_MODEL, GENERATION_ONLY_MODEL, IMAGE_MODEL],
+    }
+
+    const response = await postImages(path, JSON.stringify(request))
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe(UPSTREAM_IMAGE_BODY)
+    expect(upstreamRequests).toHaveLength(1)
+    expect(upstreamRequests[0]?.path).toBe(path)
+    // Only the model value changes; every other field keeps its position.
+    expect(new TextDecoder().decode(upstreamRequests[0]?.body)).toBe(
+      JSON.stringify({ ...request, model }),
+    )
+  },
+)
+
+test("re-encodes a multipart gpt-image-2 edit with only its model replaced", async () => {
+  const multipart = multipartEdit({
+    model: "gpt-image-2",
+    prompt: "Add a thin black outline around the circle.",
+    quality: "low",
+  })
+
+  const response = await postImages("/v1/images/edits", multipart.bytes, {
+    "content-type": multipart.contentType,
+  })
+
+  expect(response.status).toBe(200)
+  expect(upstreamRequests).toHaveLength(1)
+  const forwarded = upstreamRequests.at(0)
+  const contentType = forwarded?.contentType ?? ""
+  const boundaryPrefix = "multipart/form-data; boundary="
+  expect(contentType).toStartWith(boundaryPrefix)
+  // The header must name the boundary that the re-encoded body uses.
+  const form = await Bun.readableStreamToFormData(
+    new Blob([new Uint8Array(forwarded?.body ?? [])]).stream(),
+    contentType.slice(boundaryPrefix.length),
+  )
+  expect(Array.from(form.keys())).toEqual([
+    "model",
+    "prompt",
+    "quality",
+    "image[]",
+  ])
+  expect(form.get("model")).toBe(IMAGE_MODEL.id)
+  expect(form.get("prompt")).toBe("Add a thin black outline around the circle.")
+  expect(form.get("quality")).toBe("low")
+  const image = form.get("image[]")
+  if (!(image instanceof File)) throw new Error("image[] was not a file")
+  expect(image.name).toBe("source.png")
+  expect(image.type).toBe("image/png")
+  expect(new Uint8Array(await image.arrayBuffer())).toEqual(PNG_BYTES)
+})
+
+test.each<[string, Array<Model>, string]>([
+  [
+    "a live catalog lists gpt-image-2",
+    [IMAGE_MODEL, LISTED_CODEX_IMAGE_MODEL],
+    "gpt-image-2",
+  ],
+  ["no live model serves the route", [CHAT_MODEL], "gpt-image-2"],
+  [
+    "it names another unlisted image model",
+    [IMAGE_MODEL],
+    "gpt-image-2.5-flare",
+  ],
+])(
+  "forwards the requested model unchanged when %s",
+  async (_case, data, model) => {
+    state.models = { object: "list", data }
+    const request = { ...CODEX_GENERATION_REQUEST, model }
+
+    const response = await postImages(
+      "/v1/images/generations",
+      JSON.stringify(request),
+    )
+
+    expect(response.status).toBe(200)
+    expect(upstreamRequests).toHaveLength(1)
+    expect(decode(upstreamRequests[0]?.body)).toEqual(request)
+  },
+)
