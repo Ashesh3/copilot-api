@@ -12,6 +12,7 @@ import { useMemo, useState, type ReactNode } from "react"
 
 import type { CodeDocumentLanguage } from "../lib/code-mirror-document"
 import type { HttpResponseExportSource } from "../lib/http-export"
+import type { ParsedResponseImage } from "../lib/images-body"
 import type { JsonValue } from "../lib/json-tree"
 import type { ResponseInspectorTab } from "../lib/response-inspector"
 import type { ParsedToolCall } from "../lib/response-tool-calls"
@@ -75,6 +76,18 @@ function formatCount(value: JsonValue | undefined): string | null {
   return typeof value === "number" ? value.toLocaleString() : null
 }
 
+function formatByteSize(bytes: number | null): string | null {
+  if (bytes === null) return null
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+  return `${Math.max(1, Math.round(bytes / 1024))} KiB`
+}
+
+function imageFormatLabel(mimeType: string | null): string | null {
+  return mimeType ?
+      mimeType.slice(mimeType.indexOf("/") + 1).toUpperCase()
+    : null
+}
+
 function compactMetadata(
   items: Array<{ label: string; value: string | null }>,
 ): Array<MetadataItem> {
@@ -117,6 +130,21 @@ function metadataItems(parsed: ParsedResponsesBody): Array<MetadataItem> {
   ])
 }
 
+function imageItems(parsed: ParsedResponsesBody): Array<MetadataItem> {
+  const images = parsed.images
+  if (!images || images.length === 0) return []
+  const response = parsed.response
+
+  return compactMetadata([
+    { label: "Images", value: String(images.length) },
+    { label: "Size", value: textValue(response?.size) },
+    { label: "Quality", value: textValue(response?.quality) },
+    { label: "Background", value: textValue(response?.background) },
+    { label: "Output format", value: textValue(response?.output_format) },
+    { label: "Created", value: formatTimestamp(response?.created) },
+  ])
+}
+
 function usageItems(usage: JsonRecord | null): Array<MetadataItem> {
   if (!usage) return []
   const inputDetails =
@@ -126,12 +154,16 @@ function usageItems(usage: JsonRecord | null): Array<MetadataItem> {
 
   return compactMetadata([
     { label: "Input", value: formatCount(usage.input_tokens) },
+    { label: "Image input", value: formatCount(inputDetails?.image_tokens) },
+    { label: "Text input", value: formatCount(inputDetails?.text_tokens) },
     { label: "Cached", value: formatCount(inputDetails?.cached_tokens) },
     {
       label: "Cache write",
       value: formatCount(inputDetails?.cache_write_tokens),
     },
     { label: "Output", value: formatCount(usage.output_tokens) },
+    { label: "Image output", value: formatCount(outputDetails?.image_tokens) },
+    { label: "Text output", value: formatCount(outputDetails?.text_tokens) },
     { label: "Reasoning", value: formatCount(outputDetails?.reasoning_tokens) },
     {
       label: "Accepted prediction",
@@ -309,6 +341,68 @@ function RawResponseBody({
   )
 }
 
+function ImageOutput({ images }: { images: Array<ParsedResponseImage> }) {
+  const heading =
+    images.length === 1 ?
+      "Generated image"
+    : `Generated images (${images.length})`
+
+  return (
+    <section aria-labelledby="response-inspector-images-heading">
+      <VStack gap={2}>
+        <Heading id="response-inspector-images-heading" level={4}>
+          {heading}
+        </Heading>
+        <div className="response-inspector-images">
+          {images.map((image) => {
+            const caption = [
+              `Image ${image.index + 1}`,
+              imageFormatLabel(image.mimeType),
+              formatByteSize(image.byteLength),
+            ]
+              .filter((part): part is string => part !== null)
+              .join(" · ")
+            let unavailable: string | null = null
+            if (!image.dataUrl) {
+              unavailable =
+                image.url ?
+                  "The dashboard does not load remote image URLs."
+                : "The image data is not a recognized base64 image."
+            }
+
+            return (
+              <figure key={image.index} className="response-inspector-image">
+                {image.dataUrl ?
+                  <img
+                    src={image.dataUrl}
+                    alt={`Generated image ${image.index + 1}`}
+                    decoding="async"
+                  />
+                : <Text color="secondary">{unavailable}</Text>}
+                <figcaption>
+                  <VStack gap={1}>
+                    <Text type="supporting" color="secondary">
+                      {caption}
+                    </Text>
+                    {image.url ?
+                      <Text type="code">{image.url}</Text>
+                    : null}
+                    {image.revisedPrompt ?
+                      <Text type="supporting">
+                        {`Revised prompt: ${image.revisedPrompt}`}
+                      </Text>
+                    : null}
+                  </VStack>
+                </figcaption>
+              </figure>
+            )
+          })}
+        </div>
+      </VStack>
+    </section>
+  )
+}
+
 function OutputPanel({
   parsed,
   bodyIsEmpty,
@@ -348,6 +442,11 @@ function OutputPanel({
 
   let responseOutput: ReactNode
   switch (description.kind) {
+    case "images": {
+      responseOutput = <ImageOutput images={parsed.images ?? []} />
+
+      break
+    }
     case "assistant": {
       responseOutput = (
         <section aria-labelledby="response-inspector-output-heading">
@@ -519,6 +618,11 @@ function ResponseInspectorSession({
                 items={metadataItems(parsed)}
                 source="response-details"
                 title="Response details"
+              />
+              <MetadataSection
+                items={imageItems(parsed)}
+                source="image-details"
+                title="Image details"
               />
               <MetadataSection
                 items={usageItems(parsed.usage)}

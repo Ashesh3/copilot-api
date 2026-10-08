@@ -3,7 +3,7 @@ import type { ParsedResponsesBody } from "./responses-body"
 export type ResponseOutputDescription =
   | {
       errorMessage: string | null
-      kind: "assistant"
+      kind: "assistant" | "images"
       message: null
     }
   | {
@@ -21,6 +21,10 @@ export function describeResponseOutput(
   parsed: ParsedResponsesBody,
 ): ResponseOutputDescription {
   const errorMessage = parsed.errorMessage
+  if (parsed.images && parsed.images.length > 0) {
+    return { errorMessage, kind: "images", message: null }
+  }
+
   if (parsed.assistantText) {
     return { errorMessage, kind: "assistant", message: null }
   }
