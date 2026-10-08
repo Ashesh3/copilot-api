@@ -88,6 +88,36 @@ function renderTimedInspector(durationMs: number): string {
   )
 }
 
+// A 1x1 PNG in the envelope Copilot's Images API returns.
+const PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+
+function renderImageInspector(): string {
+  return renderToStaticMarkup(
+    createElement(ResponseInspector, {
+      id: "image-response",
+      responseIdentity: "image-session",
+      response: {
+        body: JSON.stringify({
+          created: 1_791_462_736,
+          background: "opaque",
+          data: [{ b64_json: PNG_BASE64 }],
+          output_format: "png",
+          quality: "low",
+          size: "1254x1254",
+        }),
+        headers: { "content-type": "application/json" },
+        status: 200,
+        statusText: "OK",
+      },
+      onCopyError: () => {},
+      onCopySuccess: () => {},
+      onExport: () => {},
+      onExportError: () => {},
+    }),
+  )
+}
+
 test("labels the selected response view as a region", () => {
   const markup = renderPartialInspector()
 
@@ -112,4 +142,15 @@ test("renders assembled Anthropic Messages output instead of an unknown format",
 test("renders response duration in a human-friendly unit", () => {
   expect(renderTimedInspector(138_000)).toContain("2.3m")
   expect(renderTimedInspector(138_000)).not.toContain("138,000 ms")
+})
+
+test("renders Images API output as inline images", () => {
+  const markup = renderImageInspector()
+
+  expect(markup).toContain("Generated image")
+  expect(markup).toContain(
+    `<img src="data:image/png;base64,${PNG_BASE64}" alt="Generated image 1"`,
+  )
+  expect(markup).toContain("Image 1 · PNG · 1 KiB")
+  expect(markup).not.toContain("This response format is not recognized")
 })

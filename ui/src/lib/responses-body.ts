@@ -1,7 +1,9 @@
+import type { ParsedResponseImage } from "./images-body"
 import type { JsonValue } from "./json-tree"
 import type { ParsedToolCall } from "./response-tool-calls"
 
 import { looksLikeAnthropicMessage, parseAnthropicBody } from "./anthropic-body"
+import { looksLikeImagesResponse, parseImagesBody } from "./images-body"
 import {
   collectChatToolCalls,
   collectResponsesToolCalls,
@@ -21,6 +23,8 @@ export interface ParsedResponsesBody {
   copilotUsage: JsonRecord | null
   errorMessage: string | null
   events: Array<ResponsesStreamEvent>
+  /** Present only for Images API responses. */
+  images?: Array<ParsedResponseImage>
   isPartial: boolean
   reasoningText: string
   response: JsonRecord | null
@@ -172,6 +176,9 @@ function directJsonFrame(raw: string): ParsedFrame | null {
   }
   if (looksLikeAnthropicMessage(data)) {
     return { data, event: "message", rawData: raw.trim() }
+  }
+  if (looksLikeImagesResponse(data)) {
+    return { data, event: "images", rawData: raw.trim() }
   }
   return null
 }
@@ -594,6 +601,9 @@ function responseErrorMessage(
 // eslint-disable-next-line complexity
 export function parseResponsesBody(raw: string): ParsedResponsesBody | null {
   const direct = directJsonFrame(raw)
+  if (direct && isRecord(direct.data) && looksLikeImagesResponse(direct.data)) {
+    return parseImagesBody(direct.data)
+  }
   const parsedFrames = direct ? [direct] : parseSseFrames(raw)
   const anthropicMessage = parseAnthropicBody(parsedFrames)
   if (anthropicMessage) return anthropicMessage

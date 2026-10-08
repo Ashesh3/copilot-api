@@ -18,6 +18,24 @@ const completedResponse: ParsedResponsesBody = {
 }
 
 describe("response output descriptions", () => {
+  test("identifies image output", () => {
+    expect(
+      describeResponseOutput({
+        ...completedResponse,
+        images: [
+          {
+            byteLength: 70,
+            dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+            index: 0,
+            mimeType: "image/png",
+            revisedPrompt: null,
+            url: null,
+          },
+        ],
+      }),
+    ).toEqual({ errorMessage: null, kind: "images", message: null })
+  })
+
   test("identifies an assistant message", () => {
     expect(
       describeResponseOutput({

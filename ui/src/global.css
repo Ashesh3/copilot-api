@@ -929,6 +929,36 @@ body {
   outline-offset: 2px;
 }
 
+.response-inspector-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  gap: var(--spacing-3);
+}
+
+.response-inspector-image {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  margin: 0;
+}
+
+.response-inspector-image img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: min(60vh, 640px);
+  object-fit: contain;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background: var(--color-syntax-background);
+}
+
+.response-inspector-image figcaption {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .usage-pulse-layout {
   display: grid;
   grid-template-columns: minmax(300px, 0.9fr) minmax(360px, 1.1fr);
