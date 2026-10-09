@@ -46,7 +46,6 @@ test("application source contains no local traffic or resource limits", () => {
     "rateLimitSeconds",
     "rateLimitWait",
     "limit_reached",
-    "maxPayloadLength",
     "backpressureLimit",
     "closeOnBackpressureLimit",
     "AbortSignal.timeout",
@@ -98,6 +97,10 @@ test("application source contains no local traffic or resource limits", () => {
   )
   expect(startSource).not.toMatch(/\b429\b|Too Many Requests/)
   expect(startSource).toMatch(/Bun\.serve\(\{[\s\S]*?idleTimeout:\s*0,/)
+  // Omitting the WebSocket payload option leaves Bun's 16 MiB message cap in
+  // place, so the only allowed setting is Bun's unsigned 32-bit maximum.
+  expect(source.match(/maxPayloadLength:/g) ?? []).toHaveLength(1)
+  expect(startSource).toMatch(/maxPayloadLength:\s*0xff_ff_ff_ff,/)
   const routeSource = readFiles(
     path.join(root, "src", "routes"),
     new Set([".ts", ".tsx"]),

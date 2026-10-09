@@ -266,7 +266,12 @@ async function dispatchStartFetch(
 }
 
 // Combined WebSocket handler that dispatches by the authenticated connection type.
-const combinedWebSocket = {
+export const combinedWebSocket = {
+  // Left unset, Bun caps each message at 16 MiB and closes larger ones with
+  // code 1006 before any handler runs; long Codex chats exceed that. Bun reads
+  // this option as an unsigned 32-bit integer, so its maximum removes the cap:
+  // 0 rejects every message and larger values wrap around.
+  maxPayloadLength: 0xff_ff_ff_ff,
   open(ws: { data: { type: string; sessionId?: string } }) {
     switch (ws.data.type) {
       case "voice": {

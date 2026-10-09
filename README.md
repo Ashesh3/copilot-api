@@ -100,7 +100,8 @@ Model availability is account-specific and changes upstream. Query
   Responses-to-Chat-Completions translation for non-native models and native
   Messages handling for supported PDF flows.
 - Supports Responses over HTTP and WebSocket, including continuation requests
-  and compatibility compaction.
+  and compatibility compaction. The gateway sets no size cap on WebSocket
+  messages.
 
 Compaction preserves the final summary across multiple output blocks and
 reports incomplete or empty summaries as failures, so clients can retain their
@@ -1209,6 +1210,15 @@ the current `nginx/sites-available/public-domain.conf.template`, which allows
 normal Responses POSTs and allows GET only when `Upgrade: websocket` is
 present. Expected probes are application `401` without a credential and `101`
 with a valid inference-capable credential.
+
+### Codex retries `Connection reset without closing handshake`, then uses HTTP
+
+Before v6.7.3, Bun's default 16 MiB WebSocket message limit still applied.
+Long Codex chats, especially right after one is resumed, can send a larger
+`response.create` message. Bun closed those connections with code 1006 before
+the gateway saw the request, so Codex retried five times and switched that
+session to HTTP. Windows clients can report the same failure as `os error
+10054`. Version 6.7.3 sets Bun's largest message size, removing that cap.
 
 ### Claude Code reports `Connection closed mid-response`
 
