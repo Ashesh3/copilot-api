@@ -125,6 +125,10 @@ message.
 - Stores per-model settings for supported/default reasoning efforts, virtual
   model visibility, implicit defaults, assistant-prefill behavior, selected
   unsupported request parameters, and Sentry model names.
+- Treats every version of Claude Opus, Sonnet, Haiku, and Fable as rejecting
+  assistant prefill unless that model's setting allows it. When the gateway
+  sends one of these models a Chat Completions request that ends with an
+  assistant message, it sends that message as a user message.
 - Applies literal or regular-expression replacements to message text on Chat
   Completions and the translated Messages and Google paths. Replacements do not
   rewrite arbitrary request fields or direct Responses payloads.
