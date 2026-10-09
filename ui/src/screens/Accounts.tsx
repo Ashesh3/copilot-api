@@ -473,13 +473,13 @@ export default function AccountsScreen() {
                 endContent={
                   <HStack gap={2}>
                     {login.verificationUri ?
-                      <a
+                      <Button
+                        label="Open GitHub"
+                        variant="primary"
                         href={login.verificationUri}
                         target="_blank"
                         rel="noreferrer"
-                      >
-                        Open GitHub
-                      </a>
+                      />
                     : null}
                     <Button
                       label="Dismiss"
