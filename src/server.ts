@@ -192,9 +192,9 @@ server.get("/code", async (c) => {
   if (!adminSession) return c.redirect("/dashboard", 302)
   return c.redirect("/dashboard#environments")
 })
-// Desktop account discovery must precede the /api OAuth catch-all as well as
-// /wham's unsupported-cloud handler and the inference guards. These exact
-// routes authenticate enabled managed identities internally.
+// Desktop account discovery and inventory must precede the /api OAuth
+// catch-all as well as /wham's unsupported-cloud handler and the inference
+// guards. These exact routes authenticate enabled managed identities internally.
 server.route("", codexAccountRoutes)
 // OAuth fake layer — authorize, token exchange, profile
 server.route("/oauth", oauthBrowserRoutes)

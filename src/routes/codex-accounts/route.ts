@@ -16,9 +16,11 @@ const accountClaimsSchema = z.object({
   }),
 })
 
+type AccountClaims = z.infer<typeof accountClaimsSchema>[typeof AUTH_CLAIMS_KEY]
+
 // Authentication is the enabled managed digest, not this unsigned metadata.
 // Keep expiry/revocation semantics aligned with the existing refresh endpoint.
-function readAccountClaims(credential: string) {
+function readAccountClaims(credential: string): AccountClaims | null {
   if (!JWT_PATTERN.test(credential)) return null
   const payload = credential.split(".")[1]
   try {
@@ -40,7 +42,12 @@ function unauthorized(c: Context): Response {
   )
 }
 
-async function accountDiscovery(c: Context): Promise<Response> {
+// Returns the enabled managed identity's claims, or the response that ends the
+// request. Both account contracts share these method, credential, and
+// account-selector checks.
+async function authenticateAccountRequest(
+  c: Context,
+): Promise<AccountClaims | Response> {
   c.header("Cache-Control", "no-store")
   c.header("Pragma", "no-cache")
   // Hono dispatches HEAD through GET handlers, so check the original method.
@@ -59,9 +66,11 @@ async function accountDiscovery(c: Context): Promise<Response> {
 
   const claims = readAccountClaims(credential)
   if (claims === null) return unauthorized(c)
-  const accountId = claims.chatgpt_account_id
   const requestedAccountId = c.req.header("chatgpt-account-id")
-  if (requestedAccountId !== undefined && requestedAccountId !== accountId) {
+  if (
+    requestedAccountId !== undefined
+    && requestedAccountId !== claims.chatgpt_account_id
+  ) {
     return c.json(
       {
         error: {
@@ -72,24 +81,58 @@ async function accountDiscovery(c: Context): Promise<Response> {
       403,
     )
   }
+  return claims
+}
 
+// Both contracts describe the same personal membership. Personal structure
+// keeps Desktop out of workspace-only policy checks, and the routing sentinels
+// preserve the client's configured HTTPS backend instead of deriving routing
+// from untrusted Host headers or redirecting its bearer.
+function personalMembership(claims: AccountClaims) {
+  return {
+    account_user_id: claims.chatgpt_user_id,
+    account_user_role: "standard-user",
+    structure: "personal",
+    plan_type: claims.chatgpt_plan_type,
+    is_zdr: false,
+    is_openai_internal: false,
+    workspace_backend_origin: "NO_CONSTRAINT",
+    account_routing_override: "NO_CONSTRAINT",
+  }
+}
+
+async function accountDirectory(c: Context): Promise<Response> {
+  const claims = await authenticateAccountRequest(c)
+  if (claims instanceof Response) return claims
+  const accountId = claims.chatgpt_account_id
   return c.json({
-    accounts: [
-      {
-        id: accountId,
-        account_user_id: claims.chatgpt_user_id,
-        account_user_role: "standard-user",
-        structure: "personal",
-        plan_type: claims.chatgpt_plan_type,
-        is_zdr: false,
-        is_openai_internal: false,
-        // Preserve the client's configured HTTPS backend instead of deriving
-        // routing from untrusted Host headers or redirecting its bearer.
-        workspace_backend_origin: "NO_CONSTRAINT",
-        account_routing_override: "NO_CONSTRAINT",
-      },
-    ],
+    accounts: [{ id: accountId, ...personalMembership(claims) }],
     default_account_id: accountId,
+    account_ordering: [accountId],
+  })
+}
+
+// ChatGPT's versioned account check, keyed by account ID. Desktop 26.1002
+// reads the account structure from it before Codex Home may send; when the
+// read fails, the workspace-policy gate reports "Couldn't load workspace
+// settings" and blocks the composer.
+async function accountInventory(c: Context): Promise<Response> {
+  const claims = await authenticateAccountRequest(c)
+  if (claims instanceof Response) return claims
+  const accountId = claims.chatgpt_account_id
+  return c.json({
+    accounts: {
+      [accountId]: {
+        account: {
+          account_id: accountId,
+          ...personalMembership(claims),
+          is_deactivated: false,
+        },
+        features: [],
+        can_access_with_session: true,
+        sso_connection_name: null,
+      },
+    },
     account_ordering: [accountId],
   })
 }
@@ -101,5 +144,12 @@ for (const path of [
   "/wham/accounts/check",
   "/backend-api/wham/accounts/check",
 ]) {
-  codexAccountRoutes.all(path, accountDiscovery)
+  codexAccountRoutes.all(path, accountDirectory)
+}
+
+for (const path of [
+  "/accounts/check/v4-2023-04-27",
+  "/backend-api/accounts/check/v4-2023-04-27",
+]) {
+  codexAccountRoutes.all(path, accountInventory)
 }

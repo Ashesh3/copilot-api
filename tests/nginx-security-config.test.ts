@@ -157,6 +157,8 @@ test.each([
       "/api/codex/accounts/check",
       "/wham/accounts/check",
       "/backend-api/wham/accounts/check",
+      "/accounts/check/v4-2023-04-27",
+      "/backend-api/accounts/check/v4-2023-04-27",
     ]) {
       const location = template.match(
         new RegExp(`location = ${route} \\{([\\s\\S]*?)\\n {2}\\}`),
@@ -174,7 +176,7 @@ test.each([
       expect(location).not.toContain("proxy_set_header Authorization")
     }
     expect(template).not.toMatch(
-      /location (?:\^~ )?\/(?:api\/codex|wham|backend-api\/wham)\//,
+      /location (?:\^~ )?\/(?:api\/codex|wham|backend-api\/wham|accounts|backend-api\/accounts)\//,
     )
     expect(template).toContain("location / { return 404; }")
   },

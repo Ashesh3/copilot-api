@@ -34,6 +34,11 @@ publishes these exact authenticated GET routes:
 - `/api/codex/accounts/check` for a root-origin `chatgpt_base_url`.
 - `/wham/accounts/check` for Desktop's account-directory request.
 - `/backend-api/wham/accounts/check` for an explicit `/backend-api` base prefix.
+- `/accounts/check/v4-2023-04-27` for ChatGPT's versioned account inventory,
+  which Desktop `26.1002.52244` reads to classify the account before Codex can
+  send.
+- `/backend-api/accounts/check/v4-2023-04-27` for the inventory with an explicit
+  `/backend-api` base prefix.
 
 An enabled managed bearer receives only its own account and user IDs, plan,
 personal-account metadata, and both `workspace_backend_origin` and
@@ -43,6 +48,9 @@ do not enumerate registered identities or grant hosted Work access. A supplied
 `ChatGPT-Account-ID` must match the authenticated token. Missing, invalid, or
 disabled credentials receive `401`; a conflicting account header receives `403`.
 Generic gateway/API keys are not substitutes for this managed identity.
+The inventory routes return the same membership in ChatGPT's keyed `accounts`
+map with `account_ordering`. Desktop treats an unclassified account as a
+workspace-policy failure, so these routes are what keep the Codex composer open.
 
 ## 1. Deploy the gateway and edge route
 
@@ -292,6 +300,13 @@ Codex Desktop only after the intended `auth.json` is in place.
   `Workspace routing is unavailable` on subsequent requests can be a consequence
   of this failure. API-key auth skips discovery, so a successful API-key login
   does not validate the managed-auth route.
+- **Codex shows "Couldn't load workspace settings / Retry to continue
+  chatting" and will not send (Desktop `26.1002.52244` and later):** Desktop
+  could not read `/accounts/check/v4-2023-04-27`, so it cannot tell that the
+  managed identity is a personal account. Deploy the application revision and
+  both exact inventory locations above. An HTML `404` with a bearer present
+  means the Nginx location is missing. Retrying in the client cannot work around
+  the missing route.
 - **Desktop opens only Work, reports no access, and cannot switch to Codex:**
   separately check the generated token's positive integer `exp`. An older token
   without it fails Desktop's identity parser even if workspace routing succeeds.

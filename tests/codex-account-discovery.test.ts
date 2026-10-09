@@ -14,11 +14,19 @@ import {
 
 useProtocolDatabase()
 
-const PATHS = [
+// Directory routes serve Desktop's routing/account-directory contract.
+const DIRECTORY_PATHS = [
   "/api/codex/accounts/check",
   "/wham/accounts/check",
   "/backend-api/wham/accounts/check",
 ]
+// Inventory routes serve ChatGPT's versioned account check, which Desktop
+// 26.1002 reads before it lets the Codex composer send.
+const INVENTORY_PATHS = [
+  "/accounts/check/v4-2023-04-27",
+  "/backend-api/accounts/check/v4-2023-04-27",
+]
+const PATHS = [...DIRECTORY_PATHS, ...INVENTORY_PATHS]
 const originalApiKeyAuth = state.apiKeyAuth
 
 function encodeJson(value: unknown): string {
@@ -68,7 +76,7 @@ afterAll(() => {
   state.apiKeyAuth = originalApiKeyAuth
 })
 
-test.each(PATHS)(
+test.each(DIRECTORY_PATHS)(
   "discovers only the authenticated local account at %s",
   async (path) => {
     const jwt = createJwt()
@@ -101,6 +109,49 @@ test.each(PATHS)(
         },
       ],
       default_account_id: "local-account",
+      account_ordering: ["local-account"],
+    })
+  },
+)
+
+test.each(INVENTORY_PATHS)(
+  "returns only the authenticated personal account inventory at %s",
+  async (path) => {
+    const jwt = createJwt({ chatgpt_plan_type: "pro" })
+    await registerJwt(jwt)
+    await registerJwt(createJwt({ chatgpt_account_id: "other-account" }))
+    state.apiKeyAuth = "unrelated-gateway-key"
+
+    const response = await request(`${path}?account_id=other-account`, jwt, {
+      "chatgpt-account-id": "local-account",
+      host: "untrusted.example",
+      "x-forwarded-host": "untrusted.example",
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type")).toContain("application/json")
+    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(response.headers.get("pragma")).toBe("no-cache")
+    expect(await response.json()).toEqual({
+      accounts: {
+        "local-account": {
+          account: {
+            account_id: "local-account",
+            account_user_id: "local-member",
+            account_user_role: "standard-user",
+            structure: "personal",
+            plan_type: "pro",
+            is_zdr: false,
+            is_openai_internal: false,
+            is_deactivated: false,
+            workspace_backend_origin: "NO_CONSTRAINT",
+            account_routing_override: "NO_CONSTRAINT",
+          },
+          features: [],
+          can_access_with_session: true,
+          sso_connection_name: null,
+        },
+      },
       account_ordering: ["local-account"],
     })
   },
@@ -150,7 +201,7 @@ test.each(PATHS)(
 test("discovery follows managed credential revocation and deletion", async () => {
   const jwt = createJwt()
   const entry = await registerJwt(jwt)
-  expect((await request(PATHS[0], jwt)).status).toBe(200)
+  for (const path of PATHS) expect((await request(path, jwt)).status).toBe(200)
   await trustedJwtDigestStore.setEnabled(entry.id, false)
   for (const path of PATHS) expect((await request(path, jwt)).status).toBe(401)
   await trustedJwtDigestStore.setEnabled(entry.id, true)
@@ -205,9 +256,11 @@ test.each([
   async (claims) => {
     const jwt = createJwt(claims)
     await registerJwt(jwt)
-    const response = await request(PATHS[0], jwt)
-    expect(response.status).toBe(401)
-    expect(await response.text()).not.toContain("local-account")
+    for (const path of PATHS) {
+      const response = await request(path, jwt)
+      expect(response.status).toBe(401)
+      expect(await response.text()).not.toContain("local-account")
+    }
   },
 )
 
@@ -280,4 +333,20 @@ test("does not turn account discovery into support for Codex cloud tasks", async
   expect(await response.json()).toEqual({
     error: { message: "Unsupported Codex cloud endpoint", type: "not_found" },
   })
+})
+
+test("publishes only the account inventory version Desktop requests", async () => {
+  const jwt = createJwt()
+  await registerJwt(jwt)
+  await seedProtocolDatabase({ gatewayKeys: [jwt] })
+  for (const path of [
+    "/accounts/check",
+    "/accounts/check/v1",
+    "/backend-api/accounts/check/v5-2026-01-01",
+    "/accounts/local-account/settings",
+  ]) {
+    const response = await request(path, jwt)
+    expect(response.status).toBe(404)
+    expect(await response.text()).not.toContain("local-member")
+  }
 })

@@ -153,6 +153,8 @@ const discoveryRoutes = [
   "/api/codex/accounts/check",
   "/wham/accounts/check",
   "/backend-api/wham/accounts/check",
+  "/accounts/check/v4-2023-04-27",
+  "/backend-api/accounts/check/v4-2023-04-27",
 ]
 
 for (const host of ["localhost", "codex.test"]) {
@@ -209,6 +211,11 @@ for (const host of ["localhost", "codex.test"]) {
     "/api/codex/accounts/other",
     "/wham/accounts/other",
     "/backend-api/wham/accounts/other",
+    "/accounts/check",
+    "/backend-api/accounts/check",
+    "/accounts/check/v1",
+    "/accounts/routing-account/settings",
+    "/backend-api/accounts/routing-account/settings",
     "/api/codex/tasks/list",
     "/wham/tasks/list",
     "/backend-api/wham/tasks/list",
