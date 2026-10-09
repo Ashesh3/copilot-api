@@ -3,9 +3,11 @@ import { afterEach, expect, test } from "bun:test"
 
 import {
   getConfig,
+  getImageRoutingModel,
   getPermissionReviewSettings,
   mergeConfigWithDefaults,
   setConfigForTest,
+  setImageRoutingModel,
   setPermissionReviewSettings,
   updateConfig,
   writeConfig,
@@ -161,6 +163,42 @@ test.each([
     expect(getConfig()).toEqual({ smallModel: "before" })
   },
 )
+
+test("image routing saves a trimmed model and clears back to automatic", async () => {
+  const db = await fixture()
+  await initializeStorageRuntime(db)
+  await writeConfig({ smallModel: "keep" })
+  expect(getImageRoutingModel()).toBeNull()
+
+  expect(await setImageRoutingModel("  gpt-image-2.5-sunburst  ")).toBe(
+    "gpt-image-2.5-sunburst",
+  )
+  expect(getConfig()).toEqual({
+    smallModel: "keep",
+    imageRoutingModel: "gpt-image-2.5-sunburst",
+  })
+  expect(getImageRoutingModel()).toBe("gpt-image-2.5-sunburst")
+
+  expect(await setImageRoutingModel("   ")).toBeNull()
+  expect(getConfig()).toEqual({ smallModel: "keep" })
+  expect(getImageRoutingModel()).toBeNull()
+})
+
+test.each([
+  { imageRoutingModel: 1 },
+  { imageRoutingModel: "" },
+  { imageRoutingModel: "   " },
+  { imageRoutingModel: "image-model\n" },
+  { imageRoutingModel: "x".repeat(257) },
+])("malformed image routing config %p is rejected", async (invalid) => {
+  const db = await fixture()
+  await initializeStorageRuntime(db)
+  await writeConfig({ smallModel: "before" })
+  await expect(
+    writeConfig(invalid as unknown as AppConfig),
+  ).rejects.toBeInstanceOf(StorageSchemaError)
+  expect(getConfig()).toEqual({ smallModel: "before" })
+})
 
 test("explicit test config remains isolated and clearing it restores storage authority", async () => {
   setConfigForTest({ smallModel: "test-only" })

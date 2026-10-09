@@ -48,7 +48,6 @@ import {
   handleOverview,
   handleSetFlag,
   handleSetIpAllowlistEntry,
-  handleSetCodexCleanupModel,
   handleSetModelSettings,
   handleSetModelRouting,
   handleSetStatsigOverride,
@@ -64,12 +63,14 @@ import {
   dashboardAuthRoutes,
   getRefreshedSessionCookieHeaders,
 } from "./auth-route"
+import { handleSetCodexCleanupModel } from "./codex-cleanup-settings"
 import {
   createDashboardCredentialRoutes,
   createDashboardProviderSecretRoutes,
 } from "./credentials"
 import { handleExportDatabase } from "./database-export"
 import { handleGetFallbacks, handleSetFallbacks } from "./fallbacks"
+import { handleSetImageRouting } from "./image-routing-settings"
 import { handleReplayLlmDebugLog } from "./llm-debug-replay"
 import { DASHBOARD_HTML } from "./page-generated"
 import { handleSetPermissionReview } from "./permission-review-settings"
@@ -239,3 +240,4 @@ dashboardRoutes.post(
   "/api/settings/codex-cleanup-model",
   handleSetCodexCleanupModel,
 )
+dashboardRoutes.post("/api/settings/image-routing", handleSetImageRouting)

@@ -25,6 +25,9 @@ const settings: SettingsData = {
   codexCleanupModelDefault: undefined,
   permissionReviewModel: "gpt-6-luna",
   permissionReviewAllowAll: false,
+  imageModels: [],
+  imageRoutingAutomaticModel: null,
+  imageRoutingModel: null,
   availableModels: [],
 }
 

@@ -28,16 +28,27 @@ export interface AppConfig {
   codexCleanupModel?: string
   permissionReviewModel?: string
   permissionReviewAllowAll?: boolean
+  /** Live image model that serves every image request; absent means automatic. */
+  imageRoutingModel?: string
 }
 
 export const DEFAULT_PERMISSION_REVIEW_MODEL = "gpt-6-luna"
 
-export function isValidPermissionReviewModel(value: unknown): value is string {
+function isValidModelSetting(value: unknown): value is string {
   return (
     typeof value === "string"
     && value.length <= 256
     && !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
   )
+}
+
+export function isValidPermissionReviewModel(value: unknown): value is string {
+  return isValidModelSetting(value)
+}
+
+/** Blank input is valid and means automatic image routing. */
+export function isValidImageRoutingModel(value: unknown): value is string {
+  return isValidModelSetting(value)
 }
 
 export interface CustomProviderModelConfig {
@@ -176,6 +187,12 @@ const appConfigSchema = z.looseObject({
     .refine(isValidPermissionReviewModel)
     .optional(),
   permissionReviewAllowAll: z.boolean().optional(),
+  imageRoutingModel: z
+    .string()
+    .refine(
+      (value) => isValidImageRoutingModel(value) && value.trim().length > 0,
+    )
+    .optional(),
 })
 
 export function validateAppConfigJson(value: unknown): JsonValue {
@@ -341,4 +358,22 @@ export async function setPermissionReviewSettings(settings: {
     }
   })
   return permissionReviewSettingsFromConfig(committed)
+}
+
+export function getImageRoutingModel(): string | null {
+  return getConfig().imageRoutingModel?.trim() || null
+}
+
+/** Saves the image routing model; null or blank restores automatic routing. */
+export async function setImageRoutingModel(
+  model: string | null,
+): Promise<string | null> {
+  if (model !== null && !isValidImageRoutingModel(model))
+    throw new StorageSchemaError("Invalid image routing model")
+  const committed = await updateConfig((config) => {
+    const { imageRoutingModel: _omit, ...rest } = config
+    const trimmed = model?.trim()
+    return trimmed ? { ...rest, imageRoutingModel: trimmed } : rest
+  })
+  return committed.imageRoutingModel ?? null
 }
