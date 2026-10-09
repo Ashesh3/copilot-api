@@ -793,6 +793,13 @@ set to `NO_CONSTRAINT` to preserve the configured HTTPS gateway. Without them,
 `account/read` can fail with `workspace routing discovery failed` even with a
 compatible token. API-key login skips that discovery step.
 
+Desktop `26.1002.52244` also reads ChatGPT's versioned account inventory at
+`/accounts/check/v4-2023-04-27` (or `/backend-api/accounts/check/v4-2023-04-27`
+with a `/backend-api` base). Deploy those exact authenticated GET handlers and
+Nginx locations too. They describe the same personal account. Without them,
+Desktop cannot classify the account, and Codex shows "Couldn't load workspace
+settings" and blocks sending.
+
 If an older generated identity is also missing `exp`, fully quit Desktop, rerun
 the updated script with the same identity inputs, register the new digest, and
 reopen Desktop. The script backs up the old auth file; no database or

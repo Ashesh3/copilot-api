@@ -106,14 +106,17 @@ routes:
 | `/api/codex/accounts/check` | Native account discovery when `chatgpt_base_url` is an origin |
 | `/wham/accounts/check` | Desktop account-directory reads |
 | `/backend-api/wham/accounts/check` | Discovery with an explicit `/backend-api` base prefix |
+| `/accounts/check/v4-2023-04-27` | Account inventory Desktop 26.1002+ needs before Codex can send |
+| `/backend-api/accounts/check/v4-2023-04-27` | Account inventory with an explicit `/backend-api` base prefix |
 
 These locations require an Authorization header, reject every non-GET method
 (including HEAD), and disable access logging. The application validates the enabled
 managed bearer and returns only its claimed account; a conflicting account header
 is rejected. Its no-store response includes workspace routing that retains the
 configured HTTPS backend. This supports local account discovery without granting
-hosted Work access. Keep surrounding `/api/codex/`, `/wham/`, and `/backend-api/`
-paths under the default denial; do not add a catch-all proxy for these families.
+hosted Work access. Keep surrounding `/api/codex/`, `/wham/`, `/accounts/`, and
+`/backend-api/` paths under the default denial; do not add a catch-all proxy for
+these families.
 Deploy the application handler and both required vhost locations together.
 
 The template's exact `/backend-api/aura/site_status` location is optional and is
