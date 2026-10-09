@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test"
 
 import type { Model } from "~/services/copilot/get-models"
 
+import { setImageRoutingModel } from "~/lib/config"
 import { getLlmDebugLog, listLlmDebugLogs } from "~/lib/llm-debug-log"
 import { state } from "~/lib/state"
 import {
@@ -77,6 +78,15 @@ const LISTED_CODEX_IMAGE_MODEL = {
   id: "gpt-image-2",
   name: "GPT Image 2",
   version: "gpt-image-2",
+} satisfies Model
+
+// A second live image model, listed ahead of the default fixture model.
+const FLARE_MODEL = {
+  ...IMAGE_MODEL,
+  capabilities: { ...IMAGE_MODEL.capabilities, family: "gpt-image-2.5-flare" },
+  id: "gpt-image-2.5-flare",
+  name: "GPT Image 2.5 Flare",
+  version: "gpt-image-2.5-flare",
 } satisfies Model
 
 const CHAT_MODEL = {
@@ -517,3 +527,129 @@ test.each<[string, Array<Model>, string]>([
     expect(decode(upstreamRequests[0]?.body)).toEqual(request)
   },
 )
+
+test.each([
+  [
+    "a generation naming another live model",
+    "/v1/images/generations",
+    { ...GENERATION_REQUEST, model: FLARE_MODEL.id },
+  ],
+  [
+    "Codex's gpt-image-2 generation",
+    "/v1/images/generations",
+    CODEX_GENERATION_REQUEST,
+  ],
+  ["Codex's gpt-image-2 edit", "/v1/images/edits", CODEX_EDIT_REQUEST],
+  [
+    "an edit naming another live model",
+    "/v1/images/edits",
+    { ...CODEX_EDIT_REQUEST, model: FLARE_MODEL.id },
+  ],
+] as const)(
+  "the dashboard's image model serves %s",
+  async (_case, path, request) => {
+    state.models = {
+      object: "list",
+      data: [FLARE_MODEL, IMAGE_MODEL, CHAT_MODEL],
+    }
+    await setImageRoutingModel(IMAGE_MODEL.id)
+
+    const response = await postImages(path, JSON.stringify(request))
+
+    expect(response.status).toBe(200)
+    expect(upstreamRequests).toHaveLength(1)
+    expect(upstreamRequests[0]?.path).toBe(path)
+    expect(new TextDecoder().decode(upstreamRequests[0]?.body)).toBe(
+      JSON.stringify({ ...request, model: IMAGE_MODEL.id }),
+    )
+  },
+)
+
+test("re-encodes a multipart edit for the dashboard's image model", async () => {
+  state.models = {
+    object: "list",
+    data: [FLARE_MODEL, IMAGE_MODEL, CHAT_MODEL],
+  }
+  await setImageRoutingModel(IMAGE_MODEL.id)
+  const multipart = multipartEdit({
+    model: FLARE_MODEL.id,
+    prompt: "Outline the circle.",
+  })
+
+  const response = await postImages("/v1/images/edits", multipart.bytes, {
+    "content-type": multipart.contentType,
+  })
+
+  expect(response.status).toBe(200)
+  const forwarded = upstreamRequests.at(0)
+  const contentType = forwarded?.contentType ?? ""
+  const boundaryPrefix = "multipart/form-data; boundary="
+  expect(contentType).toStartWith(boundaryPrefix)
+  const form = await Bun.readableStreamToFormData(
+    new Blob([new Uint8Array(forwarded?.body ?? [])]).stream(),
+    contentType.slice(boundaryPrefix.length),
+  )
+  expect(form.get("model")).toBe(IMAGE_MODEL.id)
+  expect(form.get("prompt")).toBe("Outline the circle.")
+})
+
+interface RoutingFallbackCase {
+  /** Model saved in dashboard settings. */
+  configured: string
+  data: Array<Model>
+  /** Model Copilot should receive. */
+  model: string
+  path: string
+  request: Record<string, unknown>
+}
+
+test.each<[string, RoutingFallbackCase]>([
+  [
+    "a saved model missing from the catalog leaves a named model alone",
+    {
+      configured: FLARE_MODEL.id,
+      data: [IMAGE_MODEL, CHAT_MODEL],
+      model: IMAGE_MODEL.id,
+      path: "/v1/images/generations",
+      request: GENERATION_REQUEST,
+    },
+  ],
+  [
+    "a saved model missing from the catalog leaves Codex on the first live model",
+    {
+      configured: FLARE_MODEL.id,
+      data: [IMAGE_MODEL, CHAT_MODEL],
+      model: IMAGE_MODEL.id,
+      path: "/v1/images/generations",
+      request: CODEX_GENERATION_REQUEST,
+    },
+  ],
+  [
+    "a generation-only saved model still serves generations",
+    {
+      configured: GENERATION_ONLY_MODEL.id,
+      data: [GENERATION_ONLY_MODEL, IMAGE_MODEL],
+      model: GENERATION_ONLY_MODEL.id,
+      path: "/v1/images/generations",
+      request: CODEX_GENERATION_REQUEST,
+    },
+  ],
+  [
+    "a generation-only saved model leaves edits to automatic routing",
+    {
+      configured: GENERATION_ONLY_MODEL.id,
+      data: [GENERATION_ONLY_MODEL, IMAGE_MODEL],
+      model: IMAGE_MODEL.id,
+      path: "/v1/images/edits",
+      request: CODEX_EDIT_REQUEST,
+    },
+  ],
+])("%s", async (_case, { configured, data, model, path, request }) => {
+  state.models = { object: "list", data }
+  await setImageRoutingModel(configured)
+
+  const response = await postImages(path, JSON.stringify(request))
+
+  expect(response.status).toBe(200)
+  expect(decode(upstreamRequests[0]?.body)).toEqual({ ...request, model })
+})

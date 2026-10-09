@@ -515,7 +515,24 @@ export interface PermissionReviewSettingsData {
   permissionReviewAllowAll: boolean
 }
 
-export interface SettingsData extends PermissionReviewSettingsData {
+export interface ImageModelOption {
+  endpoints: Array<string>
+  id: string
+  name: string
+}
+
+export interface ImageRoutingSettingsData {
+  /** Live models that advertise an Images route, in catalog order. */
+  imageModels: Array<ImageModelOption>
+  /** What automatic routing currently gives Codex's image generations. */
+  imageRoutingAutomaticModel: string | null
+  /** The model that serves every image request; null means automatic. */
+  imageRoutingModel: string | null
+}
+
+export interface SettingsData
+  extends PermissionReviewSettingsData,
+    ImageRoutingSettingsData {
   version: string
   port: string
   host: string

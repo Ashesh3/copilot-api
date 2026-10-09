@@ -21,6 +21,7 @@ import {
   TogglePill,
 } from "../components/common"
 import { DatabaseExport } from "../components/DatabaseExport"
+import { ImageRoutingSettings } from "../components/ImageRoutingSettings"
 import { Page } from "../components/Page"
 import { PermissionReviewSettings } from "../components/PermissionReviewSettings"
 import { StoredCredentials } from "../components/StoredCredentials"
@@ -427,7 +428,7 @@ export default function SettingsScreen() {
               aria-labelledby="settings-credentials-heading"
             >
               <Heading level={2} id="settings-credentials-heading">
-                Credentials &amp; speech
+                Credentials &amp; models
               </Heading>
               <StoredCredentials />
               <Card className="settings-card">
@@ -453,6 +454,11 @@ export default function SettingsScreen() {
                   </HStack>
                 </VStack>
               </Card>
+              <ImageRoutingSettings
+                key={data.settings.imageRoutingModel ?? "automatic"}
+                settings={data.settings}
+                onSaved={reload}
+              />
             </section>
 
             <section

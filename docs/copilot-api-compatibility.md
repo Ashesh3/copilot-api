@@ -102,14 +102,18 @@ with non-blank `type` and unique non-blank `name` values. Image edits accept
 JSON or `multipart/form-data`; any other content type receives a local `400`.
 Failures return a local `400` naming the field. Multipart uploads are parsed
 only to read `model` and are forwarded byte for byte with their original
-boundary. JSON fields are forwarded unchanged. The one exception is the OpenAI
-image model name that Codex's built-in image tool always requests, which
-Copilot does not serve: while no live catalog lists that name, an image request
-naming it resolves to the first live model that advertises the requested route.
-Only the JSON `model` value changes; a multipart edit is re-encoded under a new
-boundary with the new `model` part, keeping each upload's bytes, file name, and
-type. Request logs show both names. The upstream service validates prompts,
-image references, options, streaming, and its edit size limit.
+boundary. JSON fields are forwarded unchanged. The exception is image model
+routing, which only ever changes `model`. An image model chosen in dashboard
+settings serves every image request while a live catalog lists it with the
+requested route. Otherwise routing is automatic: requests keep their model,
+except that the OpenAI image model name Codex's built-in image tool always
+requests, which Copilot does not serve, resolves to the first live model that
+advertises the requested route while no live catalog lists that name. A routed
+JSON request changes only its `model` value; a routed multipart edit is
+re-encoded under a new boundary with the new `model` part, keeping each
+upload's bytes, file name, and type. Request logs show both names. The upstream
+service validates prompts, image references, options, streaming, and its edit
+size limit.
 
 Endpoint authority follows live metadata. When the selected account's model
 record omits the requested route from `supported_endpoints`, the gateway returns

@@ -26,6 +26,20 @@ const settingsBundle = {
     codexCleanupModelDefault: undefined,
     permissionReviewModel: "gpt-6-luna",
     permissionReviewAllowAll: false,
+    imageModels: [
+      {
+        endpoints: ["/v1/images/generations", "/v1/images/edits"],
+        id: "gpt-image-2.5-flare",
+        name: "GPT Image 2.5 Flare",
+      },
+      {
+        endpoints: ["/v1/images/generations", "/v1/images/edits"],
+        id: "gpt-image-2.5-sunburst",
+        name: "GPT Image 2.5 Sunburst",
+      },
+    ],
+    imageRoutingAutomaticModel: "gpt-image-2.5-flare",
+    imageRoutingModel: null,
     availableModels: [],
   },
   allowlist: [
@@ -72,6 +86,9 @@ await mock.module("../ui/src/lib/toast", () => ({
 const { default: SettingsScreen } = await import("../ui/src/screens/Settings")
 const { PermissionReviewSettings } = await import(
   "../ui/src/components/PermissionReviewSettings"
+)
+const { ImageRoutingSettings, imageRoutingOptions } = await import(
+  "../ui/src/components/ImageRoutingSettings"
 )
 
 function renderSettings(): string {
@@ -174,4 +191,44 @@ test("individual IP removal has no confirmation dialog", () => {
   expect(markup).toContain("Clear IP allowlist")
   expect(markup).toContain("Delete trusted JWT digest")
   expect(markup.match(/role="alertdialog"/g)).toHaveLength(2)
+})
+
+test("image generation offers automatic routing and each live image model", () => {
+  const markup = renderSettings()
+  const credentials = markup.slice(
+    markup.indexOf('aria-labelledby="settings-credentials-heading"'),
+    markup.indexOf('aria-labelledby="settings-access-heading"'),
+  )
+
+  expect(credentials).toContain("Image generation")
+  expect(credentials).toContain("Image model")
+  expect(credentials).toContain("Automatic (currently gpt-image-2.5-flare)")
+  expect(credentials).toContain("uses the first live image model")
+  expect(credentials).toContain("Save image model")
+  expect(imageRoutingOptions(settingsBundle.settings)).toEqual([
+    { value: "", label: "Automatic (currently gpt-image-2.5-flare)" },
+    { value: "gpt-image-2.5-flare", label: "gpt-image-2.5-flare" },
+    { value: "gpt-image-2.5-sunburst", label: "gpt-image-2.5-sunburst" },
+  ])
+})
+
+test("image generation keeps an unavailable saved model visible with a warning", () => {
+  const settings = {
+    imageModels: settingsBundle.settings.imageModels.slice(0, 1),
+    imageRoutingAutomaticModel: "gpt-image-2.5-flare",
+    imageRoutingModel: "gpt-image-retired",
+  }
+  const markup: string = renderToStaticMarkup(
+    createElement(ImageRoutingSettings, { settings, onSaved: () => {} }),
+  )
+  const options: Array<unknown> = imageRoutingOptions(settings)
+
+  expect(options.at(-1)).toEqual({
+    value: "gpt-image-retired",
+    label: "gpt-image-retired (unavailable)",
+  })
+  expect(markup).toContain("gpt-image-retired (unavailable)")
+  expect(markup).toContain("Every image request uses this model")
+  expect(markup).toContain("Saved image model is unavailable")
+  expect(markup).toContain("use automatic routing until it returns")
 })

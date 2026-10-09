@@ -5,6 +5,7 @@ import {
   createInvalidRequestError,
   forwardError,
 } from "~/lib/error"
+import { resolveImageModel, type ImageEndpoint } from "~/lib/image-routing"
 import {
   dispatchNativeCopilotRequest,
   isNonBlankString,
@@ -12,35 +13,14 @@ import {
   readJsonRequestModel,
 } from "~/lib/native-passthrough"
 import { readRequestJson } from "~/lib/request-json"
-import { state } from "~/lib/state"
 
 export const imageRoutes = new Hono()
-
-type ImageEndpoint = "/v1/images/edits" | "/v1/images/generations"
 
 interface ImageRequest {
   body: string | Uint8Array<ArrayBuffer>
   contentType: string
   model: string
   requestedModel: string
-}
-
-/** Codex's built-in image tool always requests this OpenAI model. */
-const CODEX_IMAGE_MODEL = "gpt-image-2"
-
-/**
- * Copilot does not serve `gpt-image-2`. While no live catalog lists it, the
- * name resolves to the first live model that advertises the requested route.
- * Every other name, including unavailable Copilot image models, is unchanged.
- */
-function resolveImageModel(model: string, endpoint: ImageEndpoint): string {
-  if (model !== CODEX_IMAGE_MODEL) return model
-  const catalog = state.models?.data ?? []
-  if (catalog.some((entry) => entry.id === model)) return model
-  return (
-    catalog.find((entry) => entry.supported_endpoints?.includes(endpoint))?.id
-    ?? model
-  )
 }
 
 async function readJsonImageRequest(
