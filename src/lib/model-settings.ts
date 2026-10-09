@@ -56,8 +56,11 @@ const DEFAULT_UNSUPPORTED_REQUEST_PARAMETERS: Record<
   "gpt-5.4-mini": ["temperature", "top_p"],
   "gpt-5.5": ["temperature", "top_p"],
 }
-const DEFAULT_UNSUPPORTED_ASSISTANT_PREFILL_MODELS = new Set([
-  "claude-opus-4.8",
+const NO_ASSISTANT_PREFILL_CLAUDE_FAMILIES = new Set([
+  "opus",
+  "sonnet",
+  "haiku",
+  "fable",
 ])
 const DELETE_BOOLEAN_MODEL_SETTING: Record<
   BooleanModelSetting,
@@ -449,5 +452,19 @@ export function modelSupportsAssistantPrefill(model: string): boolean {
   const configured = getModelSettings(model)?.supportsAssistantPrefill
   if (configured !== undefined) return configured
 
-  return !DEFAULT_UNSUPPORTED_ASSISTANT_PREFILL_MODELS.has(model)
+  return !isNoAssistantPrefillClaudeModel(model)
+}
+
+/**
+ * Claude Opus, Sonnet, Haiku, and Fable models default to no assistant
+ * prefill. Matching name tokens covers every version and naming style, such
+ * as "claude-opus-4.8-fast", "claude-3.5-sonnet", and
+ * "claude-haiku-4-5-20251001".
+ */
+function isNoAssistantPrefillClaudeModel(model: string): boolean {
+  const tokens = model.toLowerCase().split(/[^a-z\d]+/)
+  return (
+    tokens.includes("claude")
+    && tokens.some((token) => NO_ASSISTANT_PREFILL_CLAUDE_FAMILIES.has(token))
+  )
 }
