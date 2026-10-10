@@ -66,14 +66,17 @@ export const expandCompactionItems = (payload: ResponsesPayload): void => {
     const record = item as Record<string, unknown>
 
     // Convert only proxy-generated compaction items into plain messages.
-    // Native opaque items must be forwarded unchanged.
+    // Native opaque items must be forwarded unchanged. The summary is context
+    // for the model, so it is a user message, as in Codex's local compaction.
+    // After a mid-turn compaction it is the final input item, where an
+    // assistant message would become prefill on Anthropic Messages.
     if (record.type === "compaction") {
       const summary = extractCompactionSummary(record)
       if (!summary) return item
 
       return {
         type: "message",
-        role: "assistant",
+        role: "user",
         content: `[Previous conversation summary]\n${summary}`,
       } as ResponseInputItem
     }

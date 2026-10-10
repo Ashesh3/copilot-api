@@ -33,11 +33,10 @@ import {
   toDataUri,
 } from "~/lib/attachments"
 import { createEvaluatedTranslationCheck } from "~/lib/endpoint-routing"
-import {
-  getUnsupportedRequestParameters,
-  modelSupportsAssistantPrefill,
-} from "~/lib/model-settings"
+import { getUnsupportedRequestParameters } from "~/lib/model-settings"
+import { rewriteUnsupportedAnthropicPrefill } from "~/services/copilot/anthropic-prefill"
 import { addPromptCaching } from "~/services/copilot/copilot-client"
+import { rewriteUnsupportedAssistantPrefill } from "~/services/copilot/create-chat-completions"
 import {
   createHostedWebSearchTool,
   createWebSearchAnthropicTool,
@@ -287,17 +286,6 @@ function createCandidate<
   }
 }
 
-function rewriteAssistantPrefill(payload: ChatCompletionsPayload): void {
-  if (modelSupportsAssistantPrefill(payload.model)) return
-  const last = payload.messages.at(-1)
-  if (!last || last.role !== "assistant") return
-  payload.messages[payload.messages.length - 1] = {
-    role: "user",
-    content: last.content,
-    ...(last.name ? { name: last.name } : {}),
-  }
-}
-
 function normalizeNativeSchema(payload: ChatCompletionsPayload): void {
   if (payload.stream && !payload.stream_options) {
     payload.stream_options = { include_usage: true }
@@ -406,7 +394,7 @@ export async function prepareNativeChatCandidate(
     resolve: createAttachmentFetchResolver(),
   }
   if (options.applyCopilotSemantics !== false) {
-    rewriteAssistantPrefill(payload)
+    rewriteUnsupportedAssistantPrefill(payload)
     normalizeNativeSchema(payload)
     await normalizeNativeAttachments(
       payload,
@@ -1226,6 +1214,7 @@ async function adaptChatToMessages(
       { metadata: { user_id: source.user } }
     : {}),
   }
+  rewriteUnsupportedAnthropicPrefill(payload)
   if (
     source.max_completion_tokens !== undefined
     && source.max_tokens !== undefined

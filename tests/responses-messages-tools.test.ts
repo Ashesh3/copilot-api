@@ -9,11 +9,15 @@ import type {
   ResponsesPayload,
 } from "~/services/copilot/create-responses"
 
+import { setModelSettingsForTest } from "~/lib/model-settings"
 import {
   adaptResponsesToMessagesCandidate,
   anthropicResponseToResponsesResult,
 } from "~/routes/responses/messages-bridge"
 import { decodeAnthropicReasoningEnvelope } from "~/routes/responses/messages-reasoning-provenance"
+
+// The bridge reads model settings; these tests run without the storage runtime.
+setModelSettingsForTest([])
 
 function response(
   content: AnthropicResponse["content"],

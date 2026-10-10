@@ -36,6 +36,7 @@ import {
   createEndpointTranslationError,
 } from "~/lib/error"
 import { createNativeMessages } from "~/routes/messages/native-handler"
+import { rewriteUnsupportedAnthropicPrefill } from "~/services/copilot/anthropic-prefill"
 import { createWebSearchAnthropicTool } from "~/services/copilot/mcp-web-search"
 
 import type { ResponsesAttachmentCache } from "./attachment-cache"
@@ -630,6 +631,7 @@ export async function adaptResponsesToMessagesCandidate(options: {
       { metadata: { user_id: source.user } }
     : {}),
   }
+  rewriteUnsupportedAnthropicPrefill(payload)
   if (
     isRecord(source.text)
     && isRecord(source.text.format)
@@ -827,7 +829,7 @@ export async function responsesPayloadToAnthropic(
   )
   const hasMaxOutputTokens = Object.hasOwn(payload, "max_output_tokens")
 
-  return {
+  const anthropicPayload: AnthropicMessagesPayload = {
     model: payload.model,
     messages,
     ...(hasMaxOutputTokens ? { max_tokens: payload.max_output_tokens } : {}),
@@ -843,6 +845,8 @@ export async function responsesPayloadToAnthropic(
     ...parallelChoice,
     ...convertResponsesOutputConfig(payload),
   }
+  rewriteUnsupportedAnthropicPrefill(anthropicPayload)
+  return anthropicPayload
 }
 
 async function convertResponsesInput(

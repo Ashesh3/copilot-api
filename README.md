@@ -128,8 +128,9 @@ message.
   unsupported request parameters, and Sentry model names.
 - Treats every version of Claude Opus, Sonnet, Haiku, and Fable as rejecting
   assistant prefill unless that model's setting allows it. When the gateway
-  sends one of these models a Chat Completions request that ends with an
-  assistant message, it sends that message as a user message.
+  sends a Copilot request for one of these models that ends with an assistant
+  text message, it sends that message as a user message. Requests that clients
+  send directly to `/v1/messages` keep their messages unchanged.
 - Applies literal or regular-expression replacements to message text on Chat
   Completions and the translated Messages and Google paths. Replacements do not
   rewrite arbitrary request fields or direct Responses payloads.
