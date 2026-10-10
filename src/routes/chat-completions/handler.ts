@@ -41,6 +41,7 @@ import {
   isAbortError,
   isHTTPError,
 } from "~/lib/error"
+import { forceChatSystemPrompt } from "~/lib/forced-system-prompt"
 import {
   applyModelFallbackToPayload,
   getModelFallbackRedirect,
@@ -180,6 +181,12 @@ async function handleCompletionInner(
     await applyReplacementsToPayload(
       replacementSource as unknown as ChatCompletionsPayload,
     )
+  // After replacements, so the dashboard prompt is sent exactly as saved.
+  const forcedSystemPrompt = forceChatSystemPrompt(
+    replacedPayload,
+    requestedModel,
+  )
+  if (forcedSystemPrompt) recordNonDefaultBehavior(c, forcedSystemPrompt)
 
   const unnormalizedModel = replacedPayload.model
   let customReferenceBeforeCopilot = resolveCustomProviderModel({

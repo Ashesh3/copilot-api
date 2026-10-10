@@ -138,6 +138,8 @@ export interface ModelSetting {
   exposeVirtualReasoningModels?: boolean
   supportsAssistantPrefill?: boolean
   unsupportedRequestParameters?: Array<ModelRequestParameter>
+  forcedSystemPrompt?: string
+  clearOtherSystemPrompts?: boolean
 }
 
 export type CustomProviderModelKind = "chat" | "embedding"

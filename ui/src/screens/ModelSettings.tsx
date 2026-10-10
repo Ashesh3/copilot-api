@@ -4,12 +4,14 @@ import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
 import { Card } from "@astryxdesign/core/Card"
+import { CheckboxInput } from "@astryxdesign/core/CheckboxInput"
 import { FormLayout } from "@astryxdesign/core/FormLayout"
 import { Selector } from "@astryxdesign/core/Selector"
 import { Skeleton } from "@astryxdesign/core/Skeleton"
 import { HStack, VStack } from "@astryxdesign/core/Stack"
 import { pixel, proportional } from "@astryxdesign/core/Table"
 import { Heading, Text } from "@astryxdesign/core/Text"
+import { TextArea } from "@astryxdesign/core/TextArea"
 import { TextInput } from "@astryxdesign/core/TextInput"
 import {
   ToggleButton,
@@ -57,6 +59,8 @@ const OMIT_PARAM_OPTIONS: Array<ModelRequestParameter> = [
   "top_p",
 ]
 
+const PROMPT_PREVIEW_LENGTH = 240
+
 function effortLabel(effort: string): string {
   return effort === "xhigh" ? "XHigh" : (
       effort.charAt(0).toUpperCase() + effort.slice(1)
@@ -75,6 +79,13 @@ function fromTriState(value: TriState): boolean | null {
   return null
 }
 
+function promptPreview(prompt: string): string {
+  const text = prompt.replaceAll(/\s+/g, " ").trim()
+  return text.length > PROMPT_PREVIEW_LENGTH ?
+      `${text.slice(0, PROMPT_PREVIEW_LENGTH)}…`
+    : text
+}
+
 interface SettingFormState {
   model: string
   sentryModelName: string
@@ -84,6 +95,8 @@ interface SettingFormState {
   exposeVirtualReasoningModels: TriState
   supportsAssistantPrefill: TriState
   unsupportedRequestParameters: Array<ModelRequestParameter>
+  forcedSystemPrompt: string
+  clearOtherSystemPrompts: boolean
 }
 
 const EMPTY_SETTING_FORM: SettingFormState = {
@@ -95,9 +108,12 @@ const EMPTY_SETTING_FORM: SettingFormState = {
   exposeVirtualReasoningModels: "unset",
   supportsAssistantPrefill: "unset",
   unsupportedRequestParameters: [],
+  forcedSystemPrompt: "",
+  clearOtherSystemPrompts: false,
 }
 
 function toSettingBody(form: SettingFormState) {
+  const forcedSystemPrompt = form.forcedSystemPrompt.trim()
   return {
     model: form.model.trim(),
     sentryModelName: form.sentryModelName.trim() || null,
@@ -109,6 +125,9 @@ function toSettingBody(form: SettingFormState) {
     ),
     supportsAssistantPrefill: fromTriState(form.supportsAssistantPrefill),
     unsupportedRequestParameters: form.unsupportedRequestParameters,
+    forcedSystemPrompt: forcedSystemPrompt || null,
+    clearOtherSystemPrompts:
+      forcedSystemPrompt ? form.clearOtherSystemPrompts : null,
   }
 }
 
@@ -156,6 +175,8 @@ export default function ModelSettingsScreen() {
       ),
       supportsAssistantPrefill: toTriState(row.supportsAssistantPrefill),
       unsupportedRequestParameters: row.unsupportedRequestParameters ?? [],
+      forcedSystemPrompt: row.forcedSystemPrompt ?? "",
+      clearOtherSystemPrompts: row.clearOtherSystemPrompts === true,
     })
   }
 
@@ -300,6 +321,38 @@ export default function ModelSettingsScreen() {
       ),
     },
     {
+      key: "forcedSystemPrompt",
+      header: "System prompt",
+      width: proportional(2),
+      renderCell: (item) => {
+        if (!item.forcedSystemPrompt) {
+          return <Text color="secondary">—</Text>
+        }
+        return (
+          <VStack gap={1}>
+            <HStack gap={1}>
+              <Badge
+                variant={item.clearOtherSystemPrompts ? "warning" : "info"}
+                label={
+                  item.clearOtherSystemPrompts ? "Replaces others" : (
+                    "Added first"
+                  )
+                }
+              />
+            </HStack>
+            <Text
+              type="supporting"
+              color="secondary"
+              maxLines={2}
+              hasTruncateTooltip
+            >
+              {promptPreview(item.forcedSystemPrompt)}
+            </Text>
+          </VStack>
+        )
+      },
+    },
+    {
       key: "actions",
       header: "",
       width: pixel(88),
@@ -326,6 +379,8 @@ export default function ModelSettingsScreen() {
       ),
     },
   ]
+
+  const hasForcedSystemPrompt = form.forcedSystemPrompt.trim().length > 0
 
   return (
     <Page
@@ -492,6 +547,45 @@ export default function ModelSettingsScreen() {
                     ))}
                   </ToggleButtonGroup>
                 </VStack>
+                <Card variant="muted">
+                  <VStack gap={3}>
+                    <VStack gap={1}>
+                      <Heading level={4}>Forced system prompt</Heading>
+                      <Text color="secondary">
+                        Sent as the first system message on every request for
+                        this model ID.
+                      </Text>
+                    </VStack>
+                    <TextArea
+                      label="Forced system prompt"
+                      isLabelHidden
+                      value={form.forcedSystemPrompt}
+                      onChange={(value) =>
+                        setForm((f) => ({ ...f, forcedSystemPrompt: value }))
+                      }
+                      placeholder="Not set"
+                      rows={8}
+                      hasSpellCheck={false}
+                      width="100%"
+                    />
+                    <CheckboxInput
+                      label="Clear other system prompts"
+                      description="Remove the system and developer prompts sent by the client, so this is the only system prompt the model receives."
+                      value={
+                        hasForcedSystemPrompt && form.clearOtherSystemPrompts
+                      }
+                      onChange={(checked) =>
+                        setForm((f) => ({
+                          ...f,
+                          clearOtherSystemPrompts: checked,
+                        }))
+                      }
+                      isDisabled={!hasForcedSystemPrompt}
+                      disabledMessage="Enter a forced system prompt first."
+                      width="100%"
+                    />
+                  </VStack>
+                </Card>
               </FormLayout>
               <HStack gap={2} hAlign="end">
                 {editingModel ?

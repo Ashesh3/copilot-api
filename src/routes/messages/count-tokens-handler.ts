@@ -11,6 +11,7 @@ import {
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
 import { LocalHTTPError } from "~/lib/error"
+import { forceMessagesSystemPrompt } from "~/lib/forced-system-prompt"
 import {
   applyModelRedirect,
   formatModelRedirectResult,
@@ -90,6 +91,12 @@ export async function handleCountTokens(c: Context) {
     redirect.effort,
   )
   anthropicPayload.body.model = targetModel
+  // Count the system prompt that a request for this model would send.
+  const forcedSystemPrompt = forceMessagesSystemPrompt(
+    anthropicPayload.body,
+    requestedModel,
+  )
+  if (forcedSystemPrompt) recordNonDefaultBehavior(c, forcedSystemPrompt)
 
   setRequestContext(c, {
     requestedModel,

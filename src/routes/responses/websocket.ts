@@ -31,6 +31,7 @@ import {
   isHTTPError,
   reportHttpErrorForTransport,
 } from "~/lib/error"
+import { forceResponsesSystemPrompt } from "~/lib/forced-system-prompt"
 import {
   applyModelFallbackToPayload,
   getModelFallbackRedirect,
@@ -599,6 +600,14 @@ async function handleResponseCreate(
     )
     return
   }
+
+  // Each attempt starts from a fresh clone of the rehydrated turn. The stored
+  // snapshot keeps the forced prompt, and applying it again changes nothing.
+  const forcedSystemPrompt = forceResponsesSystemPrompt(
+    payload,
+    requestedModel ?? payload.model,
+  )
+  if (forcedSystemPrompt) reportNonDefaultBehavior(forcedSystemPrompt)
 
   const directCustom = prepareDirectCustomProviderTurn(payload)
   if (directCustom?.reference) {
