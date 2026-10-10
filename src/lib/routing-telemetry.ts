@@ -39,6 +39,7 @@ export type RoutingAssignmentReason =
   | "legacy"
   | "issuer"
   | "pinned"
+  | "inherited"
 export type RoutingBalanceStatus =
   | "not_applicable"
   | "insufficient_data"
@@ -258,6 +259,7 @@ const VALID_ASSIGNMENT_REASONS = new Set<RoutingAssignmentReason>([
   "legacy",
   "issuer",
   "pinned",
+  "inherited",
 ])
 const RETRY_REASONS = new Set<UpstreamSendReason>([
   "compatibility_retry",

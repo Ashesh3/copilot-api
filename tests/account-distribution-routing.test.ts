@@ -8,6 +8,7 @@ import type { Model } from "~/services/copilot/get-models"
 import {
   routedControlPlaneFetch,
   routedFetch,
+  runWithPinnedRoutedAccount,
   runWithRoutedModelSelection,
   selectRoutedModel,
 } from "~/lib/account-router"
@@ -20,6 +21,7 @@ import { mergeConfigWithDefaults } from "~/lib/config"
 import { GitHubDeviceLoginService } from "~/lib/github-device-login"
 import {
   installResponsesRoutingAffinity,
+  resolveRoutingAffinityFromHeaders,
   runWithRoutingAffinity,
 } from "~/lib/routing-affinity"
 import {
@@ -76,8 +78,8 @@ beforeEach(async () => {
       const second = input.token === "second"
       const models = [
         model("shared", second ? "/chat/completions" : "/responses"),
+        model(second ? "second-only" : "first-only"),
       ]
-      if (second) models.push(model("second-only"))
       return {
         persisted: {
           token: input.token,
@@ -247,11 +249,330 @@ test("Codex forks reuse the effective parent's permanent account", async () => {
   expect(child.accountPin?.accountId).toBe(ids[1])
 })
 
+interface CodexThread {
+  session: string
+  thread: string
+  forkedFrom?: string
+}
+
+/** Select an account for a turn shaped like Codex 0.160's Responses request. */
+function codexTurn(thread: CodexThread, modelId: string) {
+  return runWithRoutingAffinity(
+    resolveRoutingAffinityFromHeaders(
+      new Headers({ "session-id": thread.session, "thread-id": thread.thread }),
+    ),
+    () => {
+      installResponsesRoutingAffinity({
+        session_id: thread.session,
+        thread_id: thread.thread,
+        ...(thread.forkedFrom === undefined ?
+          {}
+        : {
+            "x-codex-turn-metadata": JSON.stringify({
+              forked_from_thread_id: thread.forkedFrom,
+            }),
+          }),
+      })
+      return selectRoutedModel(modelId)
+    },
+  )
+}
+
+const codexRoot = { session: "codex-root", thread: "codex-root" }
+const codexSubagent = { session: "codex-root", thread: "codex-subagent" }
+
+/** A third account with the first account's catalog: `shared` and `first-only`. */
+async function addFirstOnlyAccount(): Promise<number> {
+  const added = await accounts.create(
+    { token: "third" },
+    await createAccountMutationContext(
+      fixture.storage,
+      "account.create",
+      { token: "third" },
+      "owner:test",
+    ),
+  )
+  return added.value.id
+}
+
+/** A key whose equal-hash choice among `first-only` accounts differs from `other`'s. */
+function keyHashingAwayFrom(other: string, prefix: string) {
+  const candidates = tokenPool.getEligibleAccountsForModel("first-only")
+  const otherChoice = tokenPool.selectAccountBySession(candidates, other)?.id
+  for (let index = 0; index < 100; index++) {
+    const key = `${prefix}-${index}`
+    const choice = tokenPool.selectAccountBySession(candidates, key)?.id
+    if (choice !== undefined && choice !== otherChoice)
+      return { key, choice, otherChoice }
+  }
+  throw new Error("Missing synthetic affinity")
+}
+
+test("before percentages are saved, a subagent leaving its root's account hashes as its own thread", async () => {
+  await addFirstOnlyAccount()
+  expect(
+    (await codexTurn(codexRoot, "second-only")).accountPin?.accountId,
+  ).toBe(ids[1])
+  const subagent = keyHashingAwayFrom("codex-root", "codex-split")
+
+  const selected = await codexTurn(
+    { session: "codex-root", thread: subagent.key },
+    "first-only",
+  )
+
+  expect(selected.accountPin?.accountId).toBe(subagent.choice)
+})
+
+test("before percentages are saved, a fork of a conversation without an account keeps its previous placement", async () => {
+  await addFirstOnlyAccount()
+  const fork = keyHashingAwayFrom("dormant-parent", "codex-fork")
+
+  const selected = await codexTurn(
+    { session: fork.key, thread: fork.key, forkedFrom: "dormant-parent" },
+    "first-only",
+  )
+
+  expect(selected.accountPin?.accountId).toBe(fork.otherChoice)
+})
+
+test.each([
+  ["a fresh subagent", codexSubagent],
+  ["a forked subagent", { ...codexSubagent, forkedFrom: "codex-root" }],
+])(
+  "%s gets its own account when its session's account cannot serve its model",
+  async (_label, subagent) => {
+    await configure([50, 50])
+    expect(
+      (await codexTurn(codexRoot, "second-only")).accountPin?.accountId,
+    ).toBe(ids[1])
+
+    const selected = await codexTurn(subagent, "first-only")
+
+    expect(selected.accountPin?.accountId).toBe(ids[0])
+    const repository = createAccountDistributionRepository(fixture.storage)
+    expect(await repository.lookup("codex-subagent")).toBe(ids[0])
+    expect(await repository.lookup("codex-root")).toBe(ids[1])
+  },
+)
+
+test("a Codex subagent keeps its own account after its session's account gains the model", async () => {
+  await configure([50, 50])
+  await codexTurn(codexRoot, "second-only")
+  await codexTurn(codexSubagent, "first-only")
+  const sessionAccount = tokenPool
+    .getAllAccounts()
+    .find((account) => account.id === ids[1])
+  if (!sessionAccount) throw new Error("Missing session account")
+  sessionAccount.models.add("first-only")
+  sessionAccount.modelsData = [
+    ...sessionAccount.modelsData,
+    model("first-only"),
+  ]
+  tokenPool.rebuildModelIndex()
+
+  expect(
+    (await codexTurn(codexSubagent, "first-only")).accountPin?.accountId,
+  ).toBe(ids[0])
+})
+
+test("a Codex subagent shares its session's account whenever that account serves its model", async () => {
+  await configure([0, 100])
+  await codexTurn(codexRoot, "shared")
+  await configure([100, 0])
+
+  expect((await codexTurn(codexSubagent, "shared")).accountPin?.accountId).toBe(
+    ids[1],
+  )
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookup(
+      "codex-subagent",
+    ),
+  ).toBe(ids[1])
+})
+
+test("a Codex subagent does not leave an unavailable session account", async () => {
+  await configure([50, 50])
+  await codexTurn(codexRoot, "second-only")
+  const sessionAccount = tokenPool
+    .getAllAccounts()
+    .find((account) => account.id === ids[1])
+  if (!sessionAccount) throw new Error("Missing session account")
+  tokenPool.markUnhealthy(sessionAccount)
+
+  await expect(codexTurn(codexSubagent, "shared")).rejects.toMatchObject({
+    response: { status: 409 },
+  })
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookup(
+      "codex-subagent",
+    ),
+  ).toBeUndefined()
+})
+
+test("nested forks keep the account their parent split to", async () => {
+  await configure([50, 50])
+  await codexTurn(codexRoot, "second-only")
+  await codexTurn(codexSubagent, "first-only")
+  const fork = { session: "codex-root", thread: "codex-fork" }
+  await codexTurn({ ...fork, forkedFrom: "codex-subagent" }, "shared")
+
+  const nested = await codexTurn(
+    { session: "codex-root", thread: "codex-nested", forkedFrom: "codex-fork" },
+    "shared",
+  )
+
+  expect(nested.accountPin?.accountId).toBe(ids[0])
+})
+
+test("a user fork keeps its inherited account after its own subagent starts", async () => {
+  await configure([0, 100])
+  await codexTurn(codexRoot, "shared")
+  await configure([100, 0])
+  const fork = { session: "codex-fork", thread: "codex-fork" }
+  expect(
+    (await codexTurn({ ...fork, forkedFrom: "codex-root" }, "shared"))
+      .accountPin?.accountId,
+  ).toBe(ids[1])
+
+  await codexTurn({ session: "codex-fork", thread: "fork-subagent" }, "shared")
+
+  expect(
+    (await codexTurn({ ...fork, forkedFrom: "codex-root" }, "shared"))
+      .accountPin?.accountId,
+  ).toBe(ids[1])
+})
+
+test("a fork whose parent has no account of its own follows the agent session", async () => {
+  await configure([0, 100])
+  await codexTurn(codexRoot, "shared")
+  await configure([100, 0])
+
+  const fork = await codexTurn(
+    { session: "codex-root", thread: "codex-fork", forkedFrom: "unrouted" },
+    "shared",
+  )
+
+  expect(fork.accountPin?.accountId).toBe(ids[1])
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookup(
+      "unrouted",
+    ),
+  ).toBeUndefined()
+})
+
+test("a subagent of a root without an account records only its own thread", async () => {
+  await configure([50, 50])
+
+  expect((await codexTurn(codexSubagent, "shared")).accountPin?.accountId).toBe(
+    ids[0],
+  )
+
+  const repository = createAccountDistributionRepository(fixture.storage)
+  expect(await repository.lookup("codex-subagent")).toBe(ids[0])
+  expect(await repository.lookup("codex-root")).toBeUndefined()
+})
+
+test("a read-only subagent probe gives a pinned account the precedence admission gives it", async () => {
+  await configure([0, 100])
+  await codexTurn(codexRoot, "shared")
+  const pinnedSubagentTurn = (createAssignment: boolean) =>
+    runWithRoutingAffinity(
+      resolveRoutingAffinityFromHeaders(
+        new Headers({
+          "session-id": "codex-root",
+          "thread-id": "codex-subagent",
+        }),
+      ),
+      () =>
+        runWithPinnedRoutedAccount(ids[0], () =>
+          selectRoutedModel("shared", { createAssignment }),
+        ),
+    )
+  const repository = createAccountDistributionRepository(fixture.storage)
+
+  expect((await pinnedSubagentTurn(false)).accountPin?.accountId).toBe(ids[0])
+  expect(await repository.lookup("codex-subagent")).toBeUndefined()
+  expect((await pinnedSubagentTurn(true)).accountPin?.accountId).toBe(ids[0])
+  expect(await repository.lookup("codex-subagent")).toBe(ids[0])
+})
+
+test("a subagent account recorded during admission is reused by dispatch", async () => {
+  await configure([0, 100])
+  await codexTurn(codexRoot, "shared")
+  let authorization = ""
+  globalThis.fetch = (async (
+    _input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    authorization = new Headers(init?.headers).get("authorization") ?? ""
+    return Response.json({ ok: true })
+  }) as unknown as typeof fetch
+  // A concurrent turn of the same subagent records it on the other account
+  // after this turn has read the session's owner.
+  fixture.beforeNextTransaction(async (storage) => {
+    await createAccountDistributionRepository(storage).assign({
+      affinityKey: "codex-subagent",
+      modelId: "shared",
+      eligibleAccountIds: ids,
+      preferredAccountId: ids[0],
+      preferredReason: "pinned",
+    })
+  })
+
+  await runWithRoutingAffinity(
+    resolveRoutingAffinityFromHeaders(
+      new Headers({
+        "session-id": "codex-root",
+        "thread-id": "codex-subagent",
+      }),
+    ),
+    async () => {
+      const selection = await selectRoutedModel("shared")
+      expect(selection.accountPin?.accountId).toBe(ids[0])
+      const result = await runWithRoutedModelSelection(selection, () =>
+        routedFetch("/responses", { method: "POST" }, { modelId: "shared" }),
+      )
+      await result.response.body?.cancel()
+      expect(result.account?.id).toBe(ids[0])
+    },
+  )
+
+  expect(authorization).toBe("Bearer tid=first;exp=1900000000")
+})
+
 function controlPlane(key: string, path: string) {
   return runWithRoutingAffinity({ key, source: "copilot_session" }, () =>
     routedControlPlaneFetch({ path }),
   )
 }
+
+test("a Copilot session call from a subagent does not bind it before its model is known", async () => {
+  await configure([50, 50])
+  await codexTurn(codexRoot, "second-only")
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true })) as unknown as typeof fetch
+
+  const session = await runWithRoutingAffinity(
+    resolveRoutingAffinityFromHeaders(
+      new Headers({
+        "session-id": "codex-root",
+        "thread-id": "codex-subagent",
+      }),
+    ),
+    () => routedControlPlaneFetch({ path: "/models/session" }),
+  )
+  await session.response.body?.cancel()
+
+  expect(session.account?.id).toBe(ids[1])
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookup(
+      "codex-subagent",
+    ),
+  ).toBeUndefined()
+  expect(
+    (await codexTurn(codexSubagent, "first-only")).accountPin?.accountId,
+  ).toBe(ids[0])
+})
 
 test("session issuance reserves ownership before inference and policy calls do not assign", async () => {
   await configure([0, 100])

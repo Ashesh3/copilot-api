@@ -199,6 +199,15 @@ function getEffectiveAffinityKey(): string | undefined {
   return getRoutingAffinity()?.key ?? getClientSessionId()
 }
 
+/** Codex thread identities that refine the effective affinity key. */
+function getCodexThreadAffinityKeys() {
+  const affinity = getRoutingAffinity()
+  return {
+    threadAffinityKey: affinity?.threadKey,
+    sessionAffinityKey: affinity?.sessionKey,
+  }
+}
+
 function selectRoutedAccount(options: {
   affinityKey: string | undefined
   copilotSessionToken?: string
@@ -208,6 +217,7 @@ function selectRoutedAccount(options: {
 }) {
   return selectModelAccount({
     ...options,
+    ...getCodexThreadAffinityKeys(),
     pinnedAccountId: pinnedRoutedAccountStorage.getStore(),
     selectedAccountPin: selectedRoutedAccountStorage.getStore(),
   })
@@ -773,6 +783,8 @@ async function selectControlPlaneAccount(
 ) {
   return selectPersistentCandidateAccount({
     affinityKey: getEffectiveAffinityKey(),
+    ...getCodexThreadAffinityKeys(),
+    modelAgnostic: options.modelId === undefined,
     candidates,
     copilotSessionToken: options.copilotSessionToken,
     modelId: options.modelId ?? "control-plane",

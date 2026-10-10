@@ -345,6 +345,93 @@ test.each([
   },
 )
 
+test.each([
+  { label: "fresh", forkedFrom: undefined },
+  { label: "forked", forkedFrom: "codex-root-thread" },
+])(
+  "routes a $label Codex subagent to the account serving its model when the root's account cannot",
+  async ({ forkedFrom }) => {
+    registerAccount({
+      accountId: 52_401,
+      endpoints: ["/responses"],
+      modelId: "subagent-only-model",
+      token: "tid=subagent-account;exp=1900000000",
+    })
+    registerAccount({
+      accountId: 52_402,
+      endpoints: ["/responses"],
+      modelId: "root-only-model",
+      token: "tid=root-account;exp=1900000000",
+    })
+    tokenPool.rebuildModelIndex()
+    state.models = tokenPool.getAllModels()
+    // Codex 0.160 sends the agent tree's root thread as `session-id` and the
+    // requesting thread as `thread-id`, in headers and client metadata.
+    const turn = (
+      threadId: string,
+      model: string,
+      subagent?: Record<string, string>,
+    ) => {
+      const turnMetadata = JSON.stringify({
+        session_id: "codex-root-thread",
+        thread_id: threadId,
+        request_kind: "turn",
+        ...subagent,
+      })
+      return seedProtocolDatabase().then(() =>
+        server.request("/v1/responses", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${state.apiKeyAuth ?? PROTOCOL_GATEWAY_KEY}`,
+            "content-type": "application/json",
+            "session-id": "codex-root-thread",
+            "thread-id": threadId,
+            "x-codex-turn-metadata": turnMetadata,
+            ...(subagent && {
+              "x-codex-parent-thread-id": "codex-root-thread",
+              "x-openai-subagent": "collab_spawn",
+            }),
+          },
+          body: JSON.stringify({
+            model,
+            input: "hello",
+            client_metadata: {
+              session_id: "codex-root-thread",
+              thread_id: threadId,
+              "x-codex-turn-metadata": turnMetadata,
+            },
+          }),
+        }),
+      )
+    }
+
+    expect((await turn("codex-root-thread", "root-only-model")).status).toBe(
+      200,
+    )
+    const subagent = await turn(
+      "codex-subagent-thread",
+      "subagent-only-model",
+      {
+        parent_thread_id: "codex-root-thread",
+        subagent_kind: "thread_spawn",
+        ...(forkedFrom && { forked_from_thread_id: forkedFrom }),
+      },
+    )
+
+    expect(subagent.status).toBe(200)
+    expect(upstreamRequests).toEqual([
+      {
+        authorization: "Bearer tid=root-account;exp=1900000000",
+        path: "/responses",
+      },
+      {
+        authorization: "Bearer tid=subagent-account;exp=1900000000",
+        path: "/responses",
+      },
+    ])
+  },
+)
+
 test("preserves recorded session ownership when its account loses model eligibility", async () => {
   const modelId = "session-continuity-eligibility-change"
   const accountA = registerAccount({

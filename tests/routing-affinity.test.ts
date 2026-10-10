@@ -10,6 +10,7 @@ import {
   resolveResponsesRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
   runWithRoutingAffinity,
+  type RoutingAffinity,
 } from "~/lib/routing-affinity"
 
 test("resolves supported headers in protocol precedence order", () => {
@@ -36,6 +37,7 @@ test("resolves supported headers in protocol precedence order", () => {
   expect(resolveRoutingAffinityFromHeaders(headers)).toEqual({
     key: "codex",
     source: "codex_session",
+    threadKey: "thread",
   })
   headers.delete("session-id")
   expect(resolveRoutingAffinityFromHeaders(headers)).toEqual({
@@ -97,7 +99,11 @@ test("extracts Responses session then thread metadata best effort", () => {
       session_id: " response-session ",
       thread_id: "response-thread",
     }),
-  ).toEqual({ key: "response-session", source: "codex_metadata" })
+  ).toEqual({
+    key: "response-session",
+    source: "codex_metadata",
+    threadKey: "response-thread",
+  })
   expect(
     resolveResponsesRoutingAffinity(
       JSON.stringify({ session_id: " ", thread_id: " response-thread " }),
@@ -132,8 +138,133 @@ test("routes Codex forks with the parent thread before the child session", () =>
     expect(resolveResponsesRoutingAffinity(clientMetadata)).toEqual({
       key: "fork-parent",
       source: "codex_thread",
+      threadKey: "fork-child",
     })
   }
+})
+
+test("keeps a Codex subagent's own thread behind its agent-tree session", () => {
+  expect(
+    resolveRoutingAffinityFromHeaders(
+      new Headers({ "session-id": " root-thread ", "thread-id": " subagent " }),
+    ),
+  ).toEqual({
+    key: "root-thread",
+    source: "codex_session",
+    threadKey: "subagent",
+  })
+  expect(
+    resolveResponsesRoutingAffinity({
+      session_id: "root-thread",
+      thread_id: "subagent",
+    }),
+  ).toEqual({
+    key: "root-thread",
+    source: "codex_metadata",
+    threadKey: "subagent",
+  })
+  // A root thread is its own session, so it has no separate thread identity.
+  expect(
+    resolveRoutingAffinityFromHeaders(
+      new Headers({ "session-id": "root-thread", "thread-id": "root-thread" }),
+    ),
+  ).toEqual({ key: "root-thread", source: "codex_session" })
+})
+
+test("routes a fork inside an agent tree through its parent, then its session", () => {
+  const clientMetadata = {
+    session_id: "root-thread",
+    thread_id: "grandchild",
+    "x-codex-turn-metadata": JSON.stringify({
+      forked_from_thread_id: "child",
+    }),
+  }
+  const expected: RoutingAffinity = {
+    key: "child",
+    source: "codex_thread",
+    threadKey: "grandchild",
+    sessionKey: "root-thread",
+  }
+
+  expect(resolveResponsesRoutingAffinity(clientMetadata)).toEqual(expected)
+  runWithRoutingAffinity(
+    resolveRoutingAffinityFromHeaders(
+      new Headers({ "session-id": "root-thread", "thread-id": "grandchild" }),
+    ),
+    () => {
+      installResponsesRoutingAffinity(clientMetadata)
+      expect(getRoutingAffinity()).toEqual(expected)
+    },
+  )
+})
+
+test("keeps the header thread when fork metadata omits its thread", () => {
+  runWithRoutingAffinity(
+    resolveRoutingAffinityFromHeaders(
+      new Headers({ "session-id": "root-thread", "thread-id": "subagent" }),
+    ),
+    () => {
+      installResponsesRoutingAffinity({
+        session_id: "root-thread",
+        "x-codex-turn-metadata": JSON.stringify({
+          forked_from_thread_id: "fork-parent",
+        }),
+      })
+      expect(getRoutingAffinity()).toEqual({
+        key: "fork-parent",
+        source: "codex_thread",
+        threadKey: "subagent",
+        sessionKey: "root-thread",
+      })
+    },
+  )
+})
+
+test("ignores fork metadata for a different thread than the header's", () => {
+  const headerAffinity = resolveRoutingAffinityFromHeaders(
+    new Headers({ "session-id": "root-thread", "thread-id": "subagent" }),
+  )
+  runWithRoutingAffinity(headerAffinity, () => {
+    installResponsesRoutingAffinity({
+      session_id: "root-thread",
+      thread_id: "other-thread",
+      "x-codex-turn-metadata": JSON.stringify({
+        forked_from_thread_id: "fork-parent",
+      }),
+    })
+    expect(getRoutingAffinity()).toEqual({
+      key: "root-thread",
+      source: "codex_session",
+      threadKey: "subagent",
+    })
+  })
+})
+
+test("adds the metadata thread to a header session that omitted it", () => {
+  runWithRoutingAffinity(
+    { key: "root-thread", source: "codex_session" },
+    () => {
+      installResponsesRoutingAffinity({
+        session_id: "root-thread",
+        thread_id: "subagent",
+      })
+      expect(getRoutingAffinity()).toEqual({
+        key: "root-thread",
+        source: "codex_session",
+        threadKey: "subagent",
+      })
+    },
+  )
+  runWithRoutingAffinity({ key: "other", source: "codex_session" }, () => {
+    installResponsesRoutingAffinity({
+      session_id: "root-thread",
+      thread_id: "subagent",
+    })
+    expect(getRoutingAffinity()).toEqual({
+      key: "other",
+      source: "codex_session",
+    })
+  })
 })
 
 test("ignores malformed Codex fork metadata", () => {

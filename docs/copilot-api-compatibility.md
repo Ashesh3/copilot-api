@@ -526,6 +526,26 @@ is model-specific; ownership is model-independent. Endpoint fallback does not
 authorize moving encrypted or signed history to another account. Eligibility
 comes from the raw current model catalog plus operator routing policy.
 
+Codex sends an agent tree's root thread as `session-id` and the requesting
+thread as `thread-id`, in headers and `client_metadata`. A Codex subagent or
+fork owns an assignment under its `thread-id`, and a request records only its
+own thread. A `thread-id` header outranks body metadata: fork metadata naming a
+different thread is ignored, and fork metadata without `thread_id` keeps the
+header's thread. Its first assigning request inherits the owner of its fork
+parent, or else of the root, when that account serves the requested model,
+without consuming a scheduler turn. When that account is healthy but does not
+serve the model, or nothing is recorded yet, the thread receives an assignment
+chosen like a new conversation. Before percentages are saved, a thread leaving
+an inherited account hashes as its own `thread-id`, while one whose ancestry has
+no record keeps the inherited identity's earlier choice. Later turns and forks
+of the thread resolve through that record; a fresh subagent without
+`forked_from_thread_id` starts from its agent tree's root, which for a subagent
+of a user fork is that fork. A pin or recognized session issuer takes
+precedence over an inherited owner. Requests that name no model, such as
+Copilot session or Auto calls, use a thread's existing assignment but never
+start one. A disabled, deleting or unhealthy inherited account still rejects a
+thread that has no assignment of its own.
+
 In multi-account mode, affinity is necessary but not sufficient for session
 continuity. Account-binding control-plane calls and inference resolve or reserve
 the same durable owner before endpoint selection. A session token is forwarded only when

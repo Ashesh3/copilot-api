@@ -34,6 +34,7 @@ import {
 } from "../src/lib/request-session"
 import {
   getRoutingAffinity,
+  resolveRoutingAffinityFromHeaders,
   type RoutingAffinity,
 } from "../src/lib/routing-affinity"
 import {
@@ -390,7 +391,11 @@ describe("responses websocket upgrade handling", () => {
           "thread-id": "thread-loses",
         })
       )?.affinity,
-    ).toEqual({ key: "session-wins", source: "codex_session" })
+    ).toEqual({
+      key: "session-wins",
+      source: "codex_session",
+      threadKey: "thread-loses",
+    })
     expect((await upgrade({ "thread-id": "thread-wins" }))?.affinity).toEqual({
       key: "thread-wins",
       source: "codex_thread",
@@ -1761,6 +1766,7 @@ describe("responses websocket message handling", () => {
     expect(capturedAffinity).toEqual({
       key: "fork-parent-0",
       source: "codex_thread",
+      threadKey: "fork-child-1",
     })
     expect(capturedAuthorization).toEqual(["Bearer ws-fork-parent-token"])
     expect(capturedUpstreamHeaders[0]?.get("x-client-session-id")).toBe(
@@ -1796,6 +1802,43 @@ describe("responses websocket message handling", () => {
     ).toEqual([
       "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
       "81e3167a-de1a-5ffa-8c20-f832dc0e2909",
+    ])
+  })
+
+  test("routes a Codex subagent to its own account when the root's account lacks its model", async () => {
+    const rootAccount = tokenPool.addAccount(
+      "github-ws-subagent-root",
+      "individual",
+      webSocketAccountIds[0],
+    )
+    rootAccount.copilotToken = "ws-root-account-token"
+    rootAccount.healthy = true
+    rootAccount.models = new Set(["ws-root-only-model"])
+    rootAccount.modelsData = [createWebSocketModel("ws-root-only-model")]
+    const subagentAccount = tokenPool.addAccount(
+      "github-ws-subagent-own",
+      "individual",
+      webSocketAccountIds[1],
+    )
+    subagentAccount.copilotToken = "ws-subagent-account-token"
+    subagentAccount.healthy = true
+    subagentAccount.models = new Set(["ws-subagent-only-model"])
+    subagentAccount.modelsData = [
+      createWebSocketModel("ws-subagent-only-model"),
+    ]
+    tokenPool.rebuildModelIndex()
+    state.isMultiToken = true
+    queuedResponses.push(
+      createResponsesSseResponse("resp_ws_root_turn"),
+      createResponsesSseResponse("resp_ws_subagent_turn"),
+    )
+
+    await sendCodexWebSocketTurn("ws-codex-root", "ws-root-only-model")
+    await sendCodexWebSocketTurn("ws-codex-subagent", "ws-subagent-only-model")
+
+    expect(capturedAuthorization).toEqual([
+      "Bearer ws-root-account-token",
+      "Bearer ws-subagent-account-token",
     ])
   })
 
@@ -2141,6 +2184,7 @@ describe("responses websocket message handling", () => {
     expect(capturedAffinity).toEqual({
       key: firstAffinity,
       source: "codex_metadata",
+      threadKey: "original-thread",
     })
     expect(lastRequestBody).toMatchObject({
       model,
@@ -4987,6 +5031,25 @@ function findWebSocketAffinity(modelId: string, accountId: number): string {
   )
   if (!affinity) throw new TypeError("Expected WebSocket account affinity")
   return affinity
+}
+
+/** Each Codex thread opens its own socket with the root thread as `session-id`. */
+async function sendCodexWebSocketTurn(threadId: string, model: string) {
+  const ws = createTestWebSocket()
+  ws.data.affinity = resolveRoutingAffinityFromHeaders(
+    new Headers({ "session-id": "ws-codex-root", "thread-id": threadId }),
+  )
+  await seedProtocolDatabase().then(() =>
+    responsesWebSocket.message(
+      ws,
+      JSON.stringify({
+        type: "response.create",
+        model,
+        input: "hello",
+        client_metadata: { session_id: "ws-codex-root", thread_id: threadId },
+      }),
+    ),
+  )
 }
 
 function createTestWebSocket(data?: ResponsesWebSocketData): {
