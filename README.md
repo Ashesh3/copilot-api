@@ -123,10 +123,10 @@ message.
 - Normalizes supported Claude dotted/dashed names and eligible `[1m]` aliases.
 - Applies ordered, exact-match model redirects with optional source and target
   reasoning efforts, chaining, loop detection, and priority control.
-- Stores per-model settings for supported/default reasoning efforts, virtual
-  model visibility, implicit defaults, assistant-prefill behavior, selected
-  unsupported request parameters, Sentry model names, and forced system
-  prompts.
+- Stores per-model settings for supported/default or omitted reasoning
+  efforts, virtual model visibility, implicit defaults, assistant-prefill
+  behavior, selected unsupported request parameters, Sentry model names, and
+  forced system prompts.
 - Treats every version of Claude Opus, Sonnet, Haiku, and Fable as rejecting
   assistant prefill unless that model's setting allows it. When the gateway
   sends a Copilot request for one of these models that ends with an assistant
@@ -138,6 +138,12 @@ message.
   redirect or fallback serves with another model. With **Clear other system
   prompts**, the client's own system and developer prompts are removed. Claude
   permission-review classifier requests keep their own prompt.
+- Sends no reasoning effort to a model whose Supported efforts setting is
+  **Omit**. Copilot and custom-provider requests for that model drop Messages
+  `output_config.effort` (and an `output_config` left empty), Chat Completions
+  `reasoning_effort`, and Responses `reasoning.effort`, so the model applies
+  its own default. The gateway adds no reasoning defaults or effort variants
+  for it; `thinking`, `reasoning.summary`, and output formats pass through.
 - Applies literal or regular-expression replacements to message text on Chat
   Completions and the translated Messages and Google paths. Replacements do not
   rewrite arbitrary request fields or direct Responses payloads.

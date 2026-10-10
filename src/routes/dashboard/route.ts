@@ -20,7 +20,6 @@ import {
   handleDeleteFlag,
   handleDeleteIpAllowlistEntry,
   handleDeleteModelRedirect,
-  handleDeleteModelSettings,
   handleDeleteStatsigOverride,
   handleDeleteTrustedJwtDigest,
   handleDeleteReplacement,
@@ -39,7 +38,6 @@ import {
   handleListLlmDebugLogs,
   handleListModelRedirects,
   handleListModelRouting,
-  handleListModelSettings,
   handleListReplacements,
   handleListStatsigOverrides,
   handleListTrustedJwtDigests,
@@ -48,7 +46,6 @@ import {
   handleOverview,
   handleSetFlag,
   handleSetIpAllowlistEntry,
-  handleSetModelSettings,
   handleSetModelRouting,
   handleSetStatsigOverride,
   handleSetTrustedJwtDigestEnabled,
@@ -72,6 +69,11 @@ import { handleExportDatabase } from "./database-export"
 import { handleGetFallbacks, handleSetFallbacks } from "./fallbacks"
 import { handleSetImageRouting } from "./image-routing-settings"
 import { handleReplayLlmDebugLog } from "./llm-debug-replay"
+import {
+  handleDeleteModelSettings,
+  handleListModelSettings,
+  handleSetModelSettings,
+} from "./model-settings"
 import { DASHBOARD_HTML } from "./page-generated"
 import { handleSetPermissionReview } from "./permission-review-settings"
 import { handleResetUsage } from "./usage-reset"

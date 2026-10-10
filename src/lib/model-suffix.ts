@@ -150,8 +150,11 @@ export function parseReasoningEffort(
 export function getModelReasoningConfig(
   model: string,
 ): ModelReasoningConfig | undefined {
-  const defaults = DEFAULT_MODEL_REASONING_CONFIG[model]
   const settings = getModelSettings(model)
+  // An omitted effort leaves the model no levels, default, or virtual variants.
+  if (settings?.omitReasoningEffort === true) return undefined
+
+  const defaults = DEFAULT_MODEL_REASONING_CONFIG[model]
   const upstream = getUpstreamReasoningConfig(model)
 
   if (!defaults && !settings && !upstream) return undefined

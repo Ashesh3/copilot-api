@@ -15,6 +15,7 @@ import {
 } from "~/lib/attachments"
 import { HTTPError } from "~/lib/error"
 import { modelSupportsAssistantPrefill } from "~/lib/model-settings"
+import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
 import { normalizeChatCompletionsRequest } from "~/routes/chat-completions/chat-contract"
 import {
   hasVisionContent,
@@ -606,6 +607,10 @@ async function createChatCompletionsCore(
       normalizedPayload.tools ?? undefined,
     )
   }
+  omitConfiguredReasoningEffort(
+    "chat",
+    normalizedPayload as unknown as Record<string, unknown>,
+  )
 
   const outboundPayload = prepareChatCompletionsPayload(
     normalizedPayload,
