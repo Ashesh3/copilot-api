@@ -1059,7 +1059,7 @@ describe("custom-provider models over the Responses WebSocket", () => {
     )
   })
 
-  test("buffers a model configured without streaming", async () => {
+  test("rejects a non-streaming model's WebSocket turn with 404 for HTTP fallback", async () => {
     configureCustomModels([
       {
         id: CUSTOM_MODEL,
@@ -1068,17 +1068,43 @@ describe("custom-provider models over the Responses WebSocket", () => {
         supportsStreaming: false,
       },
     ])
-    providerResponses.push(() => providerTextResponse("buffered answer"))
     const ws = await createSocket()
     await sendTurn(ws, { model: CUSTOM_ALIAS, input: "hello" })
 
-    expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
-    const [dispatched] = providerRequests()
-    expect(dispatched.body.stream).toBe(false)
-    expect(dispatched.body).not.toHaveProperty("stream_options")
-    expect(JSON.stringify(completedFrames(ws).at(-1)?.output)).toContain(
-      "buffered answer",
-    )
+    // No upstream call: the client must retry the request on its HTTP endpoint.
+    expect(providerRequests()).toEqual([])
+    expect(completedFrames(ws)).toEqual([])
+    expect(ws.sent.at(-1)).toMatchObject({
+      type: "error",
+      status: 404,
+      error: { code: "not_found", type: "not_found" },
+    })
+  })
+
+  test("rejects a non-streaming model's warmup turn with 404 too", async () => {
+    configureCustomModels([
+      {
+        id: CUSTOM_MODEL,
+        aliases: [CUSTOM_ALIAS],
+        kind: "chat",
+        supportsStreaming: false,
+      },
+    ])
+    const ws = await createSocket()
+    await sendTurn(ws, {
+      model: CUSTOM_ALIAS,
+      input: codexInput(),
+      tools: [],
+      generate: false,
+    })
+
+    expect(providerRequests()).toEqual([])
+    expect(completedFrames(ws)).toEqual([])
+    expect(ws.sent.at(-1)).toMatchObject({
+      type: "error",
+      status: 404,
+      error: { code: "not_found" },
+    })
   })
 
   test("drops stream options from any buffered provider request", async () => {

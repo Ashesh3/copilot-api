@@ -602,6 +602,20 @@ async function handleResponseCreate(
 
   const directCustom = prepareDirectCustomProviderTurn(payload)
   if (directCustom?.reference) {
+    // A custom model configured without streaming cannot be served as a live
+    // Responses stream, and buffering the whole completion then replaying it as
+    // one block makes Codex Desktop repaint the message. Reject the WebSocket
+    // turn with 404 so the client falls back to its Responses/Messages HTTP
+    // path, which renders a buffered completion cleanly.
+    if (directCustom.reference.model.supportsStreaming === false) {
+      reportResponsesWebSocketCustomBufferedFallback(payload.model)
+      throw new WebSocketRequestError(
+        `Custom model ${payload.model} is configured without streaming; retry over the Responses or Messages HTTP endpoint.`,
+        404,
+        "not_found",
+        "not_found",
+      )
+    }
     turn.continuationModel = directCustom.continuationModel
     turn.model = payload.model
     turn.reasoningEffort = directCustom.providerEffort
@@ -1321,6 +1335,19 @@ function reportResponsesWebSocketEndpointFallback(
       model,
       sourceEndpoint: "Responses WebSocket",
       targetEndpoint,
+      transport: "websocket",
+    },
+  })
+}
+
+function reportResponsesWebSocketCustomBufferedFallback(model: string): void {
+  reportNonDefaultBehavior({
+    kind: "endpoint_fallback",
+    message: `Responses WebSocket custom model ${model} is configured without streaming; rejecting the turn with 404 so the client falls back to the Responses or Messages HTTP endpoint`,
+    data: {
+      model,
+      sourceEndpoint: "Responses WebSocket",
+      targetEndpoint: "Responses/Messages HTTP",
       transport: "websocket",
     },
   })
