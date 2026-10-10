@@ -2,7 +2,10 @@
 import type { CopilotContractNormalizationClass } from "~/lib/copilot-contract-observability"
 
 import { LocalHTTPError } from "~/lib/error"
-import { getUnsupportedRequestParameters } from "~/lib/model-settings"
+import {
+  getUnsupportedRequestParameters,
+  modelOmitsReasoningEffort,
+} from "~/lib/model-settings"
 import {
   isProxyObject,
   REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH,
@@ -187,6 +190,9 @@ function shouldFinalizeResponsesReasoning(
   body: ResponsesWireBody,
   options: FinalizeResponsesRequestOptions,
 ): boolean {
+  // A model set to Omit gets no gateway reasoning defaults; any effort the
+  // client sent is removed when the request is dispatched.
+  if (modelOmitsReasoningEffort(body.model)) return false
   return (
     body.reasoning !== undefined
     || options.defaultEffort !== undefined

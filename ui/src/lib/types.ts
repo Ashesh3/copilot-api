@@ -134,6 +134,7 @@ export interface ModelSetting {
   sentryModelName?: string
   supportedReasoningEfforts?: Array<ReasoningEffort>
   defaultReasoningEffort?: ReasoningEffort
+  omitReasoningEffort?: boolean
   implicitReasoningDefault?: boolean
   exposeVirtualReasoningModels?: boolean
   supportsAssistantPrefill?: boolean

@@ -11,6 +11,7 @@ import {
   getModelReasoningConfig,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
+import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
 import {
   claimCompatibilityRetry,
   createRetryBudget,
@@ -545,6 +546,7 @@ export const createResponses = async (
         implicitDefault: usesImplicitReasoningDefault(payload.model),
       })
   const body = prepared.body
+  omitConfiguredReasoningEffort("responses", body)
 
   // Zero-data retention enforcement
   body.store = false

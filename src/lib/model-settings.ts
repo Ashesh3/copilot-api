@@ -13,6 +13,8 @@ export interface ModelSettings {
   sentryModelName?: string
   supportedReasoningEfforts?: Array<ReasoningEffort>
   defaultReasoningEffort?: ReasoningEffort
+  /** Send this model no reasoning effort; it takes precedence over efforts. */
+  omitReasoningEffort?: boolean
   implicitReasoningDefault?: boolean
   exposeVirtualReasoningModels?: boolean
   supportsAssistantPrefill?: boolean
@@ -27,6 +29,7 @@ export interface ModelSettingsUpdate {
   sentryModelName?: string | null
   supportedReasoningEfforts?: Array<ReasoningEffort | "max"> | null
   defaultReasoningEffort?: ReasoningEffort | "max" | null
+  omitReasoningEffort?: boolean | null
   implicitReasoningDefault?: boolean | null
   exposeVirtualReasoningModels?: boolean | null
   supportsAssistantPrefill?: boolean | null
@@ -241,6 +244,7 @@ function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
     value.forcedSystemPrompt,
     value.clearOtherSystemPrompts,
   )
+  applyOmitReasoningEffort(normalized, value.omitReasoningEffort === true)
 
   return hasCustomModelSettings(normalized) ? normalized : undefined
 }
@@ -272,6 +276,7 @@ function hasCustomModelSettings(settings: ModelSettings): boolean {
     settings.sentryModelName !== undefined
     || settings.supportedReasoningEfforts !== undefined
     || settings.defaultReasoningEffort !== undefined
+    || settings.omitReasoningEffort !== undefined
     || settings.implicitReasoningDefault !== undefined
     || settings.exposeVirtualReasoningModels !== undefined
     || settings.supportsAssistantPrefill !== undefined
@@ -293,6 +298,7 @@ function validateStoredModelSettingFields(item: Record<string, unknown>): void {
     defaultReasoningEffort: isReasoningEffort,
     supportedReasoningEfforts: (value) =>
       validSettingArray(value, isReasoningEffort),
+    omitReasoningEffort: (value) => typeof value === "boolean",
     unsupportedRequestParameters: (value) =>
       validSettingArray(value, isModelRequestParameter),
     implicitReasoningDefault: (value) => typeof value === "boolean",
@@ -429,6 +435,17 @@ export async function setModelSettings(
       }
     }
 
+    // Omit and effort levels are exclusive; the explicit choice in this update
+    // wins, so saving efforts turns a stored Omit off.
+    applyOmitReasoningEffort(
+      next,
+      updates.omitReasoningEffort === undefined ?
+        next.omitReasoningEffort === true
+          && next.supportedReasoningEfforts === undefined
+          && next.defaultReasoningEffort === undefined
+      : updates.omitReasoningEffort === true,
+    )
+
     applyBooleanModelSettingUpdate(
       next,
       "implicitReasoningDefault",
@@ -471,6 +488,23 @@ export async function removeModelSettings(model: string): Promise<boolean> {
 
 export function setModelSettingsForTest(settings: Array<unknown>): void {
   testSettings = normalizeSettings(settings)
+}
+
+/**
+ * Omit replaces the effort list: a model that takes no effort has no levels
+ * or default to choose from, so those fields are dropped while it is set.
+ */
+function applyOmitReasoningEffort(
+  settings: ModelSettings,
+  omit: boolean,
+): void {
+  if (!omit) {
+    delete settings.omitReasoningEffort
+    return
+  }
+  settings.omitReasoningEffort = true
+  delete settings.supportedReasoningEfforts
+  delete settings.defaultReasoningEffort
 }
 
 function applyUnsupportedRequestParametersUpdate(
@@ -539,6 +573,15 @@ export function modelSupportsAssistantPrefill(model: string): boolean {
   if (configured !== undefined) return configured
 
   return !isNoAssistantPrefillClaudeModel(model)
+}
+
+/** Whether Model Settings mark `model` to be sent without a reasoning effort. */
+export function modelOmitsReasoningEffort(model: string): boolean {
+  const settings = loadedSettings()
+  return (
+    Object.hasOwn(settings, model)
+    && settings[model].omitReasoningEffort === true
+  )
 }
 
 /**
