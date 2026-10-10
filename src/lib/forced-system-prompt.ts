@@ -23,7 +23,7 @@ export interface ForcedSystemPrompt {
   clearOtherSystemPrompts: boolean
 }
 
-export interface ForcedSystemPromptOutcome {
+interface ForcedSystemPromptOutcome {
   forced: ForcedSystemPrompt
   /** Client system or developer prompts removed from the request. */
   removed: number
@@ -33,7 +33,7 @@ const isInstructionRole = (role: unknown): boolean =>
   role === "system" || role === "developer"
 
 /** A Responses input message that carries system or developer instructions. */
-export function isResponsesInstructionItem(item: unknown): boolean {
+function isResponsesInstructionItem(item: unknown): boolean {
   if (typeof item !== "object" || item === null) return false
   const record = item as Record<string, unknown>
   if (record.type !== undefined && record.type !== "message") return false
@@ -74,7 +74,7 @@ export function resolveForcedSystemPrompt(
  * Put the forced prompt first as its own system message. Applying it again
  * leaves an already-forced request unchanged.
  */
-export function applyForcedSystemPromptToChat(
+function applyForcedSystemPromptToChat(
   payload: { messages: Array<Message> },
   forced: ForcedSystemPrompt,
 ): ForcedSystemPromptOutcome {
@@ -128,7 +128,7 @@ function prependSystemBlock(
  * removes system and developer turns that Claude clients send in `messages`;
  * the request contract has already lifted their per-turn controls.
  */
-export function applyForcedSystemPromptToMessages(
+function applyForcedSystemPromptToMessages(
   payload: AnthropicMessagesPayload,
   forced: ForcedSystemPrompt,
 ): ForcedSystemPromptOutcome {
