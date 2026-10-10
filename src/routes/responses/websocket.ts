@@ -114,6 +114,7 @@ import { type ResponsesChatToolMap } from "./messages-tool-map"
 import {
   adaptResponsesToChatCandidate,
   getResponsesChatWebSearchMaxUses,
+  type ResponsesChatCandidate,
 } from "./responses-chat-adapter"
 import { applyResponsesServiceTierRouting } from "./service-tier"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
@@ -618,6 +619,7 @@ async function handleResponseCreate(
       turn,
       reference: directCustom.reference,
       finalReasoningEffort: directCustom.finalEffort,
+      streamOutput: true,
     })
     return
   }
@@ -1672,15 +1674,12 @@ function prepareDirectCustomProviderTurn(
   }
 }
 
-async function streamCustomProviderOverWs(options: {
-  ws: ResponsesWebSocketState
+async function adaptCustomProviderCandidate(options: {
+  finalReasoningEffort?: string | number
   payload: ResponsesPayload
   turn: ResponsesWebSocketTurn
-  reference: CustomProviderModelReference
-  /** Defaults to the payload's own effort for fallback-selected providers. */
-  finalReasoningEffort?: string | number
-}): Promise<void> {
-  const { ws, payload, turn, reference } = options
+}): Promise<ResponsesChatCandidate> {
+  const { payload, turn } = options
   const candidate = await waitForWebSocketTurn(
     adaptResponsesToChatCandidate({
       source: payload,
@@ -1703,8 +1702,79 @@ async function streamCustomProviderOverWs(options: {
       code: "endpoint_translation_unsupported",
       source: "responses",
     })
+  return candidate
+}
+
+/** Stream a provider completion as Responses events while it is generated. */
+async function streamCustomProviderCompletion(options: {
+  candidate: ResponsesChatCandidate
+  payload: ResponsesPayload
+  reference: CustomProviderModelReference
+  turn: ResponsesWebSocketTurn
+  writer: {
+    writeSSE: (event: { event?: string; data: string }) => Promise<void>
+  }
+}): Promise<void> {
+  const { candidate, payload, reference, turn, writer } = options
+  const stream = await waitForWebSocketTurn(
+    createCustomProviderChatCompletions(
+      reference,
+      { ...candidate.payload, stream: true },
+      {
+        signal: turn.abortController.signal,
+        reasoningEffort: parseReasoningEffort(turn.reasoningEffort),
+      },
+    ),
+    turn,
+  )
+  throwIfWebSocketTurnAborted(turn)
+  await streamChatCompletionsAsResponses(
+    writer,
+    stream as AsyncIterable<{ data?: string; event?: string }>,
+    { model: payload.model, toolMap: candidate.toolMap },
+  )
+}
+
+async function streamCustomProviderOverWs(options: {
+  ws: ResponsesWebSocketState
+  payload: ResponsesPayload
+  turn: ResponsesWebSocketTurn
+  reference: CustomProviderModelReference
+  /** Defaults to the payload's own effort for fallback-selected providers. */
+  finalReasoningEffort?: string | number
+  /** Stream provider output to the client instead of buffering the turn. */
+  streamOutput?: boolean
+}): Promise<void> {
+  const { ws, payload, turn, reference } = options
+  const candidate = await adaptCustomProviderCandidate(options)
   if (isSyntheticWarmupRequest(payload)) {
     await handleSyntheticWarmupRequest(ws, payload, turn)
+    return
+  }
+  const writer = {
+    writeSSE: async (event: { event?: string; data: string }) => {
+      if (event.data !== "[DONE]")
+        await emitTurnFrame(ws, turn, payload, event.data, event.event)
+    },
+  }
+  const needsWebSearch =
+    candidate.payload.tools?.some((tool) => tool.function.name === "web_search")
+    ?? false
+  // Web search and compaction need the whole completion before answering, and
+  // models configured without streaming only accept buffered requests.
+  if (
+    options.streamOutput
+    && reference.model.supportsStreaming !== false
+    && !needsWebSearch
+    && !hasCompactionTrigger(payload)
+  ) {
+    await streamCustomProviderCompletion({
+      candidate,
+      payload,
+      reference,
+      turn,
+      writer,
+    })
     return
   }
   const completionFactory: ResponsesChatCompletionFactory = async (
@@ -1749,14 +1819,12 @@ async function streamCustomProviderOverWs(options: {
     turn,
   )
   await streamChatCompletionsAsResponses(
-    {
-      writeSSE: async (event) => {
-        if (event.data !== "[DONE]")
-          await emitTurnFrame(ws, turn, payload, event.data, event.event)
-      },
-    },
+    writer,
     chatResponseAsStream(response),
-    { model: payload.model, toolMap: candidate.toolMap },
+    {
+      model: payload.model,
+      toolMap: candidate.toolMap,
+    },
   )
 }
 

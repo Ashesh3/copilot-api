@@ -3,10 +3,15 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 
 import type { CustomProviderModelConfig } from "~/lib/config"
 import type { ResponsesWebSocketData } from "~/routes/responses/websocket"
+import type { ChatCompletionResponse } from "~/services/copilot/create-chat-completions"
 import type { ModelsResponse } from "~/services/copilot/get-models"
 
 import { setConfigForTest } from "~/lib/config"
 import { setCustomProviderRetrySleepForTest } from "~/lib/custom-provider-retry"
+import {
+  createCustomProviderChatCompletions,
+  resolveCustomProviderModel,
+} from "~/lib/custom-providers"
 import { setModelFallbackConfigForTest } from "~/lib/model-fallback-config"
 import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { state } from "~/lib/state"
@@ -119,10 +124,25 @@ beforeEach(() => {
         (JSON.parse(init.body) as Record<string, unknown>)
       : {}
     requests.push({ url, body })
+    const isProvider = url.startsWith("https://custom.example/")
+    // ExperientialLabs rejects this shape, as OpenAI-compatible APIs do.
+    if (isProvider && "stream_options" in body && body.stream !== true) {
+      return Promise.resolve(
+        Response.json(
+          {
+            error: {
+              message: "stream_options requires stream=true.",
+              type: "invalid_request_error",
+              param: "body",
+              code: "invalid_parameter",
+            },
+          },
+          { status: 400 },
+        ),
+      )
+    }
     const next =
-      url.startsWith("https://custom.example/") ?
-        providerResponses.shift()
-      : copilotResponses.shift()
+      isProvider ? providerResponses.shift() : copilotResponses.shift()
     if (!next) throw new Error(`Unexpected upstream request to ${url}`)
     return Promise.resolve(next())
   }) as typeof fetch
@@ -392,6 +412,32 @@ function providerSse(chunks: Array<unknown>): Response {
       .map((line) => `${line}\n\n`)
       .join(""),
     { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
+function providerStreamFromMessage(
+  message: { content?: string; tool_calls?: Array<Record<string, unknown>> },
+  finishReason: string,
+): Response {
+  return providerSse([
+    ...(message.content ?
+      [chunk({ delta: { role: "assistant", content: message.content } })]
+    : []),
+    ...(message.tool_calls ?? []).map((call, index) =>
+      chunk({ delta: { tool_calls: [{ index, ...call }] } }),
+    ),
+    chunk({ delta: {}, finish_reason: finishReason }),
+  ])
+}
+
+function providerTextStream(text: string): Response {
+  return providerStreamFromMessage({ content: text }, "stop")
+}
+
+function providerToolCallsStream(): Response {
+  return providerStreamFromMessage(
+    { tool_calls: providerToolCalls() },
+    "tool_calls",
   )
 }
 
@@ -944,7 +990,7 @@ describe("custom-provider models over the Responses WebSocket", () => {
   test("retries a provider that is briefly at capacity once", async () => {
     providerResponses.push(
       () => providerCapacityResponse("5"),
-      () => providerTextResponse("after capacity"),
+      () => providerTextStream("after capacity"),
     )
     const ws = await createSocket()
     await sendTurn(ws, { model: CUSTOM_ALIAS, input: "hello" })
@@ -975,16 +1021,82 @@ describe("custom-provider models over the Responses WebSocket", () => {
     await sendTurn(ws, { model: COPILOT_MODEL, input: "first" })
     expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
 
-    providerResponses.push(() => providerTextResponse("custom answer"))
+    providerResponses.push(() => providerTextStream("custom answer"))
     await sendTurn(ws, { model: CUSTOM_ALIAS, input: "second" })
 
     expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
     const dispatched = providerRequests()
     expect(dispatched).toHaveLength(1)
     expect(dispatched[0].body.model).toBe(CUSTOM_MODEL)
+    expect(dispatched[0].body).toMatchObject({
+      stream: true,
+      stream_options: { include_usage: true },
+    })
+    expect(
+      ws.sent.some((frame) => frame.type === "response.output_text.delta"),
+    ).toBe(true)
     const completed = completedFrames(ws).at(-1)
     expect(completed?.model).toBe(CUSTOM_ALIAS)
     expect(JSON.stringify(completed?.output)).toContain("custom answer")
+  })
+
+  test("buffers a web search turn without stream options", async () => {
+    providerResponses.push(() => providerTextResponse("searched answer"))
+    const ws = await createSocket()
+    await sendTurn(ws, {
+      model: CUSTOM_ALIAS,
+      input: "look it up",
+      tools: [{ type: "web_search" }],
+    })
+
+    expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
+    const [dispatched] = providerRequests()
+    expect(dispatched.body.stream).toBe(false)
+    expect(dispatched.body).not.toHaveProperty("stream_options")
+    expect(toolNames(dispatched.body)).toContain("web_search")
+    expect(JSON.stringify(completedFrames(ws).at(-1)?.output)).toContain(
+      "searched answer",
+    )
+  })
+
+  test("buffers a model configured without streaming", async () => {
+    configureCustomModels([
+      {
+        id: CUSTOM_MODEL,
+        aliases: [CUSTOM_ALIAS],
+        kind: "chat",
+        supportsStreaming: false,
+      },
+    ])
+    providerResponses.push(() => providerTextResponse("buffered answer"))
+    const ws = await createSocket()
+    await sendTurn(ws, { model: CUSTOM_ALIAS, input: "hello" })
+
+    expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
+    const [dispatched] = providerRequests()
+    expect(dispatched.body.stream).toBe(false)
+    expect(dispatched.body).not.toHaveProperty("stream_options")
+    expect(JSON.stringify(completedFrames(ws).at(-1)?.output)).toContain(
+      "buffered answer",
+    )
+  })
+
+  test("drops stream options from any buffered provider request", async () => {
+    const reference = resolveCustomProviderModel({
+      model: CUSTOM_ALIAS,
+      kind: "chat",
+    })
+    if (!reference) throw new Error("Expected the custom alias to resolve")
+    providerResponses.push(() => providerTextResponse("buffered"))
+    const response = (await createCustomProviderChatCompletions(reference, {
+      model: CUSTOM_ALIAS,
+      messages: [{ role: "user", content: "hi" }],
+      stream: false,
+      stream_options: { include_usage: true },
+    })) as ChatCompletionResponse
+
+    expect(providerRequests()[0].body).not.toHaveProperty("stream_options")
+    expect(response.choices[0].message.content).toBe("buffered")
   })
 
   test("answers Codex warmup locally and continues it on the provider", async () => {
@@ -1000,7 +1112,7 @@ describe("custom-provider models over the Responses WebSocket", () => {
     const warmup = completedFrames(ws).at(-1)
     expect(String(warmup?.id)).toStartWith("warmup_")
 
-    providerResponses.push(providerToolResponse)
+    providerResponses.push(providerToolCallsStream)
     await sendTurn(ws, {
       model: CUSTOM_ALIAS,
       previous_response_id: warmup?.id,
@@ -1038,7 +1150,7 @@ describe("custom-provider models over the Responses WebSocket", () => {
   test("keeps custom model names exactly as configured", async () => {
     configureCustomModels([{ id: "qwen3-8b", kind: "chat" }])
     const ws = await createSocket()
-    providerResponses.push(() => providerTextResponse("dashed answer"))
+    providerResponses.push(() => providerTextStream("dashed answer"))
     await sendTurn(ws, { model: "qwen3-8b", input: "hello" })
 
     expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
@@ -1099,7 +1211,7 @@ describe("custom-provider WebSocket continuations", () => {
     const ws = await createSocket()
     copilotResponses.push(() => copilotCompletedResponse("resp_seed"))
     await sendTurn(ws, { model: COPILOT_MODEL, input: "seed" })
-    providerResponses.push(() => providerTextResponse("fast answer"))
+    providerResponses.push(() => providerTextStream("fast answer"))
     await sendTurn(ws, {
       model: CUSTOM_ALIAS,
       service_tier: "priority",
@@ -1122,8 +1234,8 @@ describe("custom-provider WebSocket continuations", () => {
       },
     ])
     providerResponses.push(
-      () => providerTextResponse("first answer"),
-      () => providerTextResponse("second answer"),
+      () => providerTextStream("first answer"),
+      () => providerTextStream("second answer"),
     )
     const ws = await createSocket()
     await sendTurn(ws, { model: `${CUSTOM_ALIAS}:high`, input: "hello" })
@@ -1147,14 +1259,14 @@ describe("custom-provider WebSocket continuations", () => {
   })
 
   test("answers a batch of restored tool calls on the next turn", async () => {
-    providerResponses.push(providerToolResponse, () => {
+    providerResponses.push(providerToolCallsStream, () => {
       const unanswered = unansweredToolCalls(requests.at(-1)?.body ?? {})
       return unanswered.length > 0 ?
           Response.json(
             { error: { message: `unanswered: ${unanswered.join(",")}` } },
             { status: 400 },
           )
-        : providerTextResponse("batch done")
+        : providerTextStream("batch done")
     })
     const ws = await createSocket()
     await sendTurn(ws, { model: CUSTOM_ALIAS, input: codexInput(), tools: [] })

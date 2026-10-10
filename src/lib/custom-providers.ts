@@ -604,8 +604,11 @@ function buildChatPayload(
     delete outgoing.reasoning_effort
   }
 
-  if (outgoing.stream && !outgoing.stream_options) {
-    outgoing.stream_options = { include_usage: true }
+  if (outgoing.stream === true) {
+    outgoing.stream_options ??= { include_usage: true }
+  } else {
+    // OpenAI-compatible providers reject stream_options on buffered requests.
+    delete outgoing.stream_options
   }
 
   return outgoing

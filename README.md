@@ -513,12 +513,12 @@ Provider coverage is intentionally scoped:
 
 | Provider model kind | Client-facing routes |
 | --- | --- |
-| `chat` | Chat Completions, Anthropic Messages, Responses HTTP, and Google generation/streaming |
+| `chat` | Chat Completions, Anthropic Messages, Responses HTTP and WebSocket, and Google generation/streaming |
 | `embedding` | Embeddings only |
 
-Custom providers do not handle Responses WebSocket or compaction. Embedding
-responses preserve float or base64 encoding and validate the effective request
-dimensions when a dimension count is configured.
+Custom providers do not handle Responses compaction. Embedding responses
+preserve float or base64 encoding and validate the effective request dimensions
+when a dimension count is configured.
 
 A configured custom alias wins provider resolution and is the safest way to
 force custom-provider routing; the first configured matching provider wins. If
