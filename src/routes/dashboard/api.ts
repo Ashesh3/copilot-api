@@ -52,6 +52,7 @@ import { setModelRoutingOverride } from "~/lib/model-routing"
 import {
   getAllModelSettings,
   isReasoningEffort,
+  MAX_FORCED_SYSTEM_PROMPT_LENGTH,
   type ModelRequestParameter,
   removeModelSettings,
   setModelSettings,
@@ -128,6 +129,8 @@ interface ModelSettingsRequestBody {
   exposeVirtualReasoningModels?: boolean | null
   supportsAssistantPrefill?: boolean | null
   unsupportedRequestParameters?: Array<ModelRequestParameter> | null
+  forcedSystemPrompt?: string | null
+  clearOtherSystemPrompts?: boolean | null
 }
 
 interface CustomProviderRequestBody {
@@ -551,7 +554,7 @@ export async function handleSetModelSettings(c: Context) {
 function validateModelSettingsBody(
   body: ModelSettingsRequestBody,
 ): string | undefined {
-  if (!isValidSentryModelName(body.sentryModelName)) {
+  if (!isValidOptionalString(body.sentryModelName)) {
     return "sentryModelName is invalid"
   }
 
@@ -571,10 +574,26 @@ function validateModelSettingsBody(
     return "supportsAssistantPrefill is invalid"
   }
 
+  return validateForcedSystemPromptBody(body)
+}
+
+function validateForcedSystemPromptBody(
+  body: ModelSettingsRequestBody,
+): string | undefined {
+  const prompt = body.forcedSystemPrompt
+  if (!isValidOptionalString(prompt)) return "forcedSystemPrompt is invalid"
+  if (
+    typeof prompt === "string"
+    && prompt.length > MAX_FORCED_SYSTEM_PROMPT_LENGTH
+  )
+    return `forcedSystemPrompt must be at most ${MAX_FORCED_SYSTEM_PROMPT_LENGTH.toLocaleString("en-US")} characters`
+  if (!isValidOptionalBoolean(body.clearOtherSystemPrompts)) {
+    return "clearOtherSystemPrompts is invalid"
+  }
   return undefined
 }
 
-function isValidSentryModelName(value: unknown): boolean {
+function isValidOptionalString(value: unknown): boolean {
   return value === undefined || value === null || typeof value === "string"
 }
 
@@ -635,6 +654,12 @@ function modelSettingsUpdate(body: ModelSettingsRequestBody) {
     : {}),
     ...(body.unsupportedRequestParameters !== undefined ?
       { unsupportedRequestParameters: body.unsupportedRequestParameters }
+    : {}),
+    ...(body.forcedSystemPrompt !== undefined ?
+      { forcedSystemPrompt: body.forcedSystemPrompt }
+    : {}),
+    ...(body.clearOtherSystemPrompts !== undefined ?
+      { clearOtherSystemPrompts: body.clearOtherSystemPrompts }
     : {}),
   }
 }

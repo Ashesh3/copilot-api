@@ -39,6 +39,7 @@ import {
   isHTTPError,
   inspectHttpError,
 } from "~/lib/error"
+import { forceResponsesSystemPrompt } from "~/lib/forced-system-prompt"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelFallbackToPayload,
@@ -870,6 +871,9 @@ const handleResponsesInner = async (
 
   // Capture the originally requested model before any manipulation
   const requestedModel = payload.model
+  // Native, translated, and custom-provider routes all start from this payload.
+  const forcedSystemPrompt = forceResponsesSystemPrompt(payload, requestedModel)
+  if (forcedSystemPrompt) recordNonDefaultBehavior(c, forcedSystemPrompt)
 
   // Parse model suffix and apply reasoning effort override (e.g. "gpt-5.3-codex:high")
   const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
