@@ -591,7 +591,7 @@ proxy:
   path requires it;
 - MCP-backed web search loops on compatible fallback paths;
 - model aliases, effort variants, redirects, and operator routing controls;
-- per-model forced system prompts;
+- per-model forced system prompts and omitted reasoning efforts;
 - OpenAI-compatible custom chat and embedding providers;
 - cross-dialect OpenAI, Anthropic, and Google-style compatibility routes; and
 - client-integration surfaces for Claude Code and Codex workflows.
@@ -613,6 +613,15 @@ WebSocket turns apply the current setting to each upstream copy, so stored
 continuations keep the client's instructions; a continuation that omits
 `model` uses the model its conversation requested. Claude permission-review
 classifier requests keep their policy prompt.
+
+An omitted reasoning effort belongs to the model ID that receives the upstream
+request, so it also applies when a redirect or fallback sends another model's
+request there. Messages requests lose `output_config.effort`, including
+per-turn controls, and `output_config` itself when no format or task budget
+remains; Chat Completions requests lose `reasoning_effort`; Responses requests
+lose `reasoning.effort` and receive no gateway reasoning defaults. Thinking
+budgets, reasoning summaries, and output formats are unchanged, and discovery
+lists no effort options or `model:effort` variants for the model.
 
 Platform compatibility also includes explicit-origin CORS only for approved
 inference methods and paths, including the normal Anthropic/OpenAI/Google

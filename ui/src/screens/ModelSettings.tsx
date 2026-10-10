@@ -54,6 +54,10 @@ const EFFORT_OPTIONS: Array<SettingEffort> = [
   "max",
 ]
 
+/** Sends the model no reasoning effort; it replaces any effort levels. */
+const OMIT_EFFORT = "omit"
+type EffortToggle = SettingEffort | typeof OMIT_EFFORT
+
 const OMIT_PARAM_OPTIONS: Array<ModelRequestParameter> = [
   "temperature",
   "top_p",
@@ -91,6 +95,7 @@ interface SettingFormState {
   sentryModelName: string
   supportedReasoningEfforts: Array<SettingEffort>
   defaultReasoningEffort: SettingEffort | null
+  omitReasoningEffort: boolean
   implicitReasoningDefault: TriState
   exposeVirtualReasoningModels: TriState
   supportsAssistantPrefill: TriState
@@ -104,6 +109,7 @@ const EMPTY_SETTING_FORM: SettingFormState = {
   sentryModelName: "",
   supportedReasoningEfforts: [],
   defaultReasoningEffort: null,
+  omitReasoningEffort: false,
   implicitReasoningDefault: "unset",
   exposeVirtualReasoningModels: "unset",
   supportsAssistantPrefill: "unset",
@@ -119,6 +125,7 @@ function toSettingBody(form: SettingFormState) {
     sentryModelName: form.sentryModelName.trim() || null,
     supportedReasoningEfforts: form.supportedReasoningEfforts,
     defaultReasoningEffort: form.defaultReasoningEffort,
+    omitReasoningEffort: form.omitReasoningEffort ? true : null,
     implicitReasoningDefault: fromTriState(form.implicitReasoningDefault),
     exposeVirtualReasoningModels: fromTriState(
       form.exposeVirtualReasoningModels,
@@ -128,6 +135,36 @@ function toSettingBody(form: SettingFormState) {
     forcedSystemPrompt: forcedSystemPrompt || null,
     clearOtherSystemPrompts:
       forcedSystemPrompt ? form.clearOtherSystemPrompts : null,
+  }
+}
+
+/** Omit is exclusive: choosing it clears the levels, and a level clears it. */
+function selectEfforts(
+  form: SettingFormState,
+  values: Array<EffortToggle>,
+): SettingFormState {
+  if (values.includes(OMIT_EFFORT) && !form.omitReasoningEffort) {
+    return {
+      ...form,
+      omitReasoningEffort: true,
+      supportedReasoningEfforts: [],
+      defaultReasoningEffort: null,
+    }
+  }
+  const efforts = values.filter(
+    (value): value is SettingEffort => value !== OMIT_EFFORT,
+  )
+  return {
+    ...form,
+    omitReasoningEffort: false,
+    supportedReasoningEfforts: efforts,
+    defaultReasoningEffort:
+      (
+        form.defaultReasoningEffort
+        && efforts.includes(form.defaultReasoningEffort)
+      ) ?
+        form.defaultReasoningEffort
+      : null,
   }
 }
 
@@ -169,6 +206,7 @@ export default function ModelSettingsScreen() {
       sentryModelName: row.sentryModelName ?? "",
       supportedReasoningEfforts: row.supportedReasoningEfforts ?? [],
       defaultReasoningEffort: row.defaultReasoningEffort ?? null,
+      omitReasoningEffort: row.omitReasoningEffort === true,
       implicitReasoningDefault: toTriState(row.implicitReasoningDefault),
       exposeVirtualReasoningModels: toTriState(
         row.exposeVirtualReasoningModels,
@@ -245,6 +283,9 @@ export default function ModelSettingsScreen() {
       header: "Reasoning",
       width: proportional(2),
       renderCell: (item) => {
+        if (item.omitReasoningEffort) {
+          return <Badge variant="warning" label="Omit" />
+        }
         const efforts = item.supportedReasoningEfforts ?? []
         if (efforts.length === 0 && !item.defaultReasoningEffort) {
           return <Text color="secondary">—</Text>
@@ -437,22 +478,15 @@ export default function ModelSettingsScreen() {
                   <ToggleButtonGroup
                     type="multiple"
                     label="Supported efforts"
-                    value={form.supportedReasoningEfforts}
+                    value={
+                      form.omitReasoningEffort ?
+                        [OMIT_EFFORT]
+                      : form.supportedReasoningEfforts
+                    }
                     onChange={(values) =>
-                      setForm((f) => {
-                        const next = values as Array<SettingEffort>
-                        return {
-                          ...f,
-                          supportedReasoningEfforts: next,
-                          defaultReasoningEffort:
-                            (
-                              f.defaultReasoningEffort
-                              && next.includes(f.defaultReasoningEffort)
-                            ) ?
-                              f.defaultReasoningEffort
-                            : null,
-                        }
-                      })
+                      setForm((f) =>
+                        selectEfforts(f, values as Array<EffortToggle>),
+                      )
                     }
                   >
                     {EFFORT_OPTIONS.map((effort) => (
@@ -462,7 +496,14 @@ export default function ModelSettingsScreen() {
                         label={effortLabel(effort)}
                       />
                     ))}
+                    <ToggleButton value={OMIT_EFFORT} label="Omit" />
                   </ToggleButtonGroup>
+                  {form.omitReasoningEffort ?
+                    <Text type="supporting" color="secondary">
+                      Requests to this model are sent without a reasoning
+                      effort.
+                    </Text>
+                  : null}
                 </VStack>
                 <Selector
                   label="Default effort"

@@ -109,3 +109,76 @@ test("the dashboard bundle includes the forced system prompt controls", () => {
   expect(DASHBOARD_HTML).toContain("Forced system prompt")
   expect(DASHBOARD_HTML).toContain("Clear other system prompts")
 })
+
+test("Omit replaces the effort levels and survives a storage restart", async () => {
+  const model = "claude-haiku-4.5"
+  await save({
+    model,
+    exposeVirtualReasoningModels: false,
+    supportedReasoningEfforts: ["none"],
+    defaultReasoningEffort: "none",
+  })
+
+  const response = await save({
+    model,
+    supportedReasoningEfforts: [],
+    defaultReasoningEffort: null,
+    omitReasoningEffort: true,
+  })
+
+  expect(response.status).toBe(200)
+  const saved = {
+    model,
+    exposeVirtualReasoningModels: false,
+    omitReasoningEffort: true,
+  }
+  expect(await response.json()).toEqual(saved)
+  const storageConfig = getStorageRuntime().config
+  await closeStorageRuntime()
+  await initializeStorageRuntime({ config: storageConfig })
+  expect(await list()).toEqual([saved])
+})
+
+test("saving effort levels turns Omit off", async () => {
+  const model = "claude-haiku-4.5"
+  await save({ model, omitReasoningEffort: true })
+
+  const response = await save({
+    model,
+    supportedReasoningEfforts: ["low", "high"],
+    defaultReasoningEffort: "low",
+  })
+
+  expect(await response.json()).toEqual({
+    model,
+    supportedReasoningEfforts: ["low", "high"],
+    defaultReasoningEffort: "low",
+  })
+  expect(
+    await (await save({ model, supportedReasoningEfforts: null })).json(),
+  ).toEqual({ model, defaultReasoningEffort: "low" })
+})
+
+test.each([
+  [{ omitReasoningEffort: "yes" }, "omitReasoningEffort is invalid"],
+  [
+    { omitReasoningEffort: true, supportedReasoningEfforts: ["low"] },
+    "omitReasoningEffort cannot be combined with supportedReasoningEfforts or defaultReasoningEffort",
+  ],
+  [
+    { omitReasoningEffort: true, defaultReasoningEffort: "high" },
+    "omitReasoningEffort cannot be combined with supportedReasoningEfforts or defaultReasoningEffort",
+  ],
+])("rejects invalid Omit settings %#", async (fields, error) => {
+  const response = await save({ model: "claude-haiku-4.5", ...fields })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({ error })
+  expect(await list()).toEqual([])
+})
+
+test("the dashboard bundle includes the Omit effort control", () => {
+  expect(DASHBOARD_HTML).toContain(
+    "Requests to this model are sent without a reasoning effort.",
+  )
+})

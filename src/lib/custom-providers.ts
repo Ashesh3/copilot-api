@@ -39,6 +39,7 @@ import {
   recordModelFallbackResponse,
   getModelFallbackDebugInfo,
 } from "~/lib/model-fallback"
+import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
 import {
   getRoutingTelemetryRequestState,
   updateRoutingTelemetryRequestState,
@@ -603,6 +604,10 @@ function buildChatPayload(
   } else if (!shouldPassReasoningEffort(reference)) {
     delete outgoing.reasoning_effort
   }
+  omitConfiguredReasoningEffort("chat", outgoing, [
+    reference.requestedModel,
+    reference.upstreamModel,
+  ])
 
   if (outgoing.stream === true) {
     outgoing.stream_options ??= { include_usage: true }

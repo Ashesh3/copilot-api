@@ -13,6 +13,7 @@ import type { RetryBudget } from "~/services/copilot/transport-retry"
 import { routedFetch } from "~/lib/account-router"
 import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { HTTPError } from "~/lib/error"
+import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
 import { state } from "~/lib/state"
 import {
   claimCompatibilityRetry,
@@ -312,6 +313,7 @@ async function dispatchAnthropicMessages(
     fitted?.payload ?? preparedBody,
     options.modelId,
   )
+  omitConfiguredReasoningEffort("messages", body, [options.modelId])
   if (fitted?.reduced) {
     consola.warn("Reduced oversized native Messages compaction payload", {
       originalBytes: fitted.originalBytes,
