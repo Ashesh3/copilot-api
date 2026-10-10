@@ -30,6 +30,12 @@ export interface AccountAssignmentInput {
   eligibleAccountIds: ReadonlyArray<number>
   preferredAccountId?: number
   preferredReason?: "issuer" | "pinned"
+  /**
+   * Owner of the conversation this thread continues, such as its fork parent
+   * or agent-tree session. Seeds a missing assignment without a scheduler turn
+   * and, unlike a preferred account, never conflicts with a recorded owner.
+   */
+  inheritedAccountId?: number
   legacyAccountId?: number
   expectedRevision?: number
   /** Synchronous runtime-generation guard; no IO or storage calls are permitted. */
@@ -37,7 +43,7 @@ export interface AccountAssignmentInput {
 }
 export interface AccountAssignment {
   accountId: number
-  reason: "new" | "existing" | "legacy" | "issuer" | "pinned"
+  reason: "new" | "existing" | "legacy" | "issuer" | "pinned" | "inherited"
   eligibleAccountWeights: Array<EligibleAccountWeight>
   allocationVersion: number
 }
@@ -277,6 +283,23 @@ async function advanceScheduler(
   return winner.accountId
 }
 
+/** A caller-chosen first owner, in precedence order, and why it was chosen. */
+function assignmentSeed(
+  input: AccountAssignmentInput,
+  configured: boolean,
+): Pick<AccountAssignment, "accountId" | "reason"> | undefined {
+  if (input.preferredAccountId !== undefined)
+    return {
+      accountId: input.preferredAccountId,
+      reason: input.preferredReason ?? "pinned",
+    }
+  if (input.inheritedAccountId !== undefined)
+    return { accountId: input.inheritedAccountId, reason: "inherited" }
+  if (!configured && input.legacyAccountId !== undefined)
+    return { accountId: input.legacyAccountId, reason: "legacy" }
+  return undefined
+}
+
 // eslint-disable-next-line max-params -- The indexed key and previously read owner remain separate from caller input.
 async function resolveAssignment(
   session: SqlSession,
@@ -311,18 +334,14 @@ async function resolveAssignment(
   )
     throw new AccountDistributionRevisionError()
   input.validateCandidates?.()
-  const seed =
-    input.preferredAccountId
-    ?? (policy.configured ? undefined : input.legacyAccountId)
+  const seed = assignmentSeed(input, policy.configured)
   let accountId: number
   let reason: AccountAssignment["reason"]
-  if (seed !== undefined) {
-    if (!eligible.ids.has(seed)) throw new AccountDistributionUnavailableError()
-    accountId = seed
-    reason =
-      input.preferredAccountId !== undefined ?
-        (input.preferredReason ?? "pinned")
-      : "legacy"
+  if (seed) {
+    if (!eligible.ids.has(seed.accountId))
+      throw new AccountDistributionUnavailableError()
+    accountId = seed.accountId
+    reason = seed.reason
   } else {
     if (!policy.configured) throw new AccountDistributionUnavailableError()
     accountId = await advanceScheduler(
@@ -384,6 +403,19 @@ export function createAccountDistributionRepository(storage: Storage) {
     lookup: (affinityKey: string): Promise<number | undefined> => {
       const key = conversationKey(affinityKey)
       return storage.read((session) => findOwner(session, key))
+    },
+    /** Read several owners from one snapshot, in the order of their keys. */
+    lookupAll: (
+      affinityKeys: ReadonlyArray<string>,
+    ): Promise<Array<number | undefined>> => {
+      const keys = affinityKeys.map((affinityKey) =>
+        conversationKey(affinityKey),
+      )
+      return storage.read(async (session) => {
+        const owners: Array<number | undefined> = []
+        for (const key of keys) owners.push(await findOwner(session, key))
+        return owners
+      })
     },
     load: (): Promise<AccountDistributionPolicy & { revision: number }> =>
       storage.read(async (session) => {

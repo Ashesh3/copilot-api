@@ -606,6 +606,13 @@ remains. Existing equal hashing continues until the first percentage save, while
 observed assignments are recorded. Dormant conversations never observed by this
 version cannot be distinguished from new ones at activation.
 
+Each Codex subagent or fork is recorded under its own thread ID. On its first
+turn it takes the account of its fork parent, or else of its agent tree's root
+thread, when that account offers its model. Otherwise, such as a subagent asking
+for a model that only another account offers, it gets a new assignment. It keeps
+that account on later turns, and forks of it start from it. Fresh subagents
+start from their agent tree's root thread. The root thread keeps its account.
+
 Disabling/removing a recorded owner, or requesting a model unavailable on it,
 returns an explicit continuity error instead of silently changing accounts.
 Authentication rejections also retain identity. A `421` response refreshes that

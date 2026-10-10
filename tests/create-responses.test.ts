@@ -1756,6 +1756,7 @@ test("routes Codex forks through the parent account and upstream session", async
   expect(capturedAffinity).toEqual({
     key: "fork-parent-0",
     source: "codex_thread",
+    threadKey: "fork-child-1",
   })
   expect(capturedAuthorization).toEqual(["Bearer responses-fork-parent-token"])
   expect(lastUpstreamHeaders?.get("x-client-session-id")).toBe(

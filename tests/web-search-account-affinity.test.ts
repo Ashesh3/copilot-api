@@ -168,6 +168,43 @@ test.each([
   },
 )
 
+test("standalone search from a Codex subagent uses the subagent's own account", async () => {
+  const toolId = toolIdFor(OWNER)
+  await remember("codex-root", OWNER)
+  await remember("codex-subagent", OTHER)
+  const sessionOwner = tokenPool
+    .getAllAccounts()
+    .find((account) => account.id === OWNER)
+  if (!sessionOwner) throw new Error("Missing synthetic owner")
+  sessionOwner.models.clear()
+  tokenPool.rebuildModelIndex()
+
+  const result = await withRequestSnapshot(
+    getStorageRuntime().snapshot.get(),
+    () =>
+      runWithRoutingAffinity(
+        {
+          key: "codex-root",
+          source: "codex_session",
+          threadKey: "codex-subagent",
+        },
+        () =>
+          routedAccountStorage.run({}, () =>
+            executeWebSearch("synthetic query", undefined, {
+              modelId: MODEL,
+              sessionId: toolId,
+            }),
+          ),
+      ),
+  )
+
+  expect(result).toBe("Synthetic result")
+  expect(sentCredentials).toEqual([
+    "Bearer search-token-71",
+    "Bearer search-token-71",
+  ])
+})
+
 test("unmapped standalone searches keep legacy selection without recording a tool or conversation root", async () => {
   const toolId = toolIdFor(OTHER)
   expect(await search("new-conversation", toolId)).toBe("Synthetic result")

@@ -14,6 +14,14 @@ export type RoutingAffinitySource =
 export interface RoutingAffinity {
   key: string
   source: RoutingAffinitySource
+  /**
+   * The requesting Codex thread when `key` belongs to its agent tree's session
+   * or its fork parent. Account routing records this thread's own assignment,
+   * starting from the inherited account when that account serves the model.
+   */
+  threadKey?: string
+  /** A fork's agent-tree session, consulted after its fork parent. */
+  sessionKey?: string
 }
 
 interface RoutingAffinityState {
@@ -41,13 +49,48 @@ function affinity(
   return key ? { key, source } : undefined
 }
 
+/** Attach the Codex thread and session identities that differ from `key`. */
+function withCodexThread(
+  inherited: RoutingAffinity,
+  identities: { session?: unknown; thread?: unknown },
+): RoutingAffinity {
+  const threadKey = normalizeRoutingAffinityKey(identities.thread)
+  const sessionKey = normalizeRoutingAffinityKey(identities.session)
+  const result: RoutingAffinity = { ...inherited }
+  if (threadKey && threadKey !== inherited.key) result.threadKey = threadKey
+  if (
+    sessionKey
+    && sessionKey !== inherited.key
+    && sessionKey !== result.threadKey
+  )
+    result.sessionKey = sessionKey
+  return result
+}
+
+/**
+ * Codex sends its agent tree's root thread as the session and the requesting
+ * thread separately, so subagents share the session's account by default.
+ */
+function codexSessionAffinity(
+  session: unknown,
+  thread: unknown,
+  source: "codex_metadata" | "codex_session",
+): RoutingAffinity | undefined {
+  const inherited = affinity(session, source)
+  return inherited && withCodexThread(inherited, { thread })
+}
+
 export function resolveRoutingAffinityFromHeaders(
   headers: Headers,
 ): RoutingAffinity | undefined {
   return (
     affinity(headers.get("x-claude-code-session-id"), "claude_session")
     ?? affinity(headers.get("x-client-session-id"), "copilot_session")
-    ?? affinity(headers.get("session-id"), "codex_session")
+    ?? codexSessionAffinity(
+      headers.get("session-id"),
+      headers.get("thread-id"),
+      "codex_session",
+    )
     ?? affinity(headers.get("thread-id"), "codex_thread")
   )
 }
@@ -87,9 +130,28 @@ export function resolveResponsesRoutingAffinity(
   const metadata = parseRoutingMetadataRecord(clientMetadata)
   if (!metadata) return undefined
   return (
-    affinity(metadata.session_id, "codex_metadata")
-    ?? affinity(metadata.thread_id, "codex_thread")
+    codexSessionAffinity(
+      metadata.session_id,
+      metadata.thread_id,
+      "codex_metadata",
+    ) ?? affinity(metadata.thread_id, "codex_thread")
   )
+}
+
+/**
+ * Whether body metadata describes the same Codex conversation as the header
+ * affinity: a Codex identity matching its session or thread, and no other
+ * thread than the one the header already named.
+ */
+function describesCurrentThread(
+  current: RoutingAffinity,
+  sessionId: string | undefined,
+  threadId: string | undefined,
+): boolean {
+  if (current.source !== "codex_session" && current.source !== "codex_thread")
+    return false
+  if (current.key !== sessionId && current.key !== threadId) return false
+  return !current.threadKey || !threadId || current.threadKey === threadId
 }
 
 export function resolveResponsesForkRoutingAffinity(
@@ -105,19 +167,45 @@ export function resolveResponsesForkRoutingAffinity(
     turnMetadata?.forked_from_thread_id,
     "codex_thread",
   )
-  if (!forkAffinity || !currentAffinity) return forkAffinity
-  if (
-    currentAffinity.source !== "codex_session"
-    && currentAffinity.source !== "codex_thread"
-  ) {
-    return undefined
-  }
-
+  if (!forkAffinity) return undefined
   const sessionId = normalizeRoutingAffinityKey(metadata.session_id)
   const threadId = normalizeRoutingAffinityKey(metadata.thread_id)
-  return currentAffinity.key === sessionId || currentAffinity.key === threadId ?
-      forkAffinity
-    : undefined
+  if (
+    currentAffinity
+    && !describesCurrentThread(currentAffinity, sessionId, threadId)
+  )
+    return undefined
+  return withCodexThread(forkAffinity, {
+    session: sessionId,
+    // A header thread outranks the session, which names the agent tree's root.
+    thread: threadId ?? currentAffinity?.threadKey ?? sessionId,
+  })
+}
+
+/** Add a body-only Codex thread to a header session that omitted it. */
+function withMetadataThread(
+  current: RoutingAffinity,
+  clientMetadata: unknown,
+): RoutingAffinity {
+  if (current.source !== "codex_session" || current.threadKey) return current
+  const metadata = parseRoutingMetadataRecord(clientMetadata)
+  if (normalizeRoutingAffinityKey(metadata?.session_id) !== current.key)
+    return current
+  return withCodexThread(current, { thread: metadata?.thread_id })
+}
+
+/** Combine a request's header affinity with its Responses client metadata. */
+export function resolveResponsesRequestRoutingAffinity(
+  clientMetadata: unknown,
+  currentAffinity: RoutingAffinity | undefined,
+): RoutingAffinity | undefined {
+  const forkAffinity = resolveResponsesForkRoutingAffinity(
+    clientMetadata,
+    currentAffinity,
+  )
+  if (forkAffinity) return forkAffinity
+  if (!currentAffinity) return resolveResponsesRoutingAffinity(clientMetadata)
+  return withMetadataThread(currentAffinity, clientMetadata)
 }
 
 export function runWithRoutingAffinity<T>(
@@ -144,17 +232,9 @@ export function installRoutingAffinityFallback(
 export function installResponsesRoutingAffinity(clientMetadata: unknown): void {
   const state = routingAffinityStorage.getStore()
   if (!state) return
-
-  const forkAffinity = resolveResponsesForkRoutingAffinity(
+  const affinity = resolveResponsesRequestRoutingAffinity(
     clientMetadata,
     state.affinity,
   )
-  if (forkAffinity) {
-    state.affinity = forkAffinity
-    return
-  }
-
-  if (state.affinity) return
-  const affinity = resolveResponsesRoutingAffinity(clientMetadata)
   if (affinity) state.affinity = affinity
 }

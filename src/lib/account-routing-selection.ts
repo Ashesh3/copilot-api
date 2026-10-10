@@ -73,6 +73,16 @@ function issuerAccount(sessionToken: string | undefined, affinityKey: string) {
 
 interface PersistentCandidateOptions {
   affinityKey?: string
+  /** The requesting Codex thread behind an inherited `affinityKey`. */
+  threadAffinityKey?: string
+  /** A Codex fork's agent-tree session, consulted after its fork parent. */
+  sessionAffinityKey?: string
+  /**
+   * The request names no model, like a Copilot session or Auto call. It may
+   * use a thread's existing assignment but never starts one, because whether
+   * an inherited account serves the thread's model is not yet known.
+   */
+  modelAgnostic?: boolean
   candidates: ReadonlyArray<Account>
   copilotSessionToken?: string
   modelId: string
@@ -83,6 +93,66 @@ interface PersistentCandidateOptions {
 type DistributionRepository = ReturnType<
   typeof createAccountDistributionRepository
 >
+
+export interface ConversationAffinity {
+  /** Durable identity whose owner serves this request. */
+  key: string
+  /** Owner inherited from a fork parent or agent-tree session, not yet recorded for `key`. */
+  inheritedAccountId?: number
+  /**
+   * Identity whose equal-hash choice seeds a new assignment before percentages
+   * are saved. A thread leaving a healthy inherited account that lacks its
+   * model hashes as itself, like any new conversation. Otherwise this stays
+   * the inherited identity, keeping forks of conversations recorded before
+   * this version on their earlier account.
+   */
+  placementKey: string
+}
+
+/**
+ * Choose the durable identity for a request. A Codex subagent or fork is its
+ * own conversation, keyed by its thread ID, and only ever records that key.
+ * Its first assignment inherits the account of its fork parent, or else of its
+ * agent-tree session, while that account serves the requested model; a healthy
+ * inherited account that lacks the model leaves the thread to a new assignment.
+ * An unavailable inherited account keeps its continuity error rather than
+ * moving history to another account.
+ */
+export async function resolveConversationAffinity(options: {
+  affinityKey: string
+  threadAffinityKey?: string
+  sessionAffinityKey?: string
+  modelAgnostic?: boolean
+  repository: Pick<DistributionRepository, "lookupAll">
+  servesModel: (accountId: number) => boolean
+}): Promise<ConversationAffinity> {
+  const { affinityKey, threadAffinityKey } = options
+  if (!threadAffinityKey || threadAffinityKey === affinityKey)
+    return { key: affinityKey, placementKey: affinityKey }
+  const inherited = [affinityKey]
+  if (
+    options.sessionAffinityKey
+    && options.sessionAffinityKey !== affinityKey
+    && options.sessionAffinityKey !== threadAffinityKey
+  )
+    inherited.push(options.sessionAffinityKey)
+  const [threadOwner, ...inheritedOwners] = await options.repository.lookupAll([
+    threadAffinityKey,
+    ...inherited,
+  ])
+  const thread = { key: threadAffinityKey, placementKey: affinityKey }
+  if (threadOwner !== undefined) return thread
+  if (options.modelAgnostic)
+    return { key: affinityKey, placementKey: affinityKey }
+  const index = inheritedOwners.findIndex((owner) => owner !== undefined)
+  const owner = inheritedOwners.at(index)
+  if (index === -1 || owner === undefined) return thread
+  if (options.servesModel(owner))
+    return { ...thread, inheritedAccountId: owner }
+  if (!tokenPool.getHealthyAccountIds().includes(owner))
+    return { key: inherited[index], placementKey: affinityKey }
+  return { key: threadAffinityKey, placementKey: threadAffinityKey }
+}
 
 function legacyCandidateSelection(
   options: PersistentCandidateOptions,
@@ -101,19 +171,33 @@ function legacyCandidateSelection(
   return legacy
 }
 
-async function existingCandidateSelection(
-  options: PersistentCandidateOptions & { affinityKey: string },
-  repository: DistributionRepository,
+/** Read-only selection honors a recorded or inherited owner without recording one. */
+function existingCandidateSelection(
+  options: PersistentCandidateOptions,
+  owner: number | undefined,
   preferredId: number | undefined,
-): Promise<RoutedAccountSelection> {
+): RoutedAccountSelection {
   const legacy = legacyCandidateSelection(options)
-  const owner = await repository.lookup(options.affinityKey)
   if (owner === undefined) return legacy
   if (preferredId !== undefined && owner !== preferredId)
     throw conflictingConversationAccount()
   const account = options.candidates.find((candidate) => candidate.id === owner)
   if (!account) throw unavailableConversationAccount()
   return { ...legacy, account }
+}
+
+/**
+ * As in admission, an inherited owner only seeds a thread without its own
+ * record, so a pin or recognized issuer still takes precedence.
+ */
+async function readOnlyOwner(
+  repository: DistributionRepository,
+  conversation: ConversationAffinity,
+  preferredId: number | undefined,
+): Promise<number | undefined> {
+  const recorded = await repository.lookup(conversation.key)
+  if (recorded !== undefined || preferredId !== undefined) return recorded
+  return conversation.inheritedAccountId
 }
 
 async function assignmentFailure(options: {
@@ -188,30 +272,44 @@ function assignedCandidateSelection(
 export async function selectPersistentCandidateAccount(
   options: PersistentCandidateOptions,
 ): Promise<RoutedAccountSelection> {
-  const legacy = legacyCandidateSelection(options)
-  const pinnedId = options.accountPin?.accountId
   const runtime = peekStorageRuntime()
-  if (!runtime || !options.affinityKey) return legacy
+  if (!runtime || !options.affinityKey) return legacyCandidateSelection(options)
   const repository = createAccountDistributionRepository(runtime.storage)
+  // Captured before the identity reads so a routing change during them is detected.
   const generation = tokenPool.routingGeneration
+  const conversation = await resolveConversationAffinity({
+    affinityKey: options.affinityKey,
+    threadAffinityKey: options.threadAffinityKey,
+    sessionAffinityKey: options.sessionAffinityKey,
+    modelAgnostic: options.modelAgnostic,
+    repository,
+    servesModel: (accountId) =>
+      options.candidates.some((candidate) => candidate.id === accountId),
+  })
+  const placed = { ...options, affinityKey: conversation.placementKey }
+  const legacy = legacyCandidateSelection(placed)
+  const pinnedId = options.accountPin?.accountId
   const issuer = issuerAccount(options.copilotSessionToken, options.affinityKey)
   if (pinnedId !== undefined && issuer && pinnedId !== issuer.id)
     throw conflictingConversationAccount()
   const preferredId = pinnedId ?? issuer?.id
   if (options.createAssignment === false)
     return existingCandidateSelection(
-      { ...options, affinityKey: options.affinityKey },
-      repository,
+      placed,
+      await readOnlyOwner(repository, conversation, preferredId),
       preferredId,
     )
   let assignment: AccountAssignment
   try {
+    // The transaction rereads the thread's owner, so a concurrent first turn
+    // that recorded it is adopted rather than treated as a conflict.
     assignment = await repository.assign({
-      affinityKey: options.affinityKey,
+      affinityKey: conversation.key,
       modelId: options.modelId,
       eligibleAccountIds: candidateIds(options.candidates),
       preferredAccountId: preferredId,
       preferredReason: pinnedId !== undefined ? "pinned" : "issuer",
+      inheritedAccountId: conversation.inheritedAccountId,
       legacyAccountId: legacy.account?.id,
       expectedRevision:
         getRequestSnapshot()?.revision ?? runtime.snapshot.get().revision,
@@ -264,6 +362,8 @@ export function selectCandidateAccount(options: {
 
 export async function selectModelAccount(options: {
   affinityKey?: string
+  threadAffinityKey?: string
+  sessionAffinityKey?: string
   copilotSessionToken?: string
   modelId: string
   pinnedAccountId?: number
@@ -285,6 +385,8 @@ export async function selectModelAccount(options: {
     explicitPin?.accountId !== undefined ? explicitPin : inheritedPin
   const result = await selectPersistentCandidateAccount({
     affinityKey: options.affinityKey,
+    threadAffinityKey: options.threadAffinityKey,
+    sessionAffinityKey: options.sessionAffinityKey,
     candidates,
     copilotSessionToken: options.copilotSessionToken,
     modelId: options.modelId,

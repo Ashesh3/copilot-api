@@ -305,6 +305,7 @@ test("compact routes Codex forks through the parent account and session", async 
   expect(capturedAffinity).toEqual({
     key: "compact-parent-0",
     source: "codex_thread",
+    threadKey: "compact-child-0",
   })
   expect(lastUpstreamHeaders?.get("authorization")).toBe(
     "Bearer compact-parent-token",

@@ -71,7 +71,7 @@ import { reportNonDefaultBehavior } from "~/lib/request-logger"
 import { getCopilotResponseHeaders } from "~/lib/request-session"
 import {
   resolveResponsesForkRoutingAffinity,
-  resolveResponsesRoutingAffinity,
+  resolveResponsesRequestRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
 } from "~/lib/routing-affinity"
 import { state } from "~/lib/state"
@@ -553,9 +553,11 @@ async function prepareResponseCreate(
     data.affinity,
   )
   if (forkAffinity) data.affinity = forkAffinity
-  const frameAffinity = resolveResponsesRoutingAffinity(payload.client_metadata)
   return {
-    affinity: forkAffinity ?? data.affinity ?? frameAffinity,
+    affinity: resolveResponsesRequestRoutingAffinity(
+      payload.client_metadata,
+      data.affinity,
+    ),
     payload,
     reviewModel,
   }

@@ -10,13 +10,17 @@ import {
   withAccountLeaseScope,
 } from "~/lib/account-lease-context"
 import { getLastUsedAccountId } from "~/lib/account-router"
-import { unavailableConversationAccount } from "~/lib/account-routing-selection"
+import {
+  resolveConversationAffinity,
+  unavailableConversationAccount,
+} from "~/lib/account-routing-selection"
 import { getAccountsService } from "~/lib/accounts-service"
 import { LocalHTTPError } from "~/lib/error"
 import {
   getClientSessionId,
   setLastUsedRoutedAccountId,
 } from "~/lib/request-session"
+import { getRoutingAffinity } from "~/lib/routing-affinity"
 import { state } from "~/lib/state"
 import { createAccountDistributionRepository } from "~/lib/storage/account-distribution-repository"
 import { getRequestSnapshot } from "~/lib/storage/request-snapshot"
@@ -121,11 +125,22 @@ async function recordedMcpAccount(
   modelId: string | undefined,
 ): Promise<Account | undefined> {
   const runtime = peekStorageRuntime()
-  const affinity = getClientSessionId()
-  if (!runtime || !affinity) return undefined
-  const owner = await createAccountDistributionRepository(
-    runtime.storage,
-  ).lookup(affinity)
+  const affinityKey = getClientSessionId()
+  if (!runtime || !affinityKey) return undefined
+  const repository = createAccountDistributionRepository(runtime.storage)
+  const affinity = getRoutingAffinity()
+  const conversation = await resolveConversationAffinity({
+    affinityKey,
+    threadAffinityKey: affinity?.threadKey,
+    sessionAffinityKey: affinity?.sessionKey,
+    repository,
+    servesModel: (accountId) =>
+      modelId === undefined
+      || tokenPool.getEligibleAccountForModel(modelId, accountId) !== undefined,
+  })
+  const owner =
+    (await repository.lookup(conversation.key))
+    ?? conversation.inheritedAccountId
   if (owner === undefined) return undefined
   const account =
     modelId ?
