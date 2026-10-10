@@ -3,7 +3,10 @@ import { createHash } from "node:crypto"
 import type { AnthropicToolUseBlock } from "~/routes/messages/anthropic-types"
 import type {
   ResponseInputItem,
+  ResponseOutputCustomToolCall,
+  ResponseOutputFunctionCall,
   ResponseOutputItem,
+  ResponseOutputToolSearchCall,
   ResponsesPayload,
 } from "~/services/copilot/create-responses"
 
@@ -13,6 +16,8 @@ const COLLABORATION_MESSAGE_TOOLS = new Set([
   "send_message",
   "followup_task",
 ])
+/** Responses models call tools in this namespace without a namespace field. */
+const DEFAULT_TOOL_NAMESPACE = "functions"
 
 interface ToolIdentity {
   readonly kind: ToolKind
@@ -32,6 +37,7 @@ interface ToolDeclaration extends ToolIdentity {
 interface ToolCollection {
   declarations: Map<string, ToolDeclaration>
   passthrough: Array<Record<string, unknown>>
+  policy: ToolMapPolicy
 }
 
 interface NamespaceContext {
@@ -39,11 +45,59 @@ interface NamespaceContext {
   readonly descriptions: ReadonlyArray<string>
 }
 
+interface ToolMapPolicy {
+  /** Treat Codex's default `functions` namespace like root-level tools. */
+  readonly rootDefaultNamespace: boolean
+  /** Prefer `namespace__name` over hashed names when unique and legal. */
+  readonly readableNames: boolean
+}
+
+const MESSAGES_POLICY: ToolMapPolicy = {
+  rootDefaultNamespace: false,
+  readableNames: false,
+}
+const CHAT_POLICY: ToolMapPolicy = {
+  rootDefaultNamespace: true,
+  readableNames: true,
+}
+
 export interface ResponsesMessagesToolMap {
   readonly source: ResponsesPayload
   readonly restoreToolCall: (
     block: AnthropicToolUseBlock,
   ) => ResponseOutputItem | undefined
+}
+
+export interface ChatToolCallLike {
+  readonly id?: string
+  readonly function?: {
+    readonly name?: string
+    readonly arguments?: string
+  }
+}
+
+export type RestoredChatToolCall =
+  | ResponseOutputCustomToolCall
+  | ResponseOutputFunctionCall
+  | ResponseOutputToolSearchCall
+
+export interface ResponsesChatToolMap {
+  /** Restore a translated Chat tool call to the client's tool identity. */
+  readonly restoreToolCall: (
+    call: ChatToolCallLike,
+    fallbackCallId: string,
+  ) => RestoredChatToolCall
+}
+
+export interface ResponsesChatToolTranslation {
+  /** Responses payload whose tools are ordinary root-level functions. */
+  readonly source: ResponsesPayload
+  /** Whether client tool declarations needed a Chat-compatible shape. */
+  readonly adaptedTools: boolean
+  /** Whether client tool history needed a Chat-compatible shape. */
+  readonly adaptedHistory: boolean
+  /** Carries only the restore function, never request content. */
+  readonly toolMap: ResponsesChatToolMap
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -58,8 +112,24 @@ function identityKey(identity: ToolIdentity): string {
   ])
 }
 
+function identityNamespace(
+  value: Record<string, unknown>,
+  policy: ToolMapPolicy,
+  parentNamespace: string | undefined,
+): string | undefined {
+  const declared =
+    parentNamespace
+    ?? (typeof value.namespace === "string" && value.namespace ?
+      value.namespace
+    : undefined)
+  return policy.rootDefaultNamespace && declared === DEFAULT_TOOL_NAMESPACE ?
+      undefined
+    : declared
+}
+
 function getIdentity(
   value: Record<string, unknown>,
+  policy: ToolMapPolicy,
   parentNamespace?: string,
 ): ToolIdentity | undefined {
   const type = value.type
@@ -75,11 +145,7 @@ function getIdentity(
   if (!kind || typeof value.name !== "string" || !value.name.trim()) {
     return undefined
   }
-  const namespace =
-    parentNamespace
-    ?? (typeof value.namespace === "string" && value.namespace ?
-      value.namespace
-    : undefined)
+  const namespace = identityNamespace(value, policy, parentNamespace)
   return { kind, name: value.name, ...(namespace ? { namespace } : {}) }
 }
 
@@ -103,7 +169,7 @@ function collectDeclarations(
       })
       continue
     }
-    const identity = getIdentity(raw, namespace?.name)
+    const identity = getIdentity(raw, collection.policy, namespace?.name)
     if (identity) {
       collection.declarations.set(identityKey(identity), {
         ...identity,
@@ -131,10 +197,13 @@ function withNamespaceDescription(
   }
 }
 
-function collectTools(source: ResponsesPayload): ToolCollection {
+function collectTools(
+  source: ResponsesPayload,
+  policy: ToolMapPolicy,
+): ToolCollection {
   const declarations = new Map<string, ToolDeclaration>()
   const passthrough: Array<Record<string, unknown>> = []
-  const collection = { declarations, passthrough }
+  const collection = { declarations, passthrough, policy }
   if (Array.isArray(source.input)) {
     for (const raw of source.input) {
       if (!isRecord(raw)) continue
@@ -144,7 +213,7 @@ function collectTools(source: ResponsesPayload): ToolCollection {
       ) {
         collectDeclarations(raw.tools, collection)
       }
-      const identity = getIdentity(raw)
+      const identity = getIdentity(raw, policy)
       if (identity && !declarations.has(identityKey(identity))) {
         declarations.set(identityKey(identity), identity)
       }
@@ -161,6 +230,7 @@ function isLegalToolName(value: string): boolean {
 
 function allocateToolNames(
   declarations: Map<string, ToolDeclaration>,
+  policy: ToolMapPolicy,
 ): Map<string, MappedTool> {
   const entries = [...declarations.entries()].sort(([left], [right]) =>
     left.localeCompare(right),
@@ -186,6 +256,15 @@ function allocateToolNames(
     ) {
       result.set(key, { ...tool, wireName: tool.name })
       reserved.add(tool.name)
+    }
+  }
+  if (policy.readableNames) {
+    for (const [key, tool] of entries) {
+      if (result.has(key) || !tool.namespace) continue
+      const name = `${tool.namespace}__${tool.name}`.replaceAll(/[^\w-]/g, "_")
+      if (!isLegalToolName(name) || reserved.has(name)) continue
+      result.set(key, { ...tool, wireName: name })
+      reserved.add(name)
     }
   }
   for (const [key, tool] of entries) {
@@ -273,6 +352,7 @@ function collaborationMessageSchema(
 function mapInputItem(
   item: ResponseInputItem,
   tools: ReadonlyMap<string, MappedTool>,
+  policy: ToolMapPolicy,
 ): Array<ResponseInputItem> {
   if (!isRecord(item)) return [item]
   if (item.type === "additional_tools") return []
@@ -288,7 +368,7 @@ function mapInputItem(
       },
     ]
   }
-  const identity = getIdentity(item)
+  const identity = getIdentity(item, policy)
   const mapped = identity ? tools.get(identityKey(identity)) : undefined
   if (!mapped) return [item]
   const { namespace: _namespace, input, ...rest } = item
@@ -321,10 +401,12 @@ function mapInputItem(
 function mapToolChoice(
   choice: ResponsesPayload["tool_choice"],
   tools: ReadonlyMap<string, MappedTool>,
+  policy: ToolMapPolicy,
 ): ResponsesPayload["tool_choice"] {
   if (!isRecord(choice)) return choice
   const identity = getIdentity(
     choice.type === "tool_search" ? { ...choice, execution: "client" } : choice,
+    policy,
   )
   const tool = identity ? tools.get(identityKey(identity)) : undefined
   return tool ? { type: "function", name: tool.wireName } : choice
@@ -369,13 +451,153 @@ function restoreToolCall(
   }
 }
 
-/** Translate client tools into ordinary Messages tools without changing their identity. */
-export function createResponsesMessagesToolMap(
-  input: ResponsesPayload,
-): ResponsesMessagesToolMap {
+function parseToolArguments(value: string): unknown {
+  if (!value.trim()) return {}
+  try {
+    return JSON.parse(value) as unknown
+  } catch {
+    return undefined
+  }
+}
+
+/** Freeform tools travel as `{ input }`; keep a lone string or raw text usable. */
+function customToolInput(argumentsText: string): string {
+  const parsed = parseToolArguments(argumentsText)
+  if (!isRecord(parsed)) return argumentsText
+  if (typeof parsed.input === "string") return parsed.input
+  const values = Object.values(parsed)
+  return values.length === 1 && typeof values[0] === "string" ?
+      values[0]
+    : argumentsText
+}
+
+/**
+ * Chat models sometimes call the dotted names used in Codex instructions, such
+ * as `functions.collaboration.spawn_agent`. Accept only one unambiguous match.
+ */
+function findChatTool(
+  wireName: string,
+  byWireName: ReadonlyMap<string, MappedTool>,
+): MappedTool | undefined {
+  const exact = byWireName.get(wireName)
+  if (exact) return exact
+  const prefix = `${DEFAULT_TOOL_NAMESPACE}.`
+  const name =
+    wireName.startsWith(prefix) ? wireName.slice(prefix.length) : wireName
+  const separator = name.lastIndexOf(".")
+  const namespace = separator > 0 ? name.slice(0, separator) : undefined
+  const bareName = separator > 0 ? name.slice(separator + 1) : name
+  if (!bareName) return undefined
+  const matches = [...byWireName.values()].filter(
+    (tool) =>
+      tool.kind !== "tool_search"
+      && tool.name === bareName
+      && (namespace === undefined || tool.namespace === namespace),
+  )
+  return matches.length === 1 ? matches[0] : undefined
+}
+
+interface ChatToolCallRestoration {
+  readonly argumentsText: string
+  readonly callId: string
+  readonly tool: MappedTool | undefined
+  readonly wireName: string
+}
+
+function restoreChatCustomToolCall(
+  call: ChatToolCallRestoration,
+  tool: MappedTool,
+): ResponseOutputCustomToolCall {
+  return {
+    id: `ctc_${call.callId}`,
+    type: "custom_tool_call",
+    call_id: call.callId,
+    status: "completed",
+    name: tool.name,
+    ...(tool.namespace ? { namespace: tool.namespace } : {}),
+    input: customToolInput(call.argumentsText),
+  }
+}
+
+function restoreChatToolSearchCall(
+  call: ChatToolCallRestoration,
+): ResponseOutputToolSearchCall {
+  const parsed = parseToolArguments(call.argumentsText)
+  return {
+    id: `ts_${call.callId}`,
+    type: "tool_search_call",
+    call_id: call.callId,
+    status: "completed",
+    execution: "client",
+    arguments: isRecord(parsed) ? parsed : {},
+  }
+}
+
+/** Unknown names stay as ordinary function calls, as they did before mapping. */
+function restoreChatFunctionCall(
+  call: ChatToolCallRestoration,
+): ResponseOutputFunctionCall {
+  const { tool } = call
+  return {
+    id: `fc_${call.callId}`,
+    type: "function_call",
+    call_id: call.callId,
+    status: "completed",
+    name: tool?.name ?? call.wireName,
+    ...(tool?.namespace ? { namespace: tool.namespace } : {}),
+    ...(tool && collaborationMessageSchema(tool)?.encrypted === true ?
+      { encrypted_function_args: [] }
+    : {}),
+    arguments: call.argumentsText,
+  }
+}
+
+function restoreChatToolCall(
+  call: ChatToolCallLike,
+  fallbackCallId: string,
+  byWireName: ReadonlyMap<string, MappedTool>,
+): RestoredChatToolCall {
+  const wireName = call.function?.name ?? ""
+  const restoration: ChatToolCallRestoration = {
+    argumentsText: call.function?.arguments ?? "",
+    callId: call.id ?? fallbackCallId,
+    tool: findChatTool(wireName, byWireName),
+    wireName,
+  }
+  const { tool } = restoration
+  if (tool?.kind === "custom")
+    return restoreChatCustomToolCall(restoration, tool)
+  if (tool?.kind === "tool_search")
+    return restoreChatToolSearchCall(restoration)
+  return restoreChatFunctionCall(restoration)
+}
+
+function isAdaptedToolDeclaration(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return (
+    value.type === "namespace"
+    || value.type === "custom"
+    || (value.type === "tool_search" && value.execution === "client")
+  )
+}
+
+function isAdaptedHistoryItem(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return (
+    value.type === "custom_tool_call"
+    || value.type === "custom_tool_call_output"
+    || value.type === "tool_search_call"
+    || value.type === "tool_search_output"
+    || (value.type === "function_call"
+      && typeof value.namespace === "string"
+      && value.namespace !== "")
+  )
+}
+
+function mapResponsesTools(input: ResponsesPayload, policy: ToolMapPolicy) {
   const source = structuredClone(input)
-  const { declarations, passthrough } = collectTools(source)
-  const mapping = allocateToolNames(declarations)
+  const { declarations, passthrough } = collectTools(source, policy)
+  const mapping = allocateToolNames(declarations, policy)
   const byWireName = new Map(
     [...mapping.values()].map((tool) => [tool.wireName, tool]),
   )
@@ -387,13 +609,48 @@ export function createResponsesMessagesToolMap(
     source.tools = [...definitions, ...passthrough]
   }
   if (Array.isArray(source.input)) {
-    source.input = source.input.flatMap((item) => mapInputItem(item, mapping))
+    source.input = source.input.flatMap((item) =>
+      mapInputItem(item, mapping, policy),
+    )
   }
   if (source.tool_choice !== undefined) {
-    source.tool_choice = mapToolChoice(source.tool_choice, mapping)
+    source.tool_choice = mapToolChoice(source.tool_choice, mapping, policy)
   }
+  return { byWireName, source }
+}
+
+/** Translate client tools into ordinary Messages tools without changing their identity. */
+export function createResponsesMessagesToolMap(
+  input: ResponsesPayload,
+): ResponsesMessagesToolMap {
+  const { byWireName, source } = mapResponsesTools(input, MESSAGES_POLICY)
   return {
     source,
     restoreToolCall: (block) => restoreToolCall(block, byWireName),
+  }
+}
+
+/**
+ * Translate client tools into ordinary Chat functions. Codex's default
+ * `functions` namespace stays root-level, as native Responses models call it.
+ */
+export function createResponsesChatToolTranslation(
+  input: ResponsesPayload,
+): ResponsesChatToolTranslation {
+  const { byWireName, source } = mapResponsesTools(input, CHAT_POLICY)
+  const inputItems = Array.isArray(input.input) ? input.input : []
+  return {
+    source,
+    adaptedTools:
+      (Array.isArray(input.tools)
+        && input.tools.some((tool) => isAdaptedToolDeclaration(tool)))
+      || inputItems.some(
+        (item) => isRecord(item) && item.type === "additional_tools",
+      ),
+    adaptedHistory: inputItems.some((item) => isAdaptedHistoryItem(item)),
+    toolMap: {
+      restoreToolCall: (call, fallbackCallId) =>
+        restoreChatToolCall(call, fallbackCallId, byWireName),
+    },
   }
 }

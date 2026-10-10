@@ -12,7 +12,6 @@ import type {
 import type { ResponsesWireBody } from "~/services/copilot/responses-contract"
 
 import { fetchUrlAsDataUri } from "~/lib/attachments"
-import { getConfig } from "~/lib/config"
 import { createEvaluatedTranslationCheck } from "~/lib/endpoint-routing"
 import { isModelFallbackActive } from "~/lib/model-fallback"
 import {
@@ -25,12 +24,19 @@ import type { ResponsesAttachmentCache } from "./attachment-cache"
 
 import { normalizeResponsesAgentMessage } from "./agent-message"
 import { toCompactionSummaryRequest } from "./compaction-trigger"
+import {
+  createResponsesChatToolTranslation,
+  type ResponsesChatToolMap,
+} from "./messages-tool-map"
 import { associateResponsesFunctionCalls } from "./tool-call-association"
 
 export type ResponsesChatCandidate = EvaluatedEndpointCandidate<
   "/chat/completions",
   ChatCompletionsPayload
->
+> & {
+  /** Restores the client's tool identities on translated Chat tool calls. */
+  readonly toolMap?: ResponsesChatToolMap
+}
 
 export interface AdaptResponsesToChatOptions {
   readonly finalModel?: string
@@ -66,6 +72,7 @@ interface AdapterState {
 const FUTURE_ITEM_CONTEXT = "[Future Responses item]"
 const FUTURE_ROLE_CONTEXT = "[Future role content]"
 const UNKNOWN_CONTENT_CONTEXT = "[Unrepresentable content item]"
+const IMAGE_OUTPUT_CONTEXT = "[Image output unavailable]"
 const REASONING_CONTEXT = "[Assistant reasoning context]"
 const UNPAIRED_RESULT_CONTEXT = "[Unpaired tool result]"
 
@@ -109,6 +116,37 @@ function stringifyUseful(value: unknown): string {
   } catch {
     return ""
   }
+}
+
+/**
+ * Chat tool messages carry text. Codex returns typed output parts, such as the
+ * `exec` result's `input_text` items; send their text rather than raw JSON.
+ */
+function toolOutputContent(
+  output: unknown,
+  findings: Array<TranslationFinding>,
+): string {
+  if (!Array.isArray(output)) return stringifyUseful(output)
+  const parts: Array<string> = []
+  for (const part of output) {
+    if (
+      isRecord(part)
+      && (part.type === "input_text"
+        || part.type === "output_text"
+        || part.type === "text")
+      && typeof part.text === "string"
+    ) {
+      parts.push(part.text)
+      continue
+    }
+    addFinding(findings, { class: "content_part", severity: "adapted" })
+    parts.push(
+      isRecord(part) && part.type === "input_image" ?
+        IMAGE_OUTPUT_CONTEXT
+      : UNKNOWN_CONTENT_CONTEXT,
+    )
+  }
+  return parts.join("\n")
 }
 
 async function convertContent(
@@ -217,6 +255,23 @@ function pushContextMessage(
   })
 }
 
+/**
+ * Strict Chat endpoints require tool results to follow the assistant message
+ * that made the calls. Assistant text recorded between those calls and their
+ * results belongs to the same model turn, so it joins that message.
+ */
+function pushAssistantText(messages: Array<Message>, content: string): void {
+  const previous = messages.at(-1)
+  if (previous?.role === "assistant" && previous.tool_calls?.length) {
+    previous.content =
+      typeof previous.content === "string" && previous.content ?
+        `${previous.content}\n\n${content}`
+      : content
+    return
+  }
+  messages.push({ role: "assistant", content })
+}
+
 async function convertInput(
   source: ResponsesWireBody,
   state: AdapterState,
@@ -271,17 +326,19 @@ async function convertInput(
           severity: "adapted",
         })
       }
-      messages.push({
-        role: "assistant",
-        content: null,
-        tool_calls: [
-          {
-            id,
-            type: "function",
-            function: { name, arguments: stringifyArguments(raw.arguments) },
-          },
-        ],
-      })
+      const call = {
+        id,
+        type: "function" as const,
+        function: { name, arguments: stringifyArguments(raw.arguments) },
+      }
+      const previous = messages.at(-1)
+      // Calls from one model turn share an assistant message, so the tool
+      // results that follow answer every call before the next message.
+      if (previous?.role === "assistant" && previous.tool_calls?.length) {
+        previous.tool_calls.push(call)
+      } else {
+        messages.push({ role: "assistant", content: null, tool_calls: [call] })
+      }
       continue
     }
     if (type === "function_call_output") {
@@ -290,7 +347,7 @@ async function convertInput(
         messages.push({
           role: "tool",
           tool_call_id: targetId,
-          content: stringifyUseful(raw.output),
+          content: toolOutputContent(raw.output, state.findings),
         })
       } else {
         addFinding(state.findings, {
@@ -301,7 +358,7 @@ async function convertInput(
           messages,
           "user",
           UNPAIRED_RESULT_CONTEXT,
-          raw.output,
+          toolOutputContent(raw.output, state.findings),
         )
       }
       continue
@@ -339,7 +396,7 @@ async function convertInput(
       }
       for (const entry of summary) {
         if (isRecord(entry) && typeof entry.text === "string" && entry.text) {
-          messages.push({ role: "assistant", content: entry.text })
+          pushAssistantText(messages, entry.text)
         }
       }
       if (
@@ -351,7 +408,7 @@ async function convertInput(
           class: "reasoning_state",
           severity: "adapted",
         })
-        messages.push({ role: "assistant", content: REASONING_CONTEXT })
+        pushAssistantText(messages, REASONING_CONTEXT)
       }
       continue
     }
@@ -377,10 +434,10 @@ async function convertInput(
         })
       } else {
         const name = typeof raw.name === "string" ? raw.name : "unknown"
-        messages.push({
-          role: "assistant",
-          content: `[Custom tool call ${callId}: ${name}(${stringifyUseful(raw.input)})]`,
-        })
+        pushAssistantText(
+          messages,
+          `[Custom tool call ${callId}: ${name}(${stringifyUseful(raw.input)})]`,
+        )
       }
       continue
     }
@@ -408,7 +465,11 @@ async function convertInput(
         resolveAttachment,
       )
       if ((typeof content === "string" && content) || Array.isArray(content)) {
-        messages.push({ role, content })
+        if (role === "assistant" && typeof content === "string") {
+          pushAssistantText(messages, content)
+        } else {
+          messages.push({ role, content })
+        }
       }
       continue
     }
@@ -588,11 +649,9 @@ function convertTools(
       tools.push(createWebSearchFunctionTool(raw))
       continue
     }
-    const isApplyPatch =
-      type === "custom"
-      && raw.name === "apply_patch"
-      && (getConfig().useFunctionApplyPatch ?? true)
-    if (type !== "function" && !isApplyPatch) {
+    // Client tool maps have already turned namespaces, freeform tools, and
+    // client tool search into functions; remaining hosted tools cannot run here.
+    if (type !== "function") {
       addFinding(findings, { class: "tool_shape", severity: "omitted" })
       continue
     }
@@ -602,15 +661,7 @@ function convertTools(
       addFinding(findings, { class: "tool_shape", severity: "omitted" })
       continue
     }
-    const repaired = repairSchema(
-      isApplyPatch ?
-        {
-          type: "object",
-          properties: { input: { type: "string" } },
-          required: ["input"],
-        }
-      : raw.parameters,
-    )
+    const repaired = repairSchema(raw.parameters)
     let strict = typeof raw.strict === "boolean" ? raw.strict : undefined
     if (repaired.repaired) strict = false
     tools.push({
@@ -624,7 +675,7 @@ function convertTools(
         ...(strict === undefined ? {} : { strict }),
       },
     })
-    if (repaired.repaired || isApplyPatch) {
+    if (repaired.repaired) {
       addFinding(findings, { class: "tool_shape", severity: "adapted" })
     }
   }
@@ -691,7 +742,10 @@ function addUnsupportedTopLevelFindings(
 export async function adaptResponsesToChatCandidate(
   options: AdaptResponsesToChatOptions,
 ): Promise<ResponsesChatCandidate> {
-  const source = toCompactionSummaryRequest(clone(options.source))
+  const toolTranslation = createResponsesChatToolTranslation(
+    toCompactionSummaryRequest(clone(options.source)),
+  )
+  const source = toolTranslation.source
   source.model = options.finalModel ?? source.model
   if (options.finalReasoningEffort !== undefined) {
     source.reasoning = {
@@ -700,6 +754,12 @@ export async function adaptResponsesToChatCandidate(
     }
   }
   const state = createState(source)
+  if (toolTranslation.adaptedTools) {
+    addFinding(state.findings, { class: "tool_shape", severity: "adapted" })
+  }
+  if (toolTranslation.adaptedHistory) {
+    addFinding(state.findings, { class: "tool_history", severity: "adapted" })
+  }
   const messages = await convertInput(
     source,
     state,
@@ -768,5 +828,6 @@ export async function adaptResponsesToChatCandidate(
     reason: "endpoint_unavailable",
     payload: finalizedPayload,
     check: createEvaluatedTranslationCheck(findings),
+    toolMap: toolTranslation.toolMap,
   }
 }

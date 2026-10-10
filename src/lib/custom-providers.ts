@@ -18,6 +18,10 @@ import type {
 
 import { getConfigForTest } from "~/lib/config"
 import {
+  customProviderRetryDelayMs,
+  waitForCustomProviderRetry,
+} from "~/lib/custom-provider-retry"
+import {
   tapDebugResponse,
   type CapturedBody,
   DebugCaptureError,
@@ -42,6 +46,7 @@ import {
 import {
   recordUpstreamCall,
   type UpstreamOutcome,
+  type UpstreamSendReason,
 } from "~/lib/routing-telemetry"
 import { getSettingsActorId } from "~/lib/storage/domain-settings"
 import { StorageConflictError } from "~/lib/storage/errors"
@@ -104,6 +109,7 @@ interface CustomProviderFetchRequest {
   payload: Record<string, unknown>
   rawBody?: string
   options?: CustomProviderRequestOptions
+  reason?: UpstreamSendReason
 }
 
 interface CustomProviderErrorContext {
@@ -436,6 +442,7 @@ function customProviderOutcome(response: Response): UpstreamOutcome {
 function recordCustomProviderCall(options: {
   outcome: UpstreamOutcome
   path: string
+  reason?: UpstreamSendReason
   reference: CustomProviderModelReference
 }): void {
   const { outcome, path, reference } = options
@@ -449,7 +456,7 @@ function recordCustomProviderCall(options: {
     model: reference.upstreamModel,
     outcome,
     provider: reference.provider.name,
-    reason: "initial",
+    reason: options.reason ?? "initial",
     route:
       requestState ?
         `${requestState.sourceProtocol} -> ${reference.provider.name}`
@@ -498,6 +505,7 @@ async function fetchCustomProvider(
     recordCustomProviderCall({
       outcome: customProviderOutcome(response),
       path,
+      reason: request.reason,
       reference,
     })
     return response
@@ -510,6 +518,7 @@ async function fetchCustomProvider(
     recordCustomProviderCall({
       outcome: isAbortLikeError(error) ? "aborted" : "transport_error",
       path,
+      reason: request.reason,
       reference,
     })
     throw error
@@ -608,12 +617,23 @@ export async function createCustomProviderChatCompletions(
   options?: CustomProviderRequestOptions,
 ) {
   const outgoing = buildChatPayload(reference, payload, options)
-  const response = await fetchCustomProvider({
+  const request: CustomProviderFetchRequest = {
     reference,
     path: "/chat/completions",
     payload: outgoing,
     options,
-  })
+  }
+  let response = await fetchCustomProvider(request)
+  const retryDelayMs = customProviderRetryDelayMs(response)
+  if (retryDelayMs !== undefined) {
+    consola.warn(
+      `Custom provider ${reference.provider.name} returned HTTP ${response.status} for ${reference.upstreamModel}; retrying once in ${(retryDelayMs / 1000).toFixed(1)}s`,
+    )
+    // Drain the refused attempt so its debug capture completes.
+    await response.text().catch(() => undefined)
+    await waitForCustomProviderRetry(retryDelayMs, options?.signal)
+    response = await fetchCustomProvider({ ...request, reason: "http_retry" })
+  }
 
   if (!response.ok) {
     await throwCustomProviderError({

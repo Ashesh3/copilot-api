@@ -148,6 +148,10 @@ import {
   selectResponsesCandidate,
 } from "./fallback-candidates"
 import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
+import {
+  type ResponsesChatToolMap,
+  type RestoredChatToolCall,
+} from "./messages-tool-map"
 import { readResponsesRequestJson } from "./request-json"
 import { adaptResponsesToChatCandidate } from "./responses-chat-adapter"
 import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
@@ -1092,6 +1096,7 @@ const handleResponsesInner = async (
         requestedModel,
         copilotSessionToken,
         initiator: sourceInitiator,
+        toolMap: candidate.toolMap,
         webSearchMaxUses: getResponsesChatWebSearchMaxUses(payload),
       })
     }
@@ -1274,7 +1279,8 @@ function getResponsesCopilotModelIds(): Set<string> {
   return new Set(state.models?.data.map((model) => model.id) ?? [])
 }
 
-function resolveCustomResponsesModel(
+/** Resolve a custom-provider chat model by configured id or alias. */
+export function resolveCustomResponsesModel(
   model: string,
   payload?: ResponsesPayload,
 ): CustomProviderModelReference | undefined {
@@ -1361,6 +1367,7 @@ async function dispatchCustomResponsesRequest(
     compactionTrigger: hasCompactionTrigger(options.payload),
     completionFactory,
     requestedModel: options.requestedModel,
+    toolMap: candidate.toolMap,
     webSearchMaxUses: getResponsesChatWebSearchMaxUses(options.payload),
   })
 }
@@ -1613,6 +1620,10 @@ interface CCFunctionCallState {
   name: string
   arguments: string
   outputIndex: number
+  /** The client has seen `response.output_item.added` for this call. */
+  announced: boolean
+  /** Freeform and tool-search calls are emitted once their input is complete. */
+  buffered: boolean
 }
 
 interface CCStreamState {
@@ -1622,6 +1633,8 @@ interface CCStreamState {
   resolvedModel: string
   accumulatedText: string
   textItemAdded: boolean
+  /** Output position of the text item, fixed when its first delta arrives. */
+  textOutputIndex?: number
   messageItemId: string
   functionCalls: Map<number, CCFunctionCallState>
   nextOutputIndex: number
@@ -1632,11 +1645,15 @@ interface CCStreamState {
   reasoningText: string
   reasoningOpaque?: string
   encryptedContent?: string
+  toolMap?: ResponsesChatToolMap
 }
 
 type WriteEventFn = (event: string, data: unknown) => Promise<void>
 
-const createCCStreamState = (model: string): CCStreamState => ({
+const createCCStreamState = (
+  model: string,
+  toolMap?: ResponsesChatToolMap,
+): CCStreamState => ({
   seqNum: 0,
   responseId: "resp_cc",
   createdAt: Math.floor(Date.now() / 1000),
@@ -1650,24 +1667,55 @@ const createCCStreamState = (model: string): CCStreamState => ({
   responseCreated: false,
   preserveFallbackThinking: isModelFallbackActive(),
   reasoningText: "",
+  ...(toolMap ? { toolMap } : {}),
 })
+
+/** Restore a translated Chat tool call to the identity the client declared. */
+function restoreCCToolCall(
+  state: CCStreamState,
+  call: CCFunctionCallState,
+  status: "completed" | "in_progress",
+): RestoredChatToolCall {
+  const restored: RestoredChatToolCall =
+    state.toolMap ?
+      state.toolMap.restoreToolCall(
+        {
+          id: call.callId,
+          function: { name: call.name, arguments: call.arguments },
+        },
+        call.callId,
+      )
+    : {
+        id: call.itemId,
+        type: "function_call",
+        call_id: call.callId,
+        name: call.name,
+        arguments: call.arguments,
+      }
+  return { ...restored, status }
+}
 
 function ccFailureOutput(state: CCStreamState): Array<ResponseOutputItem> {
   const output = createPartialTextOutput(
     state.accumulatedText,
     state.messageItemId,
-  )
+  ).map((item) => ({ index: state.textOutputIndex ?? 0, item }))
   for (const [, call] of state.functionCalls) {
     output.push({
-      id: call.itemId,
-      type: "function_call",
-      call_id: call.callId,
-      name: call.name,
-      arguments: call.arguments,
-      status: "in_progress",
+      index: call.outputIndex,
+      item: restoreCCToolCall(state, call, "in_progress"),
     })
   }
-  return output
+  return inOutputOrder(output)
+}
+
+/** Items stream in arrival order; their output indexes fix the final order. */
+function inOutputOrder(
+  entries: Array<{ index: number; item: ResponseOutputItem }>,
+): Array<ResponseOutputItem> {
+  return entries
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.item)
 }
 
 const convertInputToMessages = (
@@ -1974,6 +2022,7 @@ function mapResponsesControlsToChat(
 const chatCompletionToResponsesResult = (
   response: ChatCompletionResponse,
   model: string,
+  toolMap?: ResponsesChatToolMap,
 ): ResponsesResult => {
   const choice = response.choices[0]
   const output: Array<ResponseOutputItem> = []
@@ -2013,15 +2062,19 @@ const chatCompletionToResponsesResult = (
 
   // Map tool calls
   if (choice.message.tool_calls) {
-    for (const tc of choice.message.tool_calls) {
-      output.push({
-        id: `fc_${tc.id}`,
-        type: "function_call",
-        call_id: tc.id,
-        name: tc.function.name,
-        arguments: tc.function.arguments,
-        status: "completed",
-      } satisfies ResponseOutputFunctionCall)
+    for (const [index, tc] of choice.message.tool_calls.entries()) {
+      output.push(
+        toolMap ?
+          toolMap.restoreToolCall(tc, `call_cc_${index}`)
+        : ({
+            id: `fc_${tc.id}`,
+            type: "function_call",
+            call_id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+            status: "completed",
+          } satisfies ResponseOutputFunctionCall),
+      )
     }
   }
 
@@ -2115,7 +2168,7 @@ const emitTextDelta = async (
 ): Promise<void> => {
   if (!s.textItemAdded) {
     s.textItemAdded = true
-    const textOutputIndex = s.nextOutputIndex++
+    s.textOutputIndex = s.nextOutputIndex++
     await writeEvent("response.output_item.added", {
       item: {
         id: s.messageItemId,
@@ -2124,7 +2177,7 @@ const emitTextDelta = async (
         status: "in_progress",
         content: [],
       },
-      output_index: textOutputIndex,
+      output_index: s.textOutputIndex,
       sequence_number: s.seqNum++,
       type: "response.output_item.added",
     })
@@ -2135,7 +2188,7 @@ const emitTextDelta = async (
     content_index: 0,
     delta: content,
     item_id: s.messageItemId,
-    output_index: 0,
+    output_index: s.textOutputIndex ?? 0,
     sequence_number: s.seqNum++,
     type: "response.output_text.delta",
   })
@@ -2151,45 +2204,65 @@ const emitToolCallDelta = async (
 
   if (!fcState) {
     const callId = tc.id ?? `call_cc_${tcIndex}`
-    const name = tc.function?.name ?? ""
     fcState = {
       itemId: `fc_${callId}`,
       callId,
-      name,
+      name: "",
       arguments: "",
       outputIndex: s.nextOutputIndex++,
+      announced: false,
+      buffered: false,
     }
     s.functionCalls.set(tcIndex, fcState)
-
-    await writeEvent("response.output_item.added", {
-      item: {
-        id: fcState.itemId,
-        type: "function_call",
-        call_id: fcState.callId,
-        name: fcState.name,
-        arguments: "",
-        status: "in_progress",
-      },
-      output_index: fcState.outputIndex,
-      sequence_number: s.seqNum++,
-      type: "response.output_item.added",
-    })
   }
 
   if (tc.function?.name && !fcState.name) {
     fcState.name = tc.function.name
   }
 
-  if (tc.function?.arguments) {
-    fcState.arguments += tc.function.arguments
-    await writeEvent("response.function_call_arguments.delta", {
-      delta: tc.function.arguments,
-      item_id: fcState.itemId,
-      output_index: fcState.outputIndex,
-      sequence_number: s.seqNum++,
-      type: "response.function_call_arguments.delta",
-    })
+  const argumentsDelta = tc.function?.arguments ?? ""
+  fcState.arguments += argumentsDelta
+  if (!fcState.announced) {
+    // Announce only once the tool name identifies the client tool.
+    if (fcState.name) await announceToolCall(s, fcState, writeEvent)
+    return
   }
+  if (!argumentsDelta || fcState.buffered) return
+  await writeEvent("response.function_call_arguments.delta", {
+    delta: argumentsDelta,
+    item_id: fcState.itemId,
+    output_index: fcState.outputIndex,
+    sequence_number: s.seqNum++,
+    type: "response.function_call_arguments.delta",
+  })
+}
+
+async function announceToolCall(
+  s: CCStreamState,
+  fcState: CCFunctionCallState,
+  writeEvent: WriteEventFn,
+): Promise<void> {
+  fcState.announced = true
+  const item = restoreCCToolCall(s, fcState, "in_progress")
+  if (item.type !== "function_call") {
+    fcState.buffered = true
+    return
+  }
+  fcState.itemId = item.id ?? fcState.itemId
+  await writeEvent("response.output_item.added", {
+    item: { ...item, id: fcState.itemId, arguments: "" },
+    output_index: fcState.outputIndex,
+    sequence_number: s.seqNum++,
+    type: "response.output_item.added",
+  })
+  if (!fcState.arguments) return
+  await writeEvent("response.function_call_arguments.delta", {
+    delta: fcState.arguments,
+    item_id: fcState.itemId,
+    output_index: fcState.outputIndex,
+    sequence_number: s.seqNum++,
+    type: "response.function_call_arguments.delta",
+  })
 }
 
 const emitDoneEvents = async (
@@ -2197,13 +2270,21 @@ const emitDoneEvents = async (
   finishReason: string,
   writeEvent: WriteEventFn,
 ): Promise<"response.completed" | "response.incomplete"> => {
+  const pending: Array<{ index: number; emit: () => Promise<void> }> = []
   if (s.accumulatedText) {
-    await emitTextDoneEvents(s, writeEvent)
+    pending.push({
+      index: s.textOutputIndex ?? 0,
+      emit: () => emitTextDoneEvents(s, writeEvent),
+    })
   }
-
   for (const [, fcState] of s.functionCalls) {
-    await emitFunctionCallDoneEvents(s, fcState, writeEvent)
+    pending.push({
+      index: fcState.outputIndex,
+      emit: () => emitFunctionCallDoneEvents(s, fcState, writeEvent),
+    })
   }
+  pending.sort((left, right) => left.index - right.index)
+  for (const entry of pending) await entry.emit()
 
   const reasoning = fallbackStreamReasoning(s)
   if (reasoning) {
@@ -2232,7 +2313,7 @@ const emitTextDoneEvents = async (
   await writeEvent("response.output_text.done", {
     content_index: 0,
     item_id: s.messageItemId,
-    output_index: 0,
+    output_index: s.textOutputIndex ?? 0,
     sequence_number: s.seqNum++,
     text: s.accumulatedText,
     type: "response.output_text.done",
@@ -2252,7 +2333,7 @@ const emitTextDoneEvents = async (
         } satisfies ResponseOutputText,
       ],
     } satisfies ResponseOutputMessage,
-    output_index: 0,
+    output_index: s.textOutputIndex ?? 0,
     sequence_number: s.seqNum++,
     type: "response.output_item.done",
   })
@@ -2263,24 +2344,63 @@ const emitFunctionCallDoneEvents = async (
   fcState: CCFunctionCallState,
   writeEvent: WriteEventFn,
 ): Promise<void> => {
-  await writeEvent("response.function_call_arguments.done", {
-    arguments: fcState.arguments,
-    item_id: fcState.itemId,
-    name: fcState.name,
-    output_index: fcState.outputIndex,
-    sequence_number: s.seqNum++,
-    type: "response.function_call_arguments.done",
-  })
+  const item = restoreCCToolCall(s, fcState, "completed")
+  const itemId = fcState.buffered ? (item.id ?? fcState.itemId) : fcState.itemId
+  if (!fcState.announced || fcState.buffered) {
+    // Calls held until completion still get the full added/input/done sequence.
+    fcState.announced = true
+    await writeEvent("response.output_item.added", {
+      item: {
+        ...item,
+        id: itemId,
+        status: "in_progress",
+        ...(item.type === "function_call" ? { arguments: "" } : {}),
+        ...(item.type === "custom_tool_call" ? { input: "" } : {}),
+      },
+      output_index: fcState.outputIndex,
+      sequence_number: s.seqNum++,
+      type: "response.output_item.added",
+    })
+    if (item.type === "function_call" && item.arguments) {
+      await writeEvent("response.function_call_arguments.delta", {
+        delta: item.arguments,
+        item_id: itemId,
+        output_index: fcState.outputIndex,
+        sequence_number: s.seqNum++,
+        type: "response.function_call_arguments.delta",
+      })
+    }
+    if (item.type === "custom_tool_call") {
+      await writeEvent("response.custom_tool_call_input.delta", {
+        delta: item.input,
+        item_id: itemId,
+        output_index: fcState.outputIndex,
+        sequence_number: s.seqNum++,
+        type: "response.custom_tool_call_input.delta",
+      })
+    }
+  }
+  if (item.type === "function_call") {
+    await writeEvent("response.function_call_arguments.done", {
+      arguments: item.arguments,
+      item_id: itemId,
+      name: item.name,
+      output_index: fcState.outputIndex,
+      sequence_number: s.seqNum++,
+      type: "response.function_call_arguments.done",
+    })
+  } else if (item.type === "custom_tool_call") {
+    await writeEvent("response.custom_tool_call_input.done", {
+      input: item.input,
+      item_id: itemId,
+      output_index: fcState.outputIndex,
+      sequence_number: s.seqNum++,
+      type: "response.custom_tool_call_input.done",
+    })
+  }
 
   await writeEvent("response.output_item.done", {
-    item: {
-      id: fcState.itemId,
-      type: "function_call",
-      call_id: fcState.callId,
-      name: fcState.name,
-      arguments: fcState.arguments,
-      status: "completed",
-    } satisfies ResponseOutputFunctionCall,
+    item: { ...item, id: itemId },
     output_index: fcState.outputIndex,
     sequence_number: s.seqNum++,
     type: "response.output_item.done",
@@ -2292,35 +2412,36 @@ const emitResponseCompleted = async (
   finishReason: string,
   writeEvent: WriteEventFn,
 ): Promise<"response.completed" | "response.incomplete"> => {
-  const finalOutput: Array<ResponseOutputItem> = []
+  const indexed: Array<{ index: number; item: ResponseOutputItem }> = []
 
   if (s.accumulatedText) {
-    finalOutput.push({
-      id: s.messageItemId,
-      type: "message",
-      role: "assistant",
-      status: "completed",
-      content: [
-        {
-          type: "output_text",
-          text: s.accumulatedText,
-          annotations: [],
-        } satisfies ResponseOutputText,
-      ],
-    } satisfies ResponseOutputMessage)
+    indexed.push({
+      index: s.textOutputIndex ?? 0,
+      item: {
+        id: s.messageItemId,
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [
+          {
+            type: "output_text",
+            text: s.accumulatedText,
+            annotations: [],
+          } satisfies ResponseOutputText,
+        ],
+      } satisfies ResponseOutputMessage,
+    })
   }
 
   for (const [, fcState] of s.functionCalls) {
-    finalOutput.push({
-      id: fcState.itemId,
-      type: "function_call",
-      call_id: fcState.callId,
-      name: fcState.name,
-      arguments: fcState.arguments,
-      status: "completed",
-    } satisfies ResponseOutputFunctionCall)
+    const item = restoreCCToolCall(s, fcState, "completed")
+    indexed.push({
+      index: fcState.outputIndex,
+      item: fcState.buffered ? item : { ...item, id: fcState.itemId },
+    })
   }
 
+  const finalOutput = inOutputOrder(indexed)
   const reasoning = fallbackStreamReasoning(s)
   if (reasoning) finalOutput.push(reasoning)
 
@@ -2347,21 +2468,30 @@ const emitResponseCompleted = async (
   return terminalEvent
 }
 
+export interface ChatResponsesStreamTarget {
+  readonly model: string
+  /** Restores client tool identities on translated tool calls. */
+  readonly toolMap?: ResponsesChatToolMap
+}
+
 export const streamChatCompletionsAsResponses = async (
   stream: {
     writeSSE: (data: { event?: string; data: string }) => Promise<void>
   },
   ccStream: AsyncIterable<{ data?: string; event?: string }>,
-  model: string,
+  target: string | ChatResponsesStreamTarget,
 ): Promise<{
   state: CCStreamState
   terminal?: "response.completed" | "response.incomplete"
-}> =>
-  await streamChatCompletionsAsResponsesWithState({
+}> => {
+  const { model, toolMap } =
+    typeof target === "string" ? { model: target, toolMap: undefined } : target
+  return await streamChatCompletionsAsResponsesWithState({
     stream,
     ccStream,
-    state: createCCStreamState(model),
+    state: createCCStreamState(model, toolMap),
   })
+}
 
 const streamChatCompletionsAsResponsesWithState = async (options: {
   stream: {
@@ -2588,6 +2718,8 @@ export const handleWithChatCompletions = async (
     requestedModel?: string
     copilotSessionToken?: string
     initiator?: "agent" | "user"
+    /** Restores client tool identities on translated tool calls. */
+    toolMap?: ResponsesChatToolMap
     webSearchMaxUses?: number
   } = {},
 ) => {
@@ -2686,6 +2818,7 @@ export const handleWithChatCompletions = async (
         const result = chatCompletionToResponsesResult(
           ccResponse,
           responseModel,
+          options.toolMap,
         )
         return c.json(result)
       },
@@ -2699,6 +2832,7 @@ export const handleWithChatCompletions = async (
       ccPayload,
       completionFactory,
       responseModel,
+      toolMap: options.toolMap,
       webSearchMaxUses: options.webSearchMaxUses,
     })
   }
@@ -2755,12 +2889,13 @@ export const handleWithChatCompletions = async (
           const result = chatCompletionToResponsesResult(
             response,
             responseModel,
+            options.toolMap,
           )
           return c.json(result)
         }
 
         return streamSSE(c, async (sseStream) => {
-          const chatState = createCCStreamState(responseModel)
+          const chatState = createCCStreamState(responseModel, options.toolMap)
           const failureState = createResponsesStreamFailureState(responseModel)
           const lifecycle = createResponsesTerminalLifecycle({
             c,
@@ -2886,6 +3021,7 @@ function handleStreamingChatFallbackWebSearch(
     ccPayload: ChatCompletionsPayload
     completionFactory: ResponsesChatCompletionFactory
     responseModel: string
+    toolMap?: ResponsesChatToolMap
     webSearchMaxUses?: number
   },
 ): Response {
@@ -2921,6 +3057,7 @@ function handleStreamingChatFallbackWebSearch(
           return chatCompletionToResponsesResult(
             response,
             options.responseModel,
+            options.toolMap,
           )
         })(),
         stream,

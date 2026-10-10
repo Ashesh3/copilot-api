@@ -90,6 +90,7 @@ import {
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
 
+import { createResponsesAttachmentCache } from "./attachment-cache"
 import {
   resolvePreparedResponsesWebSearchCalls,
   type ResponsesChatCompletionFactory,
@@ -104,10 +105,12 @@ import {
   chatCompactionTriggerResult,
   disableParallelWebSearch,
   normalizeResponsesReasoning,
+  resolveCustomResponsesModel,
   rewriteResponseModelInEvent,
   streamChatCompletionsAsResponses,
 } from "./handler"
 import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
+import { type ResponsesChatToolMap } from "./messages-tool-map"
 import {
   adaptResponsesToChatCandidate,
   getResponsesChatWebSearchMaxUses,
@@ -482,6 +485,8 @@ async function normalizeContinuationReview(
     }
   }
   if (typeof incomingModel !== "string") return { payload: rawPayload }
+  const customPayload = normalizeCustomWebSocketPayload(rawPayload)
+  if (customPayload) return { payload: customPayload }
   return {
     payload: {
       ...rawPayload,
@@ -594,13 +599,37 @@ async function handleResponseCreate(
     return
   }
 
+  const directCustom = prepareDirectCustomProviderTurn(payload)
+  if (directCustom?.reference) {
+    turn.continuationModel = directCustom.continuationModel
+    turn.model = payload.model
+    turn.reasoningEffort = directCustom.providerEffort
+    ensureResponsesWebSocketLifecycle(turn, {
+      model: payload.model,
+      reasoningEffort: directCustom.providerEffort,
+      requestedModel,
+    })
+    expandCompactionItems(payload)
+    disableParallelWebSearch(payload)
+    throwIfWebSocketTurnAborted(turn)
+    await streamCustomProviderOverWs({
+      ws,
+      payload,
+      turn,
+      reference: directCustom.reference,
+      finalReasoningEffort: directCustom.finalEffort,
+    })
+    return
+  }
+
   const routing = await waitForWebSocketTurn(
     applyResponsesWebSocketRouting(payload),
     turn,
   )
   // Each turn owns its snapshot model, including retries of that same turn.
+  // A custom model moved to Copilot by routing or fallback keeps its own name.
   // eslint-disable-next-line require-atomic-updates
-  turn.continuationModel = payload.model
+  turn.continuationModel = directCustom?.continuationModel ?? payload.model
   applyModelFallbackToPayload(payload, {
     effort: routing.reasoningEffort,
     verbosity: routing.responsesVerbosity,
@@ -646,7 +675,7 @@ async function handleResponseCreate(
       })
     : undefined
   if (customReference) {
-    await streamCustomFallbackOverWs({
+    await streamCustomProviderOverWs({
       ws,
       payload,
       turn,
@@ -811,6 +840,7 @@ async function dispatchTranslatedWebSocketEndpoint(options: {
     initiator,
     payload: candidate.payload,
     responseContext,
+    toolMap: candidate.toolMap,
     turn,
     ws,
   })
@@ -1453,10 +1483,11 @@ async function streamChatCompletionsOverWs(options: {
     { endpoint: "/chat/completions" }
   >["payload"]
   responseContext: ResponsesPayload
+  toolMap?: ResponsesChatToolMap
   turn: ResponsesWebSocketTurn
   ws: ResponsesWebSocketState
 }): Promise<void> {
-  const { initiator, payload, responseContext, turn, ws } = options
+  const { initiator, payload, responseContext, toolMap, turn, ws } = options
   const compaction = isResponsesCompactionRequest(responseContext)
   const ccPayload = structuredClone(payload)
   if (hasCompactionTrigger(responseContext)) {
@@ -1481,6 +1512,7 @@ async function streamChatCompletionsOverWs(options: {
       compaction,
       initiator,
       maxUses: getResponsesChatWebSearchMaxUses(responseContext),
+      toolMap,
       turn,
     })
     return
@@ -1509,11 +1541,10 @@ async function streamChatCompletionsOverWs(options: {
     },
   }
 
-  await streamChatCompletionsAsResponses(
-    wsStream,
-    ccStream,
-    responseContext.model,
-  )
+  await streamChatCompletionsAsResponses(wsStream, ccStream, {
+    model: responseContext.model,
+    toolMap,
+  })
 }
 
 /** Answer a Codex compaction trigger on Chat Completions with one item. */
@@ -1577,19 +1608,90 @@ async function emitChatCompactionOverWs(options: {
   )
 }
 
-async function streamCustomFallbackOverWs(options: {
+interface DirectCustomProviderTurn {
+  /** Snapshot model for continuations, before service-tier routing or fallback. */
+  readonly continuationModel: string
+  /** Effort written into the translated Chat request. */
+  readonly finalEffort?: string | number
+  /** Effort forwarded to providers that accept `reasoning_effort`. */
+  readonly providerEffort?: ReasoningEffort
+  /** Absent when service-tier routing or a fallback moved the turn to Copilot. */
+  readonly reference?: CustomProviderModelReference
+}
+
+/**
+ * Custom-provider models keep their configured names, as they do on HTTP. A
+ * model suffix becomes reasoning effort here, so continuations compare the
+ * suffix-free name that the turn's snapshot stores.
+ */
+function normalizeCustomWebSocketPayload(
+  payload: ResponsesPayload,
+): ResponsesPayload | undefined {
+  const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
+    payload.model,
+  )
+  if (!resolveCustomResponsesModel(baseModel, payload)) return undefined
+  const normalized = { ...payload, model: baseModel }
+  normalizeResponsesReasoning(normalized, suffixEffort)
+  return normalized
+}
+
+/**
+ * Mirror HTTP: a custom-provider model selected by the client keeps its
+ * configured name and never enters Copilot redirects or account routing.
+ * Priority service tiers and configured fallbacks still apply, including
+ * routes that move the turn to a Copilot model.
+ */
+function prepareDirectCustomProviderTurn(
+  payload: ResponsesPayload,
+): DirectCustomProviderTurn | undefined {
+  const { baseModel, reasoningEffort: suffixEffort } = parseModelSuffix(
+    payload.model,
+  )
+  const requested = resolveCustomResponsesModel(baseModel, payload)
+  if (!requested) return undefined
+  payload.model = baseModel
+  const effectiveEffort = normalizeResponsesReasoning(payload, suffixEffort)
+  const serviceTier = applyResponsesServiceTierRouting(undefined, payload, {
+    customReference: requested,
+  })
+  const beforeFallback = payload.model
+  applyModelFallbackToPayload(payload)
+  const reference =
+    (beforeFallback === payload.model ? serviceTier.customReference : undefined)
+    ?? resolveCustomResponsesModel(payload.model, payload)
+  const finalEffort =
+    typeof effectiveEffort === "number" ? effectiveEffort : (
+      (getModelFallbackRedirect()?.effort ?? effectiveEffort)
+    )
+  return {
+    continuationModel: baseModel,
+    finalEffort,
+    providerEffort: parseReasoningEffort(finalEffort),
+    ...(reference ? { reference } : {}),
+  }
+}
+
+async function streamCustomProviderOverWs(options: {
   ws: ResponsesWebSocketState
   payload: ResponsesPayload
   turn: ResponsesWebSocketTurn
   reference: CustomProviderModelReference
+  /** Defaults to the payload's own effort for fallback-selected providers. */
+  finalReasoningEffort?: string | number
 }): Promise<void> {
   const { ws, payload, turn, reference } = options
   const candidate = await waitForWebSocketTurn(
     adaptResponsesToChatCandidate({
       source: payload,
       finalModel: payload.model,
-      finalReasoningEffort: payload.reasoning?.effort ?? undefined,
+      finalReasoningEffort:
+        options.finalReasoningEffort ?? payload.reasoning?.effort ?? undefined,
       signal: turn.abortController.signal,
+      // A warmup only evaluates the request, as on Copilot routes.
+      attachmentCache: createResponsesAttachmentCache({
+        resolveRemote: !isSyntheticWarmupRequest(payload),
+      }),
     }),
     turn,
   )
@@ -1654,7 +1756,7 @@ async function streamCustomFallbackOverWs(options: {
       },
     },
     chatResponseAsStream(response),
-    payload.model,
+    { model: payload.model, toolMap: candidate.toolMap },
   )
 }
 
@@ -1668,6 +1770,7 @@ async function streamChatWebSearchOverWs(options: {
   compaction: boolean
   initiator: "agent" | "user"
   maxUses?: number
+  toolMap?: ResponsesChatToolMap
   turn: ResponsesWebSocketTurn
 }): Promise<void> {
   const {
@@ -1677,6 +1780,7 @@ async function streamChatWebSearchOverWs(options: {
     compaction,
     initiator,
     maxUses,
+    toolMap,
     turn,
   } = options
   ccPayload.stream = false
@@ -1715,7 +1819,7 @@ async function streamChatWebSearchOverWs(options: {
   await streamChatCompletionsAsResponses(
     wsStream,
     chatResponseAsStream(response),
-    responseContext.model,
+    { model: responseContext.model, toolMap },
   )
 }
 
