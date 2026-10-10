@@ -15,6 +15,7 @@ import {
   resolveCustomProviderModel,
 } from "~/lib/custom-providers"
 import { getModelEndpointSupport } from "~/lib/endpoint-routing"
+import { forceCompactionSystemPrompt } from "~/lib/forced-system-prompt"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelFallbackToPayload,
@@ -32,7 +33,10 @@ import {
   normalizeReasoningEffortForModel,
   parseModelSuffix,
 } from "~/lib/model-suffix"
-import { setRequestContext } from "~/lib/request-logger"
+import {
+  recordNonDefaultBehavior,
+  setRequestContext,
+} from "~/lib/request-logger"
 import { installResponsesRoutingAffinity } from "~/lib/routing-affinity"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
@@ -288,21 +292,11 @@ const handleCompactAttempt = async (c: Context, body: CompactRequestBody) => {
     model,
   })
 
-  const compactionPrompt = getCompactionPrompt()
-  const compactionUserMessage: ResponseInputItem = {
-    type: "message",
-    role: "user",
-    content: "Please summarize the conversation above concisely.",
-  }
-
-  const input: Array<ResponseInputItem> = [
-    ...(Array.isArray(body.input) ? body.input : []),
-    compactionUserMessage,
-  ]
-
-  const tempPayload = { input, model } as ResponsesPayload
-  expandCompactionItems(tempPayload)
-  const expandedInput = tempPayload.input as Array<ResponseInputItem>
+  const { compactionPrompt, expandedInput } = prepareCompactionConversation(
+    c,
+    body,
+    requestedModel,
+  )
   const responsesPayload: ResponsesPayload = {
     model,
     instructions: compactionPrompt,
@@ -383,6 +377,37 @@ const handleCompactAttempt = async (c: Context, body: CompactRequestBody) => {
 
   const compactedResponse = buildCompactedResponse(summaryText, usage)
   return c.json(compactedResponse)
+}
+
+/**
+ * The summary instructions and history for a compaction attempt, after the
+ * requested model's forced system prompt is applied.
+ */
+function prepareCompactionConversation(
+  c: Context,
+  body: CompactRequestBody,
+  requestedModel: string,
+): { compactionPrompt: string; expandedInput: Array<ResponseInputItem> } {
+  const forced = forceCompactionSystemPrompt({
+    input: Array.isArray(body.input) ? body.input : [],
+    instructions: getCompactionPrompt(),
+    requestedModel,
+  })
+  if (forced.behavior) recordNonDefaultBehavior(c, forced.behavior)
+  const compactionUserMessage: ResponseInputItem = {
+    type: "message",
+    role: "user",
+    content: "Please summarize the conversation above concisely.",
+  }
+  const tempPayload = {
+    input: [...forced.input, compactionUserMessage],
+    model: body.model,
+  } as ResponsesPayload
+  expandCompactionItems(tempPayload)
+  return {
+    compactionPrompt: forced.instructions,
+    expandedInput: tempPayload.input as Array<ResponseInputItem>,
+  }
 }
 
 function resolveCompactCustomFallback(model: string) {

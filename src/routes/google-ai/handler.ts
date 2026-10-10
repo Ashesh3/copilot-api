@@ -42,6 +42,7 @@ import {
   isHTTPError,
   reportHttpError,
 } from "~/lib/error"
+import { forceChatSystemPrompt } from "~/lib/forced-system-prompt"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelFallbackToPayload,
@@ -596,6 +597,7 @@ async function handleGoogleAIInner(c: Context) {
         source: "chat",
       })
     }
+    applyGoogleForcedSystemPrompt(c, localCandidate.payload, rawModel)
     const totalTokens =
       selectedModel ?
         (await getTokenCount(localCandidate.payload, selectedModel)).input
@@ -624,6 +626,7 @@ async function handleGoogleAIInner(c: Context) {
     ...structuredClone(replacedPayload),
     model: normalizeModelName(replacedPayload.model),
   }
+  applyGoogleForcedSystemPrompt(c, finalPayload, rawModel)
   applyModelFallbackToPayload(finalPayload)
   // Replacements may change the model. Reserve ownership only after the final
   // model is known, including when the earlier capability probe chose an account.
@@ -708,6 +711,16 @@ function getGoogleCopilotModelIds(): Set<string> {
   return new Set(state.models?.data.map((model) => model.id) ?? [])
 }
 
+/** Gemini requests are translated to Chat first, so Chat placement applies. */
+function applyGoogleForcedSystemPrompt(
+  c: Context,
+  payload: ChatCompletionsPayload,
+  requestedModel: string,
+): void {
+  const behavior = forceChatSystemPrompt(payload, requestedModel)
+  if (behavior) recordNonDefaultBehavior(c, behavior)
+}
+
 function resolveCustomGoogleModel(
   model: string,
 ): CustomProviderModelReference | undefined {
@@ -767,6 +780,7 @@ async function handleCustomGoogleRequest(
   if (options.isCount) {
     const { payload: replacedPayload, appliedRules } =
       await applyReplacementsToPayload(candidate.payload)
+    applyGoogleForcedSystemPrompt(c, replacedPayload, options.rawModel)
     const totalTokens = await estimateTokenCount(replacedPayload)
     setRequestContext(c, {
       inputTokens: totalTokens,
@@ -783,6 +797,7 @@ async function handleCustomGoogleRequest(
   // The shared translator's Copilot-only default is not a custom-provider field.
   delete replacedPayload.snippy
   applyModelFallbackTransition(replacedPayload)
+  applyGoogleForcedSystemPrompt(c, replacedPayload, options.rawModel)
   recordCopilotTranslationFindings("chat", candidate.endpoint, candidate.check)
   setRequestContext(c, {
     requestedModel: options.rawModel,

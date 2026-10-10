@@ -32,6 +32,12 @@ import {
   reportHttpErrorForTransport,
 } from "~/lib/error"
 import {
+  applyForcedSystemPromptToResponses,
+  type ForcedSystemPrompt,
+  forcedSystemPromptBehavior,
+  resolveForcedSystemPrompt,
+} from "~/lib/forced-system-prompt"
+import {
   applyModelFallbackToPayload,
   getModelFallbackRedirect,
   getModelFallbackEffort,
@@ -162,6 +168,8 @@ export interface ResponsesWebSocketData {
   effectiveNativeMessagesOptions: NativeMessagesRequestOptions
   responseSnapshots: Map<string, ResponsesPayload>
   permissionReviewModels?: Map<string, string>
+  /** Requested model per response, inherited when a continuation omits it. */
+  forcedPromptModels?: Map<string, string>
   fallbackHeaders?: Headers
   fallbackCredentialScope?: string
 }
@@ -336,6 +344,10 @@ async function handleResponsesWebSocketMessage(
   const turn = createResponsesWebSocketTurn(ws.data, message)
   turn.requestedModel = requestedModel
   turn.model = requestedModel
+  // Snapshots keep only the routed model, so a continuation that omits
+  // `model` looks up the ID its conversation originally requested.
+  turn.forcedPromptModel =
+    requestedModel ?? inheritedForcedPromptModel(ws.data, parsedPayload)
   ensureResponsesWebSocketLifecycle(turn, {
     model: requestedModel ?? "unknown",
     requestedModel,
@@ -458,6 +470,7 @@ function closeResponsesWebSocket(ws: { data: ResponsesWebSocketData }) {
   }
   ws.data.responseSnapshots.clear()
   ws.data.permissionReviewModels?.clear()
+  ws.data.forcedPromptModels?.clear()
   ws.data.effectiveNativeMessagesOptions = {}
   ws.data.fallbackHeaders = undefined
   ws.data.authenticationRequest = undefined
@@ -600,6 +613,12 @@ async function handleResponseCreate(
     return
   }
 
+  // Applied to each upstream copy only. The turn payload becomes the stored
+  // continuation, so it keeps the client's own instructions and later turns
+  // use the current setting.
+  turn.forcedPromptModel ??= requestedModel ?? payload.model
+  turn.forcedSystemPrompt = resolveForcedSystemPrompt(turn.forcedPromptModel)
+
   const directCustom = prepareDirectCustomProviderTurn(payload)
   if (directCustom?.reference) {
     // A custom model configured without streaming cannot be served as a live
@@ -706,6 +725,7 @@ async function handleResponseCreate(
   const selectedModel = routedModel.model
   const selectedCandidate = await waitForWebSocketTurn(
     prepareResponsesWebSocketCandidate({
+      forcedSystemPrompt: turn.forcedSystemPrompt,
       payload,
       reasoningEffort,
       responsesVerbosity:
@@ -750,7 +770,10 @@ async function handleResponseCreate(
 
     await waitForWebSocketTurn(candidate.prepareForDispatch(), turn)
 
-    // Native responses streaming
+    // Native responses streaming. A forced candidate is never stored: like
+    // translated routes, the continuation keeps the client's own turn.
+    const snapshotPayload =
+      turn.forcedSystemPrompt ? payload : candidate.payload
     const response = await waitForWebSocketTurn(
       createResponses(candidate.payload, {
         allowCompatibilityRetry: false,
@@ -766,7 +789,7 @@ async function handleResponseCreate(
     if (!isAsyncIterable(response)) {
       // Shouldn't happen since we forced stream: true, but handle gracefully
       await handleNonStreamingResponsesResult(ws, {
-        payload: candidate.payload,
+        payload: snapshotPayload,
         response,
         turn,
       })
@@ -785,7 +808,7 @@ async function handleResponseCreate(
         synchronized,
         getCopilotResponseHeaders(),
       )
-      await emitTurnFrame(ws, turn, candidate.payload, processed, event)
+      await emitTurnFrame(ws, turn, snapshotPayload, processed, event)
       if (turn.terminal.state !== "open") break
     }
   })
@@ -864,6 +887,7 @@ async function dispatchTranslatedWebSocketEndpoint(options: {
 }
 
 async function prepareResponsesWebSocketCandidate(options: {
+  forcedSystemPrompt?: ForcedSystemPrompt
   payload: ResponsesPayload
   reasoningEffort: ReasoningEffort | undefined
   responsesVerbosity?: ModelRedirectVerbosity
@@ -885,6 +909,7 @@ async function prepareResponsesWebSocketCandidate(options: {
 
 async function prepareEvaluatedResponsesWebSocketCandidate(options: {
   evaluationOnly?: boolean
+  forcedSystemPrompt?: ForcedSystemPrompt
   payload: ResponsesPayload
   reasoningEffort: ReasoningEffort | undefined
   responsesVerbosity?: ModelRedirectVerbosity
@@ -893,6 +918,12 @@ async function prepareEvaluatedResponsesWebSocketCandidate(options: {
 }): Promise<ResponsesEndpointCandidate> {
   const evaluationPayload = structuredClone(options.payload)
   if (options.evaluationOnly) delete evaluationPayload.generate
+  // Forced before native finalization, which adds controls such as the JSON
+  // instruction for json_object output after the client's prompts are cleared.
+  forceUpstreamCopy(evaluationPayload, {
+    forced: options.forcedSystemPrompt,
+    report: !options.evaluationOnly,
+  })
   const preparedSource = prepareResponsesRequest(evaluationPayload)
   const nativeBody = finalizeNativeResponsesRequest(preparedSource, {
     model: evaluationPayload.model,
@@ -1066,6 +1097,7 @@ async function emitTurnFrame(
         processed,
       )
       rememberPermissionReviewModel(ws.data, turn, payload, parsed)
+      rememberForcedPromptModel(ws.data, turn, parsed.response?.id)
     }
     if (responseStatus === "failed") {
       return await turn.terminal.succeed({
@@ -1117,6 +1149,42 @@ function rememberPermissionReviewModel(
     return
   data.permissionReviewModels ??= new Map<string, string>()
   data.permissionReviewModels.set(responseId, model)
+}
+
+function rememberForcedPromptModel(
+  data: ResponsesWebSocketData,
+  turn: ResponsesWebSocketTurn,
+  responseId: unknown,
+): void {
+  if (typeof responseId !== "string" || !turn.forcedPromptModel) return
+  data.forcedPromptModels ??= new Map<string, string>()
+  data.forcedPromptModels.set(responseId, turn.forcedPromptModel)
+}
+
+function inheritedForcedPromptModel(
+  data: ResponsesWebSocketData,
+  payload: ResponsesPayload,
+): string | undefined {
+  const previousId = payload.previous_response_id
+  return typeof previousId === "string" ?
+      data.forcedPromptModels?.get(previousId)
+    : undefined
+}
+
+/**
+ * Forces a copy bound for upstream. WebSocket turns store the turn payload
+ * for later continuations, so it never receives the prompt itself. Each turn
+ * reports once; warmups only evaluate the request.
+ */
+function forceUpstreamCopy(
+  payload: ResponsesPayload,
+  options: { forced: ForcedSystemPrompt | undefined; report: boolean },
+): void {
+  if (!options.forced) return
+  const behavior = forcedSystemPromptBehavior(
+    applyForcedSystemPromptToResponses(payload, options.forced),
+  )
+  if (options.report) reportNonDefaultBehavior(behavior)
 }
 
 function addWebSocketCompletedOutputText(
@@ -1409,6 +1477,7 @@ async function handleSyntheticWarmupRequest(
 ): Promise<void> {
   const responseId = `warmup_${randomUUID().replaceAll("-", "")}`
   storeResponseSnapshot(ws.data.responseSnapshots, responseId, payload)
+  rememberForcedPromptModel(ws.data, turn, responseId)
 
   const createdAt = Math.floor(Date.now() / 1000)
   const baseResponse = {
@@ -1499,6 +1568,7 @@ async function streamAnthropicMessagesOverWs(options: {
             { response: result },
           ),
         )
+        rememberForcedPromptModel(ws.data, turn, result.id)
       }
     },
   }
@@ -1707,9 +1777,14 @@ async function adaptCustomProviderCandidate(options: {
   turn: ResponsesWebSocketTurn
 }): Promise<ResponsesChatCandidate> {
   const { payload, turn } = options
+  const source = turn.forcedSystemPrompt ? structuredClone(payload) : payload
+  forceUpstreamCopy(source, {
+    forced: turn.forcedSystemPrompt,
+    report: !isSyntheticWarmupRequest(payload),
+  })
   const candidate = await waitForWebSocketTurn(
     adaptResponsesToChatCandidate({
-      source: payload,
+      source,
       finalModel: payload.model,
       finalReasoningEffort:
         options.finalReasoningEffort ?? payload.reasoning?.effort ?? undefined,
