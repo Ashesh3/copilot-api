@@ -756,22 +756,18 @@ async function handleResponseCreate(
 
     await waitForWebSocketTurn(candidate.prepareForDispatch(), turn)
 
-    // Native responses streaming. The candidate stays as the client sent it
-    // because it becomes the stored continuation; only the sent copy is forced.
+    // Native responses streaming. A forced candidate is never stored: like
+    // translated routes, the continuation keeps the client's own turn.
+    const snapshotPayload =
+      turn.forcedSystemPrompt ? payload : candidate.payload
     const response = await waitForWebSocketTurn(
-      createResponses(
-        withForcedSystemPrompt(candidate.payload, {
-          forced: turn.forcedSystemPrompt,
-          report: false,
-        }),
-        {
-          allowCompatibilityRetry: false,
-          vision,
-          initiator,
-          prepared: true,
-          signal: turn.abortController.signal,
-        },
-      ),
+      createResponses(candidate.payload, {
+        allowCompatibilityRetry: false,
+        vision,
+        initiator,
+        prepared: true,
+        signal: turn.abortController.signal,
+      }),
       turn,
     )
     throwIfWebSocketTurnAborted(turn)
@@ -779,7 +775,7 @@ async function handleResponseCreate(
     if (!isAsyncIterable(response)) {
       // Shouldn't happen since we forced stream: true, but handle gracefully
       await handleNonStreamingResponsesResult(ws, {
-        payload: candidate.payload,
+        payload: snapshotPayload,
         response,
         turn,
       })
@@ -798,7 +794,7 @@ async function handleResponseCreate(
         synchronized,
         getCopilotResponseHeaders(),
       )
-      await emitTurnFrame(ws, turn, candidate.payload, processed, event)
+      await emitTurnFrame(ws, turn, snapshotPayload, processed, event)
       if (turn.terminal.state !== "open") break
     }
   })
@@ -908,6 +904,12 @@ async function prepareEvaluatedResponsesWebSocketCandidate(options: {
 }): Promise<ResponsesEndpointCandidate> {
   const evaluationPayload = structuredClone(options.payload)
   if (options.evaluationOnly) delete evaluationPayload.generate
+  // Forced before native finalization, which adds controls such as the JSON
+  // instruction for json_object output after the client's prompts are cleared.
+  forceUpstreamCopy(evaluationPayload, {
+    forced: options.forcedSystemPrompt,
+    report: !options.evaluationOnly,
+  })
   const preparedSource = prepareResponsesRequest(evaluationPayload)
   const nativeBody = finalizeNativeResponsesRequest(preparedSource, {
     model: evaluationPayload.model,
@@ -917,10 +919,7 @@ async function prepareEvaluatedResponsesWebSocketCandidate(options: {
   })
   disableParallelWebSearch(nativeBody.body)
   const candidates = await prepareResponsesCandidates({
-    adaptationSource: withForcedSystemPrompt(preparedSource.source, {
-      forced: options.forcedSystemPrompt,
-      report: !options.evaluationOnly,
-    }),
+    adaptationSource: preparedSource.source,
     finalReasoningEffort: options.reasoningEffort,
     nativeBody,
     preservedSource: preparedSource,
@@ -1159,21 +1158,19 @@ function inheritedForcedPromptModel(
 }
 
 /**
- * A forced copy for an upstream request. The original stays as the client
- * sent it, since WebSocket turns store it for later continuations. Each turn
+ * Forces a copy bound for upstream. WebSocket turns store the turn payload
+ * for later continuations, so it never receives the prompt itself. Each turn
  * reports once; warmups only evaluate the request.
  */
-function withForcedSystemPrompt<T extends ResponsesPayload>(
-  payload: T,
+function forceUpstreamCopy(
+  payload: ResponsesPayload,
   options: { forced: ForcedSystemPrompt | undefined; report: boolean },
-): T {
-  if (!options.forced) return payload
-  const forcedPayload = structuredClone(payload)
+): void {
+  if (!options.forced) return
   const behavior = forcedSystemPromptBehavior(
-    applyForcedSystemPromptToResponses(forcedPayload, options.forced),
+    applyForcedSystemPromptToResponses(payload, options.forced),
   )
   if (options.report) reportNonDefaultBehavior(behavior)
-  return forcedPayload
 }
 
 function addWebSocketCompletedOutputText(
@@ -1753,12 +1750,14 @@ async function adaptCustomProviderCandidate(options: {
   turn: ResponsesWebSocketTurn
 }): Promise<ResponsesChatCandidate> {
   const { payload, turn } = options
+  const source = turn.forcedSystemPrompt ? structuredClone(payload) : payload
+  forceUpstreamCopy(source, {
+    forced: turn.forcedSystemPrompt,
+    report: !isSyntheticWarmupRequest(payload),
+  })
   const candidate = await waitForWebSocketTurn(
     adaptResponsesToChatCandidate({
-      source: withForcedSystemPrompt(payload, {
-        forced: turn.forcedSystemPrompt,
-        report: !isSyntheticWarmupRequest(payload),
-      }),
+      source,
       finalModel: payload.model,
       finalReasoningEffort:
         options.finalReasoningEffort ?? payload.reasoning?.effort ?? undefined,

@@ -510,6 +510,34 @@ test("Responses translated to Chat sends the forced prompt first", async () => {
   })
 })
 
+test("clearing keeps the gateway's JSON instruction for json_object output", async () => {
+  forceFor(RESPONSES_MODEL, true)
+  const body = {
+    model: RESPONSES_MODEL,
+    instructions: "Reply in JSON.",
+    text: { format: { type: "json_object" } },
+    input: [
+      { type: "message", role: "developer", content: "Use JSON keys." },
+      { type: "message", role: "user", content: "Extract entities." },
+    ],
+  }
+
+  const response = await post("/v1/responses", { ...body, stream: false })
+  const ws = await createSocket()
+  await sendTurn(ws, body)
+
+  expect(response.status).toBe(200)
+  const sent = upstream.filter((call) => call.path.endsWith("/responses"))
+  expect(sent).toHaveLength(2)
+  for (const call of sent) {
+    expect(call.body.instructions).toBe(FORCED)
+    const input = JSON.stringify(call.body.input)
+    expect(input).not.toContain("Use JSON keys.")
+    expect(input).toContain("Respond with JSON.")
+  }
+  expect(ws.sent.some((frame) => frame.type === "error")).toBe(false)
+})
+
 test("compaction puts the forced prompt before the summary instructions", async () => {
   forceFor(RESPONSES_MODEL, true)
 
