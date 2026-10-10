@@ -142,9 +142,12 @@ Reserved characters in the ID are percent-encoded in the resource name so
 namespaced custom models round-trip through SDK detail and generation calls.
 
 Advertised custom chat models and aliases are reachable through Chat,
-Responses HTTP, and Google generate/stream adapters. Responses WebSocket and
-compaction remain outside custom-provider chat dispatch, while custom Google
-counting remains local and generation-free.
+Responses HTTP and WebSocket, and Google generate/stream adapters. Responses
+requests send Codex tool declarations, including `additional_tools` namespaces
+and freeform tools, as ordinary Chat functions, then restore each returned call
+to its declared name, namespace, and type. Responses compaction remains outside
+custom-provider chat dispatch, while custom Google counting remains local and
+generation-free.
 
 Routing resolves the requested alias, effort, and redirect before selecting the
 final upstream protocol. Selection then follows these rules:
