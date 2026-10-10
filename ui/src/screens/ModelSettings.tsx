@@ -343,7 +343,7 @@ export default function ModelSettingsScreen() {
             <Text
               type="supporting"
               color="secondary"
-              maxLines={2}
+              maxLines={1}
               hasTruncateTooltip
             >
               {promptPreview(item.forcedSystemPrompt)}

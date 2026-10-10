@@ -1,4 +1,5 @@
 import type { HttpErrorInspection } from "~/lib/error"
+import type { ForcedSystemPrompt } from "~/lib/forced-system-prompt"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type {
   StreamTerminalFailure,
@@ -47,6 +48,10 @@ export interface ResponsesWebSocketTurn {
   reasoningEffort?: string
   requestedModel?: string
   continuationModel?: string
+  /** Requested model whose forced system prompt applies to this turn. */
+  forcedPromptModel?: string
+  /** Applied to upstream copies only; stored continuations stay as sent. */
+  forcedSystemPrompt?: ForcedSystemPrompt
   routingState: { lastUsedAccountId?: number }
   telemetryState: RoutingTelemetryRequestState
   sequence: number

@@ -28,6 +28,7 @@ const CHAT_MODEL = "forced-chat"
 const OTHER_CHAT_MODEL = "forced-chat-target"
 const CLAUDE_MODEL = "claude-forced"
 const RESPONSES_MODEL = "forced-responses"
+const OTHER_RESPONSES_MODEL = "forced-responses-target"
 
 interface UpstreamCall {
   path: string
@@ -144,6 +145,7 @@ function upstreamResponse(call: UpstreamCall): Response {
         responsesStream(id)
       : Response.json(responsesResult(id))
   }
+  if (call.body.stream === true) return chatStream()
   return Response.json({
     id: "chatcmpl_forced",
     object: "chat.completion",
@@ -159,6 +161,38 @@ function upstreamResponse(call: UpstreamCall): Response {
     ],
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
   })
+}
+
+function chatStream(): Response {
+  const chunk = {
+    id: "chatcmpl_forced",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: CHAT_MODEL,
+  }
+  const events = [
+    {
+      ...chunk,
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant", content: "ok" },
+          finish_reason: null,
+        },
+      ],
+    },
+    {
+      ...chunk,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    },
+  ]
+  return new Response(
+    [...events.map((event) => JSON.stringify(event)), "[DONE]"]
+      .map((data) => `data: ${data}\n\n`)
+      .join(""),
+    { headers: { "content-type": "text/event-stream" } },
+  )
 }
 
 async function requestBody(
@@ -191,6 +225,7 @@ beforeEach(() => {
         "claude",
       ),
       catalogModel(RESPONSES_MODEL, ["/responses"], "gpt"),
+      catalogModel(OTHER_RESPONSES_MODEL, ["/responses"], "gpt"),
     ],
   } satisfies ModelsResponse
   globalThis.fetch = (async (
@@ -509,8 +544,24 @@ test("Gemini requests get the forced prompt before their system instruction", as
   expect(JSON.stringify(rest)).toContain("Client system.")
 })
 
-test("WebSocket continuations keep a single forced prompt", async () => {
-  forceFor(RESPONSES_MODEL)
+test("WebSocket continuations use the current prompt of the requested model", async () => {
+  setModelRedirectsForTest([
+    {
+      id: "forced-ws-redirect",
+      sourceModel: RESPONSES_MODEL,
+      sourceEffort: "all",
+      targetModel: OTHER_RESPONSES_MODEL,
+      enabled: true,
+    },
+  ])
+  const targetSetting = {
+    model: OTHER_RESPONSES_MODEL,
+    forcedSystemPrompt: "Target model prompt.",
+  }
+  setModelSettingsForTest([
+    { model: RESPONSES_MODEL, forcedSystemPrompt: FORCED },
+    targetSetting,
+  ])
   const ws = await createSocket()
 
   await sendTurn(ws, {
@@ -518,24 +569,61 @@ test("WebSocket continuations keep a single forced prompt", async () => {
     instructions: "Client instructions.",
     input: "first",
   })
-  const completed = ws.sent.find(
-    (frame) => frame.type === "response.completed",
-  ) as { response?: { id?: unknown } } | undefined
-  const previousResponseId = completed?.response?.id
-  expect(previousResponseId).toBeString()
-  // Codex can omit unchanged instructions; the stored turn already has the
-  // forced prompt, which must not be added a second time.
+  // Later turns omit the model and instructions, so both come from the
+  // stored turn, which holds the routed target model.
+  setModelSettingsForTest([
+    { model: RESPONSES_MODEL, forcedSystemPrompt: "Updated prompt." },
+    targetSetting,
+  ])
   await sendTurn(ws, {
-    model: RESPONSES_MODEL,
-    previous_response_id: previousResponseId,
+    previous_response_id: completedResponseIds(ws).at(-1),
     input: "second",
+  })
+  setModelSettingsForTest([targetSetting])
+  await sendTurn(ws, {
+    previous_response_id: completedResponseIds(ws).at(-1),
+    input: "third",
   })
 
   const turns = upstream.filter((call) => call.path.endsWith("/responses"))
+  expect(turns.map((call) => call.body.model)).toEqual([
+    OTHER_RESPONSES_MODEL,
+    OTHER_RESPONSES_MODEL,
+    OTHER_RESPONSES_MODEL,
+  ])
   expect(turns.map((call) => call.body.instructions)).toEqual([
     `${FORCED}\n\nClient instructions.`,
-    `${FORCED}\n\nClient instructions.`,
+    "Updated prompt.\n\nClient instructions.",
+    "Client instructions.",
   ])
+  expect(ws.sent.some((frame) => frame.type === "error")).toBe(false)
+})
+
+function completedResponseIds(
+  ws: Awaited<ReturnType<typeof createSocket>>,
+): Array<unknown> {
+  return ws.sent
+    .filter((frame) => frame.type === "response.completed")
+    .map((frame) => (frame.response as { id?: unknown } | undefined)?.id)
+}
+
+test("WebSocket turns translated to Chat send only the forced prompt when clearing", async () => {
+  forceFor(CHAT_MODEL, true)
+  const ws = await createSocket()
+
+  await sendTurn(ws, {
+    model: CHAT_MODEL,
+    instructions: "Client instructions.",
+    input: [
+      { type: "message", role: "developer", content: "Client developer." },
+      { type: "message", role: "user", content: "Hello" },
+    ],
+  })
+
+  const [first, ...rest] = upstreamTurns("/chat/completions")
+  expect(first).toEqual({ role: "system", content: FORCED })
+  expect(JSON.stringify(rest)).not.toContain("Client")
+  expect(JSON.stringify(rest)).toContain("Hello")
   expect(ws.sent.some((frame) => frame.type === "error")).toBe(false)
 })
 
