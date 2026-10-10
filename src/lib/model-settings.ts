@@ -17,6 +17,10 @@ export interface ModelSettings {
   exposeVirtualReasoningModels?: boolean
   supportsAssistantPrefill?: boolean
   unsupportedRequestParameters?: Array<ModelRequestParameter>
+  /** Sent as the first system message of every request for this model. */
+  forcedSystemPrompt?: string
+  /** Remove the client's own system and developer prompts. */
+  clearOtherSystemPrompts?: boolean
 }
 
 export interface ModelSettingsUpdate {
@@ -27,9 +31,13 @@ export interface ModelSettingsUpdate {
   exposeVirtualReasoningModels?: boolean | null
   supportsAssistantPrefill?: boolean | null
   unsupportedRequestParameters?: Array<ModelRequestParameter> | null
+  forcedSystemPrompt?: string | null
+  clearOtherSystemPrompts?: boolean | null
 }
 
 export type ModelRequestParameter = "temperature" | "top_p"
+
+export const MAX_FORCED_SYSTEM_PROMPT_LENGTH = 200_000
 
 type BooleanModelSetting =
   | "implicitReasoningDefault"
@@ -78,6 +86,12 @@ const DELETE_BOOLEAN_MODEL_SETTING: Record<
 }
 
 let testSettings: Record<string, ModelSettings> | undefined
+// Snapshot documents are frozen, so a validated copy stays valid until the
+// setting is written again and a new document replaces it.
+const validatedSettingsByDocument = new WeakMap<
+  object,
+  Record<string, ModelSettings>
+>()
 
 export function isReasoningEffort(value: unknown): value is ReasoningEffort {
   return REASONING_EFFORTS.has(value as ReasoningEffort)
@@ -124,6 +138,32 @@ function normalizeUnsupportedRequestParameters(
 
 function normalizeOptionalBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined
+}
+
+function normalizeForcedSystemPrompt(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined
+  const prompt = value.trim()
+  return prompt.length > 0 ? prompt : undefined
+}
+
+/** Clearing other prompts is only meaningful while a forced prompt is set. */
+function applyForcedSystemPromptFields(
+  settings: ModelSettings,
+  prompt: unknown,
+  clearOtherSystemPrompts: unknown,
+): void {
+  const forcedSystemPrompt = normalizeForcedSystemPrompt(prompt)
+  if (!forcedSystemPrompt) {
+    delete settings.forcedSystemPrompt
+    delete settings.clearOtherSystemPrompts
+    return
+  }
+  settings.forcedSystemPrompt = forcedSystemPrompt
+  if (clearOtherSystemPrompts === true) {
+    settings.clearOtherSystemPrompts = true
+  } else {
+    delete settings.clearOtherSystemPrompts
+  }
 }
 
 function applyNormalizedBoolean(
@@ -196,6 +236,11 @@ function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
   if (unsupportedRequestParameters && unsupportedRequestParameters.length > 0) {
     normalized.unsupportedRequestParameters = unsupportedRequestParameters
   }
+  applyForcedSystemPromptFields(
+    normalized,
+    value.forcedSystemPrompt,
+    value.clearOtherSystemPrompts,
+  )
 
   return hasCustomModelSettings(normalized) ? normalized : undefined
 }
@@ -231,6 +276,7 @@ function hasCustomModelSettings(settings: ModelSettings): boolean {
     || settings.exposeVirtualReasoningModels !== undefined
     || settings.supportsAssistantPrefill !== undefined
     || settings.unsupportedRequestParameters !== undefined
+    || settings.forcedSystemPrompt !== undefined
   )
 }
 
@@ -252,6 +298,8 @@ function validateStoredModelSettingFields(item: Record<string, unknown>): void {
     implicitReasoningDefault: (value) => typeof value === "boolean",
     exposeVirtualReasoningModels: (value) => typeof value === "boolean",
     supportsAssistantPrefill: (value) => typeof value === "boolean",
+    forcedSystemPrompt: (value) => typeof value === "string",
+    clearOtherSystemPrompts: (value) => typeof value === "boolean",
   }
   for (const [key, validate] of Object.entries(fields)) {
     if (Object.hasOwn(item, key) && !validate(item[key]))
@@ -277,11 +325,22 @@ export function validateStoredModelSettings(
   return normalizeSettings(value)
 }
 
+/** Validated settings for the loaded document. Callers must not mutate them. */
+function loadedSettings(): Record<string, ModelSettings> {
+  if (testSettings) return testSettings
+  const document = getLoadedSetting("model_settings")
+  if (typeof document !== "object" || document === null) {
+    return validateStoredModelSettings(document)
+  }
+  const cached = validatedSettingsByDocument.get(document)
+  if (cached) return cached
+  const validated = validateStoredModelSettings(document)
+  validatedSettingsByDocument.set(document, validated)
+  return validated
+}
+
 function currentSettings(): Record<string, ModelSettings> {
-  return structuredClone(
-    testSettings
-      ?? validateStoredModelSettings(getLoadedSetting("model_settings")),
-  )
+  return structuredClone(loadedSettings())
 }
 
 async function mutateSettings<T>(
@@ -312,7 +371,12 @@ export async function ensureModelSettingsLoaded(): Promise<void> {
 }
 
 export function getModelSettings(model: string): ModelSettings | undefined {
-  return currentSettings()[model]
+  // Clone only the requested entry; a long forced prompt on another model
+  // should not be copied on every lookup.
+  const settings = loadedSettings()
+  return Object.hasOwn(settings, model) ?
+      structuredClone(settings[model])
+    : undefined
 }
 
 export async function getAllModelSettings(): Promise<Array<ModelSettings>> {
@@ -385,6 +449,7 @@ export async function setModelSettings(
       next,
       updates.unsupportedRequestParameters,
     )
+    applyForcedSystemPromptUpdate(next, updates)
 
     if (!hasCustomModelSettings(next)) {
       Reflect.deleteProperty(modelSettings, trimmedModel)
@@ -421,6 +486,27 @@ function applyUnsupportedRequestParametersUpdate(
   } else {
     delete settings.unsupportedRequestParameters
   }
+}
+
+function applyForcedSystemPromptUpdate(
+  settings: ModelSettings,
+  updates: ModelSettingsUpdate,
+): void {
+  if (
+    updates.forcedSystemPrompt === undefined
+    && updates.clearOtherSystemPrompts === undefined
+  ) {
+    return
+  }
+  applyForcedSystemPromptFields(
+    settings,
+    updates.forcedSystemPrompt === undefined ?
+      settings.forcedSystemPrompt
+    : updates.forcedSystemPrompt,
+    updates.clearOtherSystemPrompts === undefined ?
+      settings.clearOtherSystemPrompts
+    : updates.clearOtherSystemPrompts,
+  )
 }
 
 function applyBooleanModelSettingUpdate(

@@ -42,6 +42,7 @@ import {
   isHTTPError,
   LocalHTTPError,
 } from "~/lib/error"
+import { forceMessagesSystemPrompt } from "~/lib/forced-system-prompt"
 import { runWithMessagesFallbackObservation } from "~/lib/llm-debug-fallback"
 import { createHandlerLogger } from "~/lib/logger"
 import {
@@ -434,6 +435,13 @@ async function handleCompletionInner(
       replacementPayload.messages,
     )
   }
+  // Compaction and permission-review detection above read the client's own
+  // system prompt; the forced prompt applies from here to every route.
+  const forcedSystemPrompt = forceMessagesSystemPrompt(
+    anthropicPayload,
+    requestedModel,
+  )
+  if (forcedSystemPrompt) recordNonDefaultBehavior(c, forcedSystemPrompt)
 
   const beforeModelFallback = anthropicPayload.model
   applyModelFallbackToPayload(anthropicPayload, {

@@ -591,6 +591,7 @@ proxy:
   path requires it;
 - MCP-backed web search loops on compatible fallback paths;
 - model aliases, effort variants, redirects, and operator routing controls;
+- per-model forced system prompts;
 - OpenAI-compatible custom chat and embedding providers;
 - cross-dialect OpenAI, Anthropic, and Google-style compatibility routes; and
 - client-integration surfaces for Claude Code and Codex workflows.
@@ -598,6 +599,20 @@ proxy:
 These extensions preserve public protocol framing, but their local state does
 not become upstream state. Custom providers also remain limited to their
 configured protocol families.
+
+A forced system prompt belongs to the model ID a request asks for, matched
+exactly, then without an effort suffix, then by its normalized name; redirect
+and fallback targets keep the requested model's prompt. Chat Completions and
+translated Google requests receive it as the first system message, Messages as
+the first `system` block, and Responses as the start of `instructions`.
+Responses compaction places it before the gateway summary instructions, and
+Messages token counting includes it. Clearing other prompts removes the
+client's system and developer messages, Messages `system` content, and
+Responses `instructions`, but never the gateway's own summary instructions.
+WebSocket turns apply the current setting to each upstream copy, so stored
+continuations keep the client's instructions; a continuation that omits
+`model` uses the model its conversation requested. Claude permission-review
+classifier requests keep their policy prompt.
 
 Platform compatibility also includes explicit-origin CORS only for approved
 inference methods and paths, including the normal Anthropic/OpenAI/Google

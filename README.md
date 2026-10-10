@@ -125,12 +125,19 @@ message.
   reasoning efforts, chaining, loop detection, and priority control.
 - Stores per-model settings for supported/default reasoning efforts, virtual
   model visibility, implicit defaults, assistant-prefill behavior, selected
-  unsupported request parameters, and Sentry model names.
+  unsupported request parameters, Sentry model names, and forced system
+  prompts.
 - Treats every version of Claude Opus, Sonnet, Haiku, and Fable as rejecting
   assistant prefill unless that model's setting allows it. When the gateway
   sends a Copilot request for one of these models that ends with an assistant
   text message, it sends that message as a user message. Requests that clients
   send directly to `/v1/messages` keep their messages unchanged.
+- Sends a model's forced system prompt as the first system instruction of every
+  Chat Completions, Messages, Responses (HTTP and WebSocket), Google, and
+  Responses compaction request for that model ID, including requests that a
+  redirect or fallback serves with another model. With **Clear other system
+  prompts**, the client's own system and developer prompts are removed. Claude
+  permission-review classifier requests keep their own prompt.
 - Applies literal or regular-expression replacements to message text on Chat
   Completions and the translated Messages and Google paths. Replacements do not
   rewrite arbitrary request fields or direct Responses payloads.
