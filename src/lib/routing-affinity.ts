@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks"
+import { createHash } from "node:crypto"
 
 const MAX_AFFINITY_KEY_LENGTH = 512
 const CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata"
@@ -22,6 +23,8 @@ export interface RoutingAffinity {
   threadKey?: string
   /** A fork's agent-tree session, consulted after its fork parent. */
   sessionKey?: string
+  /** Independent background memory work for this requesting Codex thread. */
+  memoryThreadKey?: string
 }
 
 interface RoutingAffinityState {
@@ -124,6 +127,8 @@ export function resolveClaudeRoutingAffinity(
 export function resolveResponsesRoutingAffinity(
   clientMetadata: unknown,
 ): RoutingAffinity | undefined {
+  const memoryAffinity = resolveResponsesMemoryRoutingAffinity(clientMetadata)
+  if (memoryAffinity) return memoryAffinity
   const forkAffinity = resolveResponsesForkRoutingAffinity(clientMetadata)
   if (forkAffinity) return forkAffinity
 
@@ -136,6 +141,68 @@ export function resolveResponsesRoutingAffinity(
       "codex_metadata",
     ) ?? affinity(metadata.thread_id, "codex_thread")
   )
+}
+
+/** Memory consolidation reuses the chat's IDs but has its own upstream history. */
+export function resolveResponsesMemoryRoutingAffinity(
+  clientMetadata: unknown,
+  currentAffinity?: RoutingAffinity,
+): RoutingAffinity | undefined {
+  const metadata = parseRoutingMetadataRecord(clientMetadata)
+  if (!metadata) return undefined
+  const turn = parseRoutingMetadataRecord(metadata[CODEX_TURN_METADATA_KEY])
+  if (turn?.request_kind !== "memory") return undefined
+  const sessionId = normalizeRoutingAffinityKey(metadata.session_id)
+  const threadId = normalizeRoutingAffinityKey(metadata.thread_id)
+  if (
+    currentAffinity
+    && !describesMemoryThread(currentAffinity, sessionId, threadId)
+  )
+    return undefined
+  const thread = memoryRequestingThread(currentAffinity, threadId, sessionId)
+  if (!thread) return undefined
+  const digest = createHash("sha256")
+    .update(JSON.stringify(["copilot-api/codex-memory/v1", thread]))
+    .digest("hex")
+  return {
+    key: `codex-memory:${digest}`,
+    source: currentAffinity?.source ?? "codex_metadata",
+    memoryThreadKey: thread,
+  }
+}
+
+function memoryRequestingThread(
+  current: RoutingAffinity | undefined,
+  threadId: string | undefined,
+  sessionId: string | undefined,
+): string | undefined {
+  return (
+    current?.memoryThreadKey
+    ?? current?.threadKey
+    ?? threadId
+    ?? current?.key
+    ?? sessionId
+  )
+}
+
+function describesMemoryThread(
+  current: RoutingAffinity,
+  sessionId: string | undefined,
+  threadId: string | undefined,
+): boolean {
+  if (
+    current.source !== "codex_session"
+    && current.source !== "codex_thread"
+    && current.source !== "codex_metadata"
+  )
+    return false
+  if (current.memoryThreadKey)
+    return current.memoryThreadKey === (threadId ?? sessionId)
+  if (current.threadKey)
+    return threadId ?
+        current.threadKey === threadId
+      : current.key === sessionId || current.sessionKey === sessionId
+  return current.key === sessionId || current.key === threadId
 }
 
 /**
@@ -199,6 +266,11 @@ export function resolveResponsesRequestRoutingAffinity(
   clientMetadata: unknown,
   currentAffinity: RoutingAffinity | undefined,
 ): RoutingAffinity | undefined {
+  const memoryAffinity = resolveResponsesMemoryRoutingAffinity(
+    clientMetadata,
+    currentAffinity,
+  )
+  if (memoryAffinity) return memoryAffinity
   const forkAffinity = resolveResponsesForkRoutingAffinity(
     clientMetadata,
     currentAffinity,

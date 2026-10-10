@@ -1,6 +1,61 @@
 import { expect, test } from "bun:test"
 
+import { resolveResponsesRoutingAffinity } from "~/lib/routing-affinity"
 import { resolveResponsesContinuation } from "~/routes/responses/websocket-protocol"
+
+test.each([
+  ["memory", undefined],
+  ["memory", "turn"],
+  ["turn", "memory"],
+] as const)(
+  "keeps the snapshot's %s routing scope when continuation metadata requests %s",
+  (snapshotKind, currentKind) => {
+    const snapshotMetadata = {
+      session_id: "memory-root",
+      thread_id: "memory-root",
+      "x-codex-turn-metadata": JSON.stringify({
+        request_kind: snapshotKind,
+        turn_id: "original-job",
+      }),
+    }
+    const result = resolveResponsesContinuation(
+      new Map([
+        [
+          "resp_memory_scope",
+          {
+            model: "shared-model",
+            input: "prior history",
+            client_metadata: snapshotMetadata,
+          },
+        ],
+      ]),
+      {
+        model: "shared-model",
+        previous_response_id: "resp_memory_scope",
+        input: "follow up",
+        client_metadata: {
+          session_id: "memory-root",
+          thread_id: "memory-root",
+          "x-codex-turn-metadata": {
+            ...(currentKind ? { request_kind: currentKind } : {}),
+            turn_id: "new-job",
+          },
+        },
+      },
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.message)
+    const metadata = result.payload.client_metadata as Record<string, unknown>
+    expect(metadata["x-codex-turn-metadata"]).toEqual({
+      request_kind: snapshotKind,
+      turn_id: "new-job",
+    })
+    expect(resolveResponsesRoutingAffinity(metadata)?.key).toBe(
+      resolveResponsesRoutingAffinity(snapshotMetadata)?.key,
+    )
+    expect(snapshotMetadata["x-codex-turn-metadata"]).toContain("original-job")
+  },
+)
 
 test.each([
   {

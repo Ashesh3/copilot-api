@@ -330,7 +330,24 @@ function mergeContinuationClientMetadata(
       merged[key] = structuredClone(snapshotRecord[key])
     } else Reflect.deleteProperty(merged, key)
   }
+  preserveMemoryRoutingScope(snapshotRecord, merged)
   return merged
+}
+
+/** A continuation cannot change which history belongs to background memory. */
+function preserveMemoryRoutingScope(
+  snapshot: Record<string, unknown> | undefined,
+  merged: Record<string, unknown>,
+): void {
+  const key = "x-codex-turn-metadata"
+  const original = parseRoutingMetadataRecord(snapshot?.[key])
+  const current = parseRoutingMetadataRecord(merged[key])
+  const originalKind = original?.request_kind
+  if (originalKind !== "memory" && current?.request_kind !== "memory") return
+  const turn = { ...current }
+  if (originalKind === undefined) delete turn.request_kind
+  else turn.request_kind = originalKind
+  merged[key] = typeof merged[key] === "string" ? JSON.stringify(turn) : turn
 }
 
 export function rehydrateContinuationPayload(

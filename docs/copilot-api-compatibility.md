@@ -546,6 +546,21 @@ Copilot session or Auto calls, use a thread's existing assignment but never
 start one. A disabled, deleting or unhealthy inherited account still rejects a
 thread that has no assignment of its own.
 
+Codex memory consolidation sends `request_kind: "memory"` inside
+`client_metadata["x-codex-turn-metadata"]` while reusing the chat's session and
+thread IDs. These requests use a domain-separated digest of their requesting
+thread for account ownership, upstream session IDs and stored model-fallback
+state. The identity is stable across jobs, retries and HTTP/WebSocket transport
+changes, and it does not inherit the chat's or fork parent's owner. Other
+request kinds, including `turn`, `prewarm` and `compaction`, retain ordinary
+conversation routing. A WebSocket continuation cannot change between memory
+and conversation scope by replacing or omitting the request-kind metadata.
+Explicit Claude/Copilot affinity headers still take precedence.
+
+Older account assignments have no request-kind provenance and are not reset by
+this change. A chat already assigned by memory work may still require a fresh
+chat after upgrading when its recorded account lacks the requested model.
+
 In multi-account mode, affinity is necessary but not sufficient for session
 continuity. Account-binding control-plane calls and inference resolve or reserve
 the same durable owner before endpoint selection. A session token is forwarded only when

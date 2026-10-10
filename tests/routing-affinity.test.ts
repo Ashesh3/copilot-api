@@ -7,6 +7,7 @@ import {
   installRoutingAffinityFallback,
   normalizeRoutingAffinityKey,
   resolveClaudeRoutingAffinity,
+  resolveResponsesRequestRoutingAffinity,
   resolveResponsesRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
   runWithRoutingAffinity,
@@ -115,6 +116,109 @@ test("extracts Responses session then thread metadata best effort", () => {
   ).toBeUndefined()
   expect(
     resolveResponsesRoutingAffinity({ thread_id: "x".repeat(513) }),
+  ).toBeUndefined()
+})
+
+function memoryMetadata(thread = "memory-root") {
+  return {
+    session_id: "memory-root",
+    thread_id: thread,
+    "x-codex-turn-metadata": JSON.stringify({
+      request_kind: "memory",
+      thread_source: "memory_consolidation",
+      turn_id: "memory-job",
+    }),
+  }
+}
+
+test("isolates Codex memory from its thread with a stable identity across transports and jobs", () => {
+  const metadata = memoryMetadata()
+  const expected = resolveResponsesRoutingAffinity(metadata)
+  expect(expected?.key).toBeDefined()
+  expect(expected?.key).not.toBe("memory-root")
+  expect(expected?.threadKey).toBeUndefined()
+  expect(expected?.sessionKey).toBeUndefined()
+  expect(resolveResponsesRoutingAffinity(JSON.stringify(metadata))).toEqual(
+    expected,
+  )
+  for (const headers of [
+    new Headers({ "session-id": "memory-root", "thread-id": "memory-root" }),
+    new Headers({ "session-id": "memory-root" }),
+    new Headers({ "thread-id": "memory-root" }),
+  ]) {
+    const header = resolveRoutingAffinityFromHeaders(headers)
+    const resolved = resolveResponsesRequestRoutingAffinity(metadata, header)
+    expect(resolved?.key).toBe(expected?.key)
+    expect(resolveResponsesRequestRoutingAffinity(metadata, resolved)).toEqual(
+      resolved,
+    )
+  }
+  expect(
+    resolveResponsesRoutingAffinity({
+      ...metadata,
+      "x-codex-turn-metadata": { request_kind: "memory", turn_id: "next-job" },
+    })?.key,
+  ).toBe(expected?.key)
+})
+
+test("memory uses its own requesting thread without inheriting a fork or agent-tree owner", () => {
+  const root = resolveResponsesRoutingAffinity(memoryMetadata())
+  const childMetadata = memoryMetadata("memory-child")
+  const child = resolveResponsesRoutingAffinity(childMetadata)
+  const fork = resolveResponsesRoutingAffinity({
+    ...childMetadata,
+    "x-codex-turn-metadata": {
+      request_kind: "memory",
+      forked_from_thread_id: "other-parent",
+    },
+  })
+  expect(child?.key).not.toBe(root?.key)
+  expect(child?.key).not.toBe("memory-child")
+  expect(fork?.key).toBe(child?.key)
+  expect(fork?.threadKey).toBeUndefined()
+  expect(fork?.sessionKey).toBeUndefined()
+  expect(
+    resolveResponsesRequestRoutingAffinity(childMetadata, {
+      key: "other-parent",
+      source: "codex_thread",
+      threadKey: "memory-child",
+      sessionKey: "memory-root",
+    })?.key,
+  ).toBe(child?.key)
+})
+
+test.each(["turn", "prewarm", "compaction", "unknown", undefined])(
+  "keeps %s on the ordinary conversation identity",
+  (requestKind) => {
+    const metadata = {
+      ...memoryMetadata(),
+      "x-codex-turn-metadata": { request_kind: requestKind },
+    }
+    expect(resolveResponsesRoutingAffinity(metadata)).toEqual({
+      key: "memory-root",
+      source: "codex_metadata",
+    })
+  },
+)
+
+test("memory metadata cannot replace a higher-priority or conflicting header identity", () => {
+  for (const header of [
+    { key: "memory-root", source: "claude_session" as const },
+    { key: "memory-root", source: "copilot_session" as const },
+    { key: "different-root", source: "codex_session" as const },
+    {
+      key: "memory-root",
+      source: "codex_session" as const,
+      threadKey: "different-child",
+    },
+  ])
+    expect(
+      resolveResponsesRequestRoutingAffinity(memoryMetadata(), header),
+    ).toEqual(header)
+  expect(
+    resolveResponsesRoutingAffinity({
+      "x-codex-turn-metadata": { request_kind: "memory" },
+    }),
   ).toBeUndefined()
 })
 

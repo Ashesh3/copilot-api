@@ -70,6 +70,7 @@ import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
 import { reportNonDefaultBehavior } from "~/lib/request-logger"
 import { getCopilotResponseHeaders } from "~/lib/request-session"
 import {
+  getRoutingAffinity,
   resolveResponsesForkRoutingAffinity,
   resolveResponsesRequestRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
@@ -155,6 +156,11 @@ import {
 } from "./websocket-protocol"
 
 const WS_PATHS = new Set(["/v1/responses", "/responses"])
+// Snapshot identity stays local and is released when the socket drops its payloads.
+const memorySnapshotAffinities = new WeakMap<
+  ResponsesPayload,
+  RoutingAffinity
+>()
 
 export interface ResponsesWebSocketData {
   authenticationRequest?: Request
@@ -548,6 +554,11 @@ async function prepareResponseCreate(
   // Retain the review identity separately from the resolved upstream model, so
   // a settings change takes effect on the next admitted turn, including warmup.
   if (reviewModel) payload.model = reviewModel
+  const previousId = rawPayload.previous_response_id
+  const snapshot =
+    previousId ? data.responseSnapshots.get(previousId) : undefined
+  const memoryAffinity = snapshot && memorySnapshotAffinities.get(snapshot)
+  if (memoryAffinity) return { affinity: memoryAffinity, payload, reviewModel }
   const forkAffinity = resolveResponsesForkRoutingAffinity(
     payload.client_metadata,
     data.affinity,
@@ -568,6 +579,9 @@ function storeResponseSnapshot(
   responseId: string,
   payload: ResponsesPayload,
 ): void {
+  const affinity = getRoutingAffinity()
+  if (affinity?.memoryThreadKey)
+    memorySnapshotAffinities.set(payload, { ...affinity })
   snapshots.set(responseId, payload)
 }
 

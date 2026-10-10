@@ -224,7 +224,13 @@ test("delayed Messages image preparation cannot switch accounts during integrati
     const body: unknown = await response.json()
     expect(sends).toEqual([])
     expect(response.status).toBe(409)
-    expect(body).toMatchObject({ type: "error", error: { type: "api_error" } })
+    expect(body).toMatchObject({
+      type: "error",
+      error: {
+        code: "conversation_account_unavailable",
+        type: "session_affinity_error",
+      },
+    })
   } finally {
     imageGate.resolve(undefined)
     await pending

@@ -10,6 +10,10 @@ import {
 } from "~/lib/model-fallback"
 import { setModelFallbackConfigForTest } from "~/lib/model-fallback-config"
 import { copilotResponseHeadersStorage } from "~/lib/request-session"
+import {
+  resolveResponsesRequestRoutingAffinity,
+  runWithRoutingAffinity,
+} from "~/lib/routing-affinity"
 
 import { useProtocolDatabase } from "./helpers/protocol-database"
 
@@ -108,6 +112,91 @@ test("new conversations retain previously stored conversation models", async () 
     source = applyModelFallbackToPayload({ model: "source" }).model
   })
   expect(source).toBe("target")
+})
+
+function codexMemoryFallbackOptions(requestKind: string) {
+  return {
+    headers: new Headers({
+      "session-id": "memory-root",
+      "thread-id": "memory-root",
+    }),
+    payload: {
+      client_metadata: {
+        session_id: "memory-root",
+        thread_id: "memory-root",
+        "x-codex-turn-metadata": JSON.stringify({
+          request_kind: requestKind,
+        }),
+      },
+    },
+  }
+}
+
+test.each(["memory", "turn"])(
+  "a fallback from a Codex %s request does not change the other request kind's route",
+  async (firstKind) => {
+    setModelFallbackConfigForTest(config)
+    await fakeRequest(codexMemoryFallbackOptions(firstKind))
+    await runWithModelFallback(
+      codexMemoryFallbackOptions(firstKind === "memory" ? "turn" : "memory"),
+      async () => {
+        expect(applyModelFallbackToPayload({ model: "source" }).model).toBe(
+          "source",
+        )
+      },
+    )
+    await runWithModelFallback(
+      codexMemoryFallbackOptions(firstKind),
+      async () => {
+        expect(applyModelFallbackToPayload({ model: "source" }).model).toBe(
+          "target",
+        )
+      },
+    )
+  },
+)
+
+test("memory fallback reuses the installed child identity when a fork omits its thread metadata", async () => {
+  setModelFallbackConfigForTest(config)
+  const metadata = {
+    session_id: "fork-root",
+    "x-codex-turn-metadata": { request_kind: "memory" },
+  }
+  const installed = resolveResponsesRequestRoutingAffinity(metadata, {
+    key: "fork-parent",
+    source: "codex_thread",
+    threadKey: "fork-child",
+    sessionKey: "fork-root",
+  })
+  await runWithRoutingAffinity(installed, () =>
+    fakeRequest({
+      headers: new Headers({ "session-id": "fork-root" }),
+      payload: { client_metadata: metadata },
+    }),
+  )
+  await runWithRoutingAffinity(installed, () =>
+    runWithModelFallback(
+      {
+        headers: new Headers({ "session-id": "fork-root" }),
+        payload: {
+          client_metadata: { ...metadata, thread_id: "fork-child" },
+        },
+      },
+      async () => {
+        expect(applyModelFallbackToPayload({ model: "source" }).model).toBe(
+          "target",
+        )
+      },
+    ),
+  )
+  await runWithModelFallback(
+    { payload: { client_metadata: { ...metadata, thread_id: "fork-root" } } },
+    async () => {
+      expect(applyModelFallbackToPayload({ model: "source" }).model).toBe(
+        "source",
+      )
+    },
+  )
 })
 
 test("stored conversation models do not expire with elapsed time", async () => {
