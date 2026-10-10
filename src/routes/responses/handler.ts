@@ -3006,38 +3006,90 @@ async function completeBufferedChatResponse(
     webSearchMaxUses?: number
   },
 ): Promise<ResponsesResult> {
-  const { stream_options: _streamOptions, ...request } = options.ccPayload
-  const initial = await options.completionFactory(
-    { ...request, stream: false },
-    { signal: options.signal },
-  )
-  if (initial.accountId !== undefined) {
-    setRequestContext(c, { accountId: initial.accountId })
-  }
-  if (!isNonStreaming(initial.response)) {
-    throw new TypeError(
-      "Buffered Chat responses require a complete upstream result",
+  const execute = async (span?: Sentry.Span): Promise<ResponsesResult> => {
+    const { stream_options: _streamOptions, ...request } = options.ccPayload
+    const initial = await options.completionFactory(
+      { ...request, stream: false },
+      { signal: options.signal },
+    )
+    if (initial.accountId !== undefined) {
+      setRequestContext(c, { accountId: initial.accountId })
+    }
+    if (!isNonStreaming(initial.response)) {
+      throw new TypeError(
+        "Buffered Chat responses require a complete upstream result",
+      )
+    }
+    if (options.compactionTrigger) {
+      return chatCompactionTriggerResult(
+        initial.response,
+        options.responseModel,
+      )
+    }
+    const needsWebSearch = options.ccPayload.tools?.some(
+      (tool) => tool.function.name === "web_search",
+    )
+    const response =
+      needsWebSearch ?
+        await resolvePreparedResponsesWebSearchCalls({
+          completionFactory: options.completionFactory,
+          initial,
+          maxUses: options.webSearchMaxUses,
+          signal: options.signal,
+        })
+      : initial.response
+    if (span) {
+      options.signal.throwIfAborted()
+      span.setAttribute(
+        "gen_ai.usage.input_tokens",
+        response.usage?.prompt_tokens ?? 0,
+      )
+      span.setAttribute(
+        "gen_ai.usage.output_tokens",
+        response.usage?.completion_tokens ?? 0,
+      )
+      setDetailedTokenAttributes(span, {
+        cachedTokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      })
+      setSentryOutputMessages(span, response.choices[0]?.message.content ?? "")
+    }
+    return chatCompletionToResponsesResult(
+      response,
+      options.responseModel,
+      options.toolMap,
     )
   }
-  if (options.compactionTrigger) {
-    return chatCompactionTriggerResult(initial.response, options.responseModel)
-  }
-  const needsWebSearch = options.ccPayload.tools?.some(
-    (tool) => tool.function.name === "web_search",
-  )
-  const response =
-    needsWebSearch ?
-      await resolvePreparedResponsesWebSearchCalls({
-        completionFactory: options.completionFactory,
-        initial,
-        maxUses: options.webSearchMaxUses,
-        signal: options.signal,
-      })
-    : initial.response
-  return chatCompletionToResponsesResult(
-    response,
-    options.responseModel,
-    options.toolMap,
+  // Compaction keeps its existing tracing. Only buffered client SSE needs the
+  // Chat span otherwise provided by the streaming fallback branch.
+  if (options.compactionTrigger) return await execute()
+  return await Sentry.startSpanManual(
+    createSentryChatSpanOptions({
+      inputMessages: options.ccPayload.messages,
+      model: options.ccPayload.model,
+      streaming: true,
+    }),
+    async (span, finish) => {
+      let finished = false
+      const finishSpan = (status?: "cancelled" | "internal_error") => {
+        if (finished) return
+        finished = true
+        if (status) span.setStatus({ code: 2, message: status })
+        finish()
+      }
+      const onAbort = () => finishSpan("cancelled")
+      options.signal.addEventListener("abort", onAbort, { once: true })
+      try {
+        if (options.signal.aborted) onAbort()
+        options.signal.throwIfAborted()
+        return await execute(span)
+      } catch (error) {
+        finishSpan(isAbortError(error) ? "cancelled" : "internal_error")
+        throw error
+      } finally {
+        options.signal.removeEventListener("abort", onAbort)
+        finishSpan()
+      }
+    },
   )
 }
 
