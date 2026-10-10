@@ -122,7 +122,7 @@ test("expands proxy-generated compaction items as a compatibility fallback", () 
   expect(payload.input).toEqual([
     {
       type: "message",
-      role: "assistant",
+      role: "user",
       content: "[Previous conversation summary]\nsummary",
     },
   ])
@@ -146,7 +146,7 @@ test("decodes Unicode proxy-generated compaction summaries", () => {
   expect(payload.input).toEqual([
     {
       type: "message",
-      role: "assistant",
+      role: "user",
       content: `[Previous conversation summary]\n${summary}`,
     },
   ])

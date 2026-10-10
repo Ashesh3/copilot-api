@@ -44,13 +44,26 @@ type StreamEvent = {
 const hasOverloadText = (value: unknown): boolean =>
   typeof value === "string" && value.toLowerCase().includes("overloaded")
 
+const hasOnlyText = (content: Message["content"]): boolean =>
+  typeof content === "string" ?
+    content.length > 0
+  : Array.isArray(content)
+    && content.length > 0
+    && content.every((part) => part.type === "text")
+
+/**
+ * Send a final assistant text turn as a user turn when the model does not
+ * accept prefill. Reasoning state cannot travel on a user message and is
+ * dropped. A final turn with tool calls, or without text, is left unchanged.
+ */
 export const rewriteUnsupportedAssistantPrefill = (
   payload: ChatCompletionsPayload,
 ): void => {
-  if (modelSupportsAssistantPrefill(payload.model)) return
-
   const lastMessage = payload.messages.at(-1)
   if (!lastMessage || lastMessage.role !== "assistant") return
+  if (lastMessage.tool_calls?.length || !hasOnlyText(lastMessage.content))
+    return
+  if (modelSupportsAssistantPrefill(payload.model)) return
 
   payload.messages[payload.messages.length - 1] = {
     role: "user",

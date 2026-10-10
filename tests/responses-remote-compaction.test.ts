@@ -132,7 +132,53 @@ describe("Codex remote compaction over translated Messages", () => {
     const messages = onlyUpstreamRequest("/v1/messages").body
       .messages as Array<JsonRecord>
     expect(messages[0]).toEqual({
-      role: "assistant",
+      role: "user",
+      content: [
+        { type: "text", text: `[Previous conversation summary]\n${SUMMARY}` },
+      ],
+    })
+  })
+
+  test("restores a mid-turn summary as user context instead of prefill", async () => {
+    installModel(["/v1/messages"])
+    upstreamResponse = () => {
+      const request = upstreamRequests.at(-1)?.body
+      const messages = request?.messages as Array<JsonRecord> | undefined
+      return messages?.at(-1)?.role === "assistant" ?
+          prefillRejection()
+        : anthropicSummary("Continuing.")
+    }
+
+    // Codex continues a turn after compacting mid-turn, so the summary is last.
+    const response = await postResponses({
+      model: "compaction-model",
+      instructions: "You are Codex.",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "<environment_context />" }],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Fix the failing request." }],
+        },
+        {
+          id: "cmp_midturn",
+          type: "compaction",
+          encrypted_content: Buffer.from(SUMMARY).toString("base64"),
+        },
+      ],
+      stream: false,
+    })
+
+    expect(response.status).toBe(200)
+    const messages = onlyUpstreamRequest("/v1/messages").body
+      .messages as Array<JsonRecord>
+    expect(messages.map((message) => message.role)).not.toContain("assistant")
+    expect(messages.at(-1)).toEqual({
+      role: "user",
       content: [
         { type: "text", text: `[Previous conversation summary]\n${SUMMARY}` },
       ],
@@ -315,6 +361,21 @@ function anthropicSummary(text = SUMMARY): Response {
     stop_sequence: null,
     usage: { input_tokens: 120, output_tokens: 30 },
   })
+}
+
+/** Copilot's Messages rejection for a conversation ending in an assistant turn. */
+function prefillRejection(): Response {
+  return Response.json(
+    {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message:
+          "This model does not support assistant message prefill. The conversation must end with a user message.",
+      },
+    },
+    { status: 400 },
+  )
 }
 
 /** The production failure: two thinking blocks and two tool calls. */

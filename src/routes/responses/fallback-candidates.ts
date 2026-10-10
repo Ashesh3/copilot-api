@@ -17,6 +17,7 @@ import {
   getModelEndpointSupport,
   selectEvaluatedCopilotCandidate,
 } from "~/lib/endpoint-routing"
+import { rewriteUnsupportedAssistantPrefill } from "~/services/copilot/create-chat-completions"
 import { normalizeResponsesAttachmentsForDispatch } from "~/services/copilot/responses-attachments"
 
 import { createResponsesAttachmentCache } from "./attachment-cache"
@@ -99,6 +100,8 @@ export async function prepareResponsesCandidates(
         attachmentCache,
       })
     : undefined
+  // Prepared candidates skip the dispatch-time Copilot Chat rewrite.
+  if (chat) rewriteUnsupportedAssistantPrefill(chat.payload)
   const messages =
     support.messages ?
       await adaptResponsesToMessagesCandidate({

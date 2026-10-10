@@ -189,6 +189,9 @@ Native Responses models receive the trigger unchanged. Messages and Chat
 routes replace it with the gateway summary request, keeping instructions,
 tools, and history while disabling tool calls, then return the validated
 summary as one proxy-generated compaction item over HTTP or WebSocket.
+Later turns restore that summary as a user message, the role Codex gives its
+own local compaction summary. After a mid-turn compaction the summary is the
+final input item, and an assistant summary would be sent as prefill.
 
 Google-style generation uses the same endpoint authority after lossless Google
 to Chat normalization:
