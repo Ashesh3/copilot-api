@@ -601,21 +601,19 @@ async function handleResponseCreate(
   }
 
   const directCustom = prepareDirectCustomProviderTurn(payload)
+  // Reject only the model the client selected. Service-tier routes and
+  // configured fallbacks may still use a buffered custom provider over WS.
+  if (directCustom?.requestedReference.model.supportsStreaming === false) {
+    const model = directCustom.continuationModel
+    reportResponsesWebSocketCustomBufferedFallback(model)
+    throw new WebSocketRequestError(
+      `Custom model ${model} is configured without streaming; retry over the Responses HTTP endpoint.`,
+      404,
+      "not_found",
+      "not_found",
+    )
+  }
   if (directCustom?.reference) {
-    // A custom model configured without streaming cannot be served as a live
-    // Responses stream, and buffering the whole completion then replaying it as
-    // one block makes Codex Desktop repaint the message. Reject the WebSocket
-    // turn with 404 so the client falls back to its Responses/Messages HTTP
-    // path, which renders a buffered completion cleanly.
-    if (directCustom.reference.model.supportsStreaming === false) {
-      reportResponsesWebSocketCustomBufferedFallback(payload.model)
-      throw new WebSocketRequestError(
-        `Custom model ${payload.model} is configured without streaming; retry over the Responses or Messages HTTP endpoint.`,
-        404,
-        "not_found",
-        "not_found",
-      )
-    }
     turn.continuationModel = directCustom.continuationModel
     turn.model = payload.model
     turn.reasoningEffort = directCustom.providerEffort
@@ -1343,11 +1341,11 @@ function reportResponsesWebSocketEndpointFallback(
 function reportResponsesWebSocketCustomBufferedFallback(model: string): void {
   reportNonDefaultBehavior({
     kind: "endpoint_fallback",
-    message: `Responses WebSocket custom model ${model} is configured without streaming; rejecting the turn with 404 so the client falls back to the Responses or Messages HTTP endpoint`,
+    message: `Responses WebSocket custom model ${model} is configured without streaming; rejecting the turn with 404 so the client falls back to the Responses HTTP endpoint`,
     data: {
       model,
       sourceEndpoint: "Responses WebSocket",
-      targetEndpoint: "Responses/Messages HTTP",
+      targetEndpoint: "Responses HTTP",
       transport: "websocket",
     },
   })
@@ -1644,6 +1642,12 @@ interface DirectCustomProviderTurn {
   readonly finalEffort?: string | number
   /** Effort forwarded to providers that accept `reasoning_effort`. */
   readonly providerEffort?: ReasoningEffort
+  /**
+   * Reference the client selected, before service-tier routing or fallback. A
+   * non-streaming decision keys off this so only a directly selected custom
+   * model is rejected; models reached through routing keep the buffered path.
+   */
+  readonly requestedReference: CustomProviderModelReference
   /** Absent when service-tier routing or a fallback moved the turn to Copilot. */
   readonly reference?: CustomProviderModelReference
 }
@@ -1695,6 +1699,7 @@ function prepareDirectCustomProviderTurn(
     )
   return {
     continuationModel: baseModel,
+    requestedReference: requested,
     finalEffort,
     providerEffort: parseReasoningEffort(finalEffort),
     ...(reference ? { reference } : {}),
