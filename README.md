@@ -534,6 +534,16 @@ Custom providers do not handle Responses compaction. Embedding responses
 preserve float or base64 encoding and validate the effective request dimensions
 when a dimension count is configured.
 
+A client-selected custom `chat` model with `supportsStreaming: false` receives
+a Responses WebSocket error frame with status 404 `not_found` before any output,
+including on `generate: false` warmup turns, so clients can fall back to HTTP
+Responses. The HTTP route calls that provider with `stream: false` and buffers
+the complete result. It returns a complete Responses event sequence over SSE
+for `stream: true` clients such as Codex Desktop, or JSON for non-streaming
+clients. Non-streaming custom models reached through server-side configured
+fallbacks or priority routing keep the buffered WebSocket path; the rejection
+depends on the model the client selected, before routing.
+
 A configured custom alias wins provider resolution and is the safest way to
 force custom-provider routing; the first configured matching provider wins. If
 a custom model's exact ID collides with a live Copilot model, the Copilot model

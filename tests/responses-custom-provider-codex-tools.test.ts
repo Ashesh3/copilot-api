@@ -986,6 +986,255 @@ describe("Codex tool calls in translated Chat responses", () => {
   })
 })
 
+describe("non-streaming custom models over HTTP Responses", () => {
+  test.each([false, true])(
+    "buffers upstream and honors the client's stream=%s response format",
+    async (stream) => {
+      configureCustomModels([
+        {
+          id: CUSTOM_MODEL,
+          aliases: [CUSTOM_ALIAS],
+          kind: "chat",
+          supportsStreaming: false,
+        },
+      ])
+      const answer = "First paragraph.\n\nSecond paragraph."
+      providerResponses.push(() => providerTextResponse(answer))
+      const response = await postResponses({
+        model: CUSTOM_ALIAS,
+        stream,
+        input: "Write two paragraphs",
+      })
+      const text = await response.text()
+
+      expect(response.status, text).toBe(200)
+      expect(providerRequests()).toHaveLength(1)
+      expect(providerRequests()[0].body).toMatchObject({
+        model: CUSTOM_MODEL,
+        stream: false,
+      })
+      expect(providerRequests()[0].body).not.toHaveProperty("stream_options")
+      if (stream) {
+        expect(response.headers.get("content-type")).toContain(
+          "text/event-stream",
+        )
+        const events = parseSse(text)
+        expect(events.at(-1)).toMatchObject({
+          type: "response.completed",
+          response: { model: CUSTOM_ALIAS, output_text: answer },
+        })
+        expect(
+          events.filter((event) => event.type === "response.output_text.delta"),
+        ).toEqual([itemMatching({ delta: answer })])
+      } else {
+        expect(response.headers.get("content-type")).toContain(
+          "application/json",
+        )
+        expect(JSON.parse(text) as unknown).toMatchObject({
+          model: CUSTOM_ALIAS,
+          output_text: answer,
+          status: "completed",
+        })
+      }
+    },
+  )
+
+  test("serves buffered tool calls as SSE after a WebSocket 404", async () => {
+    configureCustomModels([
+      {
+        id: CUSTOM_MODEL,
+        aliases: [CUSTOM_ALIAS],
+        kind: "chat",
+        supportsStreaming: false,
+      },
+    ])
+    const payload = { model: CUSTOM_ALIAS, tools: [], input: codexInput() }
+    const ws = await createSocket()
+    await sendTurn(ws, payload)
+    expect(ws.sent).toEqual([itemMatching({ type: "error", status: 404 })])
+    expect(providerRequests()).toEqual([])
+
+    providerResponses.push(providerToolResponse)
+    const response = await postResponses({ ...payload, stream: true })
+    const events = parseSse(await response.text())
+
+    expect(response.headers.get("content-type")).toContain("text/event-stream")
+    expect(providerRequests()[0].body.stream).toBe(false)
+    expect(providerRequests()[0].body).not.toHaveProperty("stream_options")
+    expect(events.at(-1)?.type).toBe("response.completed")
+    const completed = events.at(-1)?.response as Record<string, unknown>
+    expectRestoredToolCalls(completed.output)
+  })
+})
+
+describe("buffered custom HTTP tools and fallbacks", () => {
+  test("keeps web search responses buffered with SSE framing", async () => {
+    configureCustomModels([
+      {
+        id: CUSTOM_MODEL,
+        aliases: [CUSTOM_ALIAS],
+        kind: "chat",
+        supportsStreaming: false,
+      },
+    ])
+    providerResponses.push(
+      () =>
+        Response.json({
+          id: "chatcmpl-search",
+          object: "chat.completion",
+          created: 1,
+          model: CUSTOM_MODEL,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call_search",
+                    type: "function",
+                    function: {
+                      name: "web_search",
+                      arguments: '{"query":"fixture search"}',
+                    },
+                  },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+      () => providerTextResponse("Search complete"),
+    )
+    copilotResponses.push(
+      () =>
+        Response.json(
+          { jsonrpc: "2.0", id: "init", result: {} },
+          { headers: { "Mcp-Session-Id": "fixture-search-session" } },
+        ),
+      () =>
+        Response.json({
+          jsonrpc: "2.0",
+          id: "search",
+          result: {
+            content: [{ type: "text", text: "Fixture search result" }],
+          },
+        }),
+    )
+    const response = await postResponses({
+      model: CUSTOM_ALIAS,
+      stream: true,
+      input: "Look it up",
+      tools: [{ type: "web_search" }],
+    })
+    const events = parseSse(await response.text())
+
+    expect(providerRequests()[0].body.stream).toBe(false)
+    expect(providerRequests()[0].body).not.toHaveProperty("stream_options")
+    expect(toolNames(providerRequests()[0].body)).toContain("web_search")
+    expect(providerRequests()).toHaveLength(2)
+    expect(providerRequests()[1].body.stream).toBe(false)
+    expect(providerRequests()[1].body).not.toHaveProperty("stream_options")
+    expect(providerRequests()[1].body.messages).toContainEqual({
+      role: "tool",
+      tool_call_id: "call_search",
+      content: "Fixture search result",
+    })
+    expect(events.at(-1)).toMatchObject({
+      type: "response.completed",
+      response: { output_text: "Search complete" },
+    })
+  })
+
+  test("keeps remote compaction as one buffered compaction item over SSE", async () => {
+    configureCustomModels([
+      {
+        id: CUSTOM_MODEL,
+        aliases: [CUSTOM_ALIAS],
+        kind: "chat",
+        supportsStreaming: false,
+      },
+    ])
+    providerResponses.push(() => providerTextResponse("Summary for next turn"))
+    const response = await postResponses({
+      model: CUSTOM_ALIAS,
+      stream: true,
+      input: [
+        { type: "message", role: "user", content: "Summarize this task" },
+        { type: "compaction_trigger" },
+      ],
+    })
+    const events = parseSse(await response.text())
+
+    expect(providerRequests()[0].body.stream).toBe(false)
+    expect(providerRequests()[0].body).not.toHaveProperty("stream_options")
+    expect(events.at(-1)?.type).toBe("response.completed")
+    const completed = events.at(-1)?.response as Record<string, unknown>
+    expect(completed.output).toEqual([
+      expect.objectContaining({
+        type: "compaction",
+        encrypted_content: Buffer.from("Summary for next turn").toString(
+          "base64",
+        ),
+      }),
+    ])
+  })
+
+  test("retries a buffered HTTP provider failure on its configured fallback", async () => {
+    const fallbackModel = "http-buffered-fallback"
+    configureCustomModels([
+      {
+        id: CUSTOM_MODEL,
+        aliases: [CUSTOM_ALIAS],
+        kind: "chat",
+        supportsStreaming: false,
+      },
+      { id: fallbackModel, kind: "chat", supportsStreaming: false },
+    ])
+    setModelFallbackConfigForTest({
+      enabled: true,
+      notifyClient: false,
+      nativeClientNotice: false,
+      rules: [
+        {
+          id: "http-buffered-fallback",
+          sourceModel: CUSTOM_ALIAS,
+          targetModel: fallbackModel,
+          enabled: true,
+        },
+      ],
+    })
+    providerResponses.push(
+      () => new Response("unprocessable", { status: 422 }),
+      () => providerTextResponse("Fallback answer"),
+    )
+    const response = await postResponses({
+      model: CUSTOM_ALIAS,
+      stream: true,
+      input: "hello",
+    })
+    const events = parseSse(await response.text())
+
+    expect(
+      providerRequests().map((request) => [
+        request.body.model,
+        request.body.stream,
+      ]),
+    ).toEqual([
+      [CUSTOM_MODEL, false],
+      [fallbackModel, false],
+    ])
+    expect(events.filter((event) => event.type === "response.failed")).toEqual(
+      [],
+    )
+    expect(events.at(-1)).toMatchObject({
+      type: "response.completed",
+      response: { output_text: "Fallback answer" },
+    })
+  })
+})
+
 describe("custom-provider models over the Responses WebSocket", () => {
   test("retries a provider that is briefly at capacity once", async () => {
     providerResponses.push(
@@ -1059,7 +1308,7 @@ describe("custom-provider models over the Responses WebSocket", () => {
     )
   })
 
-  test("buffers a model configured without streaming", async () => {
+  test("rejects a non-streaming model's WebSocket turn with 404 for HTTP fallback", async () => {
     configureCustomModels([
       {
         id: CUSTOM_MODEL,
@@ -1068,17 +1317,46 @@ describe("custom-provider models over the Responses WebSocket", () => {
         supportsStreaming: false,
       },
     ])
-    providerResponses.push(() => providerTextResponse("buffered answer"))
     const ws = await createSocket()
     await sendTurn(ws, { model: CUSTOM_ALIAS, input: "hello" })
 
-    expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
-    const [dispatched] = providerRequests()
-    expect(dispatched.body.stream).toBe(false)
-    expect(dispatched.body).not.toHaveProperty("stream_options")
-    expect(JSON.stringify(completedFrames(ws).at(-1)?.output)).toContain(
-      "buffered answer",
-    )
+    // No upstream call: the client must retry the request on its HTTP endpoint.
+    expect(providerRequests()).toEqual([])
+    expect(completedFrames(ws)).toEqual([])
+    expect(ws.sent).toHaveLength(1)
+    expect(ws.sent.at(-1)).toMatchObject({
+      type: "error",
+      status: 404,
+      error: { code: "not_found", type: "not_found" },
+    })
+  })
+
+  test("rejects a non-streaming model's warmup turn with 404 too", async () => {
+    configureCustomModels([
+      {
+        id: CUSTOM_MODEL,
+        aliases: [CUSTOM_ALIAS],
+        kind: "chat",
+        supportsStreaming: false,
+      },
+    ])
+    const ws = await createSocket()
+    await sendTurn(ws, {
+      model: CUSTOM_ALIAS,
+      input: codexInput(),
+      tools: [],
+      generate: false,
+    })
+
+    expect(providerRequests()).toEqual([])
+    expect(completedFrames(ws)).toEqual([])
+    expect(ws.data.responseSnapshots.size).toBe(0)
+    expect(ws.sent).toHaveLength(1)
+    expect(ws.sent.at(-1)).toMatchObject({
+      type: "error",
+      status: 404,
+      error: { code: "not_found" },
+    })
   })
 
   test("drops stream options from any buffered provider request", async () => {
@@ -1157,6 +1435,141 @@ describe("custom-provider models over the Responses WebSocket", () => {
     expect(providerRequests().map((request) => request.body.model)).toEqual([
       "qwen3-8b",
     ])
+  })
+})
+
+describe("custom-provider WebSocket routing", () => {
+  test("buffers a non-streaming custom fallback and continues the original model", async () => {
+    const fallbackModel = "buffered-fallback"
+    configureCustomModels([
+      { id: CUSTOM_MODEL, aliases: [CUSTOM_ALIAS], kind: "chat" },
+      { id: fallbackModel, kind: "chat", supportsStreaming: false },
+    ])
+    setModelFallbackConfigForTest({
+      enabled: true,
+      notifyClient: false,
+      nativeClientNotice: false,
+      rules: [
+        {
+          id: "custom-to-buffered",
+          sourceModel: CUSTOM_ALIAS,
+          targetModel: fallbackModel,
+          enabled: true,
+        },
+      ],
+    })
+    providerResponses.push(
+      () => new Response("unprocessable", { status: 422 }),
+      () => providerTextResponse("First buffered answer"),
+      () => providerTextResponse("Next buffered answer"),
+    )
+    const ws = await createSocket()
+    await sendTurn(ws, { model: CUSTOM_ALIAS, input: "first" })
+    const first = completedFrames(ws).at(-1)
+    expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
+    expect(first).toMatchObject({
+      model: CUSTOM_ALIAS,
+      output_text: "First buffered answer",
+    })
+    await sendTurn(ws, {
+      model: CUSTOM_ALIAS,
+      previous_response_id: first?.id,
+      input: "second",
+    })
+
+    expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
+    expect(
+      providerRequests().map((request) => [
+        request.body.model,
+        request.body.stream,
+      ]),
+    ).toEqual([
+      [CUSTOM_MODEL, true],
+      [fallbackModel, false],
+      [fallbackModel, false],
+    ])
+    expect(providerRequests()[1].body).not.toHaveProperty("stream_options")
+    expect(providerRequests()[2].body).not.toHaveProperty("stream_options")
+    expect(completedFrames(ws).at(-1)?.output_text).toBe("Next buffered answer")
+    expect(JSON.stringify(providerRequests()[2].body.messages)).toContain(
+      "First buffered answer",
+    )
+  })
+
+  test("buffers a non-streaming priority variant of a streaming custom model", async () => {
+    configureCustomModels([
+      { id: CUSTOM_MODEL, aliases: [CUSTOM_ALIAS], kind: "chat" },
+      { id: `${CUSTOM_MODEL}-fast`, kind: "chat", supportsStreaming: false },
+    ])
+    providerResponses.push(() => providerTextResponse("Buffered fast answer"))
+    const ws = await createSocket()
+    await sendTurn(ws, {
+      model: CUSTOM_ALIAS,
+      service_tier: "priority",
+      input: "hello",
+    })
+
+    expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
+    expect(providerRequests()[0].body).toMatchObject({
+      model: `${CUSTOM_MODEL}-fast`,
+      stream: false,
+    })
+    expect(completedFrames(ws).at(-1)).toMatchObject({
+      model: CUSTOM_ALIAS,
+      output_text: "Buffered fast answer",
+    })
+  })
+
+  test("rejects a non-streaming requested custom model with a streaming priority variant", async () => {
+    configureCustomModels([
+      {
+        id: CUSTOM_MODEL,
+        aliases: [CUSTOM_ALIAS],
+        kind: "chat",
+        supportsStreaming: false,
+      },
+      { id: `${CUSTOM_MODEL}-fast`, kind: "chat", supportsStreaming: true },
+    ])
+    providerResponses.push(() => providerTextStream("Must not be called"))
+    const ws = await createSocket()
+    await sendTurn(ws, {
+      model: CUSTOM_ALIAS,
+      service_tier: "priority",
+      input: "hello",
+    })
+
+    expect(providerRequests()).toEqual([])
+    expect(ws.sent).toEqual([itemMatching({ type: "error", status: 404 })])
+    expect(ws.sent[0].error).toMatchObject({
+      code: "not_found",
+      message: expect.stringContaining(CUSTOM_ALIAS) as unknown,
+    })
+  })
+
+  test("rejects a non-streaming requested custom model routed to a Copilot priority variant", async () => {
+    const fastModel = `${CUSTOM_MODEL}-fast`
+    configureCustomModels([
+      {
+        id: CUSTOM_MODEL,
+        aliases: [CUSTOM_ALIAS],
+        kind: "chat",
+        supportsStreaming: false,
+      },
+    ])
+    state.models = {
+      ...copilotModels,
+      data: [{ ...copilotModels.data[0], id: fastModel, name: fastModel }],
+    }
+    copilotResponses.push(() => copilotCompletedResponse("resp_must_not_run"))
+    const ws = await createSocket()
+    await sendTurn(ws, {
+      model: CUSTOM_ALIAS,
+      service_tier: "priority",
+      input: "hello",
+    })
+
+    expect(requests).toEqual([])
+    expect(ws.sent).toEqual([itemMatching({ type: "error", status: 404 })])
   })
 })
 
