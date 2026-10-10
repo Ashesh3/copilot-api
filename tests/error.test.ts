@@ -956,6 +956,52 @@ test("returns an explicitly safe local error body without exposing upstream bodi
   expect(await response.json()).toEqual(clientBody)
 })
 
+test.each([
+  {
+    code: "conversation_account_unavailable",
+    message:
+      "This conversation's assigned account cannot serve the requested model. Its account assignment was preserved.",
+    status: 409,
+  },
+  {
+    code: "conversation_account_conflict",
+    message:
+      "The requested account or Copilot session conflicts with this conversation's account assignment.",
+    status: 409,
+  },
+  {
+    code: "account_distribution_changed",
+    message:
+      "Account routing changed while this request was being admitted. Retry the request.",
+    status: 503,
+  },
+  {
+    code: "account_distribution_unavailable",
+    message: "No eligible account has a positive allocation for this model.",
+    status: 503,
+  },
+] as const)("preserves $code account-routing diagnostics", (fixture) => {
+  const clientBody = {
+    error: {
+      code: fixture.code,
+      message: fixture.message,
+      type: "session_affinity_error",
+    },
+  }
+  const error = new LocalHTTPError(
+    fixture.message,
+    Response.json(clientBody, { status: fixture.status }),
+    clientBody,
+  )
+
+  expect(snapshotHttpErrorMetadata(error)).toMatchObject({
+    kind: "local",
+    localError: clientBody.error,
+    safeMessage: fixture.message,
+    status: fixture.status,
+  })
+})
+
 test.each(["replace", "delete"] as const)(
   "owns local HTTP status before a later response %s",
   async (mutation) => {

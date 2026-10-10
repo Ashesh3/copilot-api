@@ -55,6 +55,7 @@ const upstreamSessionTokens: Array<{
   path: string
   token: string | null
 }> = []
+const upstreamSessionIds: Array<string | null> = []
 
 function sessionToken(options: { modelId: string; subject?: string }): string {
   return `e30.${Buffer.from(
@@ -210,6 +211,7 @@ const fetchMock = mock((url: string | URL | Request, init?: RequestInit) => {
     authorization: request.headers.get("authorization"),
     path,
   })
+  upstreamSessionIds.push(request.headers.get("x-client-session-id"))
 
   if (new URL(request.url).hostname === "attachment.test") {
     onAttachmentFetch?.()
@@ -249,6 +251,7 @@ afterAll(() => {
 beforeEach(async () => {
   upstreamRequests.length = 0
   upstreamSessionTokens.length = 0
+  upstreamSessionIds.length = 0
   queuedFetchResults.length = 0
   onAttachmentFetch = undefined
   fetchMock.mockClear()
@@ -429,6 +432,115 @@ test.each([
         path: "/responses",
       },
     ])
+  },
+)
+
+test.each([
+  { label: "before", memoryFirst: true },
+  { label: "after", memoryFirst: false },
+])(
+  "isolates Codex memory requests $label the main HTTP conversation starts",
+  async ({ memoryFirst }) => {
+    registerAccount({
+      accountId: 52_401,
+      endpoints: ["/responses"],
+      modelId: "memory-main-model",
+      token: "memory-main-token",
+    })
+    registerAccount({
+      accountId: 52_402,
+      endpoints: ["/responses"],
+      modelId: "memory-helper-model",
+      token: "memory-helper-token",
+    })
+    tokenPool.rebuildModelIndex()
+    state.models = tokenPool.getAllModels()
+    setModelRedirectsForTest([
+      {
+        id: "memory-main-alias",
+        sourceModel: "memory-main-alias",
+        sourceEffort: "all",
+        targetModel: "memory-main-model",
+        enabled: true,
+      },
+    ])
+    const send = (memory: boolean) => {
+      const turnMetadata = JSON.stringify({
+        request_kind: memory ? "memory" : "turn",
+        thread_source: memory ? "memory_consolidation" : "user",
+        turn_trigger: memory ? "memory_consolidation" : "composer",
+        turn_id: memory ? "memory-job" : "main-turn",
+      })
+      return seedProtocolDatabase().then(() =>
+        server.request("/v1/responses", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${state.apiKeyAuth ?? PROTOCOL_GATEWAY_KEY}`,
+            "content-type": "application/json",
+            "session-id": "http-memory-root",
+            "thread-id": "http-memory-root",
+            "x-codex-turn-metadata": turnMetadata,
+          },
+          body: JSON.stringify({
+            model: memory ? "memory-helper-model" : "memory-main-alias",
+            input: memory ? "Consolidate stored memories" : "Continue the task",
+            client_metadata: {
+              session_id: "http-memory-root",
+              thread_id: "http-memory-root",
+              "x-codex-turn-metadata": turnMetadata,
+            },
+          }),
+        }),
+      )
+    }
+
+    const results: Array<{ status: number; model?: string }> = []
+    for (const memory of [
+      memoryFirst,
+      !memoryFirst,
+      memoryFirst,
+      !memoryFirst,
+    ]) {
+      const response = await send(memory)
+      const body = (await response.json()) as { model?: string }
+      results.push({ status: response.status, model: body.model })
+    }
+    expect(results.map((result) => result.status)).toEqual([200, 200, 200, 200])
+    expect(results.map((result) => result.model)).toEqual(
+      memoryFirst ?
+        [
+          "memory-helper-model",
+          "memory-main-alias",
+          "memory-helper-model",
+          "memory-main-alias",
+        ]
+      : [
+          "memory-main-alias",
+          "memory-helper-model",
+          "memory-main-alias",
+          "memory-helper-model",
+        ],
+    )
+    expect(upstreamRequests.map((request) => request.authorization)).toEqual(
+      memoryFirst ?
+        [
+          "Bearer memory-helper-token",
+          "Bearer memory-main-token",
+          "Bearer memory-helper-token",
+          "Bearer memory-main-token",
+        ]
+      : [
+          "Bearer memory-main-token",
+          "Bearer memory-helper-token",
+          "Bearer memory-main-token",
+          "Bearer memory-helper-token",
+        ],
+    )
+    expect(typeof upstreamSessionIds[0]).toBe("string")
+    expect(typeof upstreamSessionIds[1]).toBe("string")
+    expect(upstreamSessionIds[0]).not.toBe(upstreamSessionIds[1])
+    expect(upstreamSessionIds[2]).toBe(upstreamSessionIds[0])
+    expect(upstreamSessionIds[3]).toBe(upstreamSessionIds[1])
   },
 )
 

@@ -498,8 +498,12 @@ const SAFE_LOCAL_ERROR_TYPES = new Set([
   "server_error",
 ])
 const SAFE_LOCAL_ERROR_CODES = new Set([
+  "account_distribution_changed",
+  "account_distribution_unavailable",
   "bad_request",
   "compaction_payload_too_large",
+  "conversation_account_conflict",
+  "conversation_account_unavailable",
   "endpoint_translation_unsupported",
   "invalid_json",
   "invalid_request",

@@ -613,6 +613,18 @@ for a model that only another account offers, it gets a new assignment. It keeps
 that account on later turns, and forks of it start from it. Fresh subagents
 start from their agent tree's root thread. The root thread keeps its account.
 
+Codex background memory requests (`request_kind: "memory"`) use a separate
+stable identity for the requesting thread. Memory consolidation can therefore
+use a different account from the chat without claiming its assignment or
+changing its remembered model fallback. Ordinary turns, warmups and compaction
+keep the chat's normal account continuity. WebSocket continuations keep the
+original request's memory or chat scope.
+
+Assignments recorded by older versions are retained. If background memory
+already assigned a chat to an account that lacks its model, start a fresh chat
+after upgrading; existing records do not identify whether their owner was
+chosen for memory or for conversation history.
+
 Disabling/removing a recorded owner, or requesting a model unavailable on it,
 returns an explicit continuity error instead of silently changing accounts.
 Authentication rejections also retain identity. A `421` response refreshes that

@@ -13,6 +13,8 @@ import {
 } from "bun:test"
 import consola from "consola"
 
+import { getStorageRuntime } from "~/lib/storage/runtime"
+
 import type { NativeMessagesRequestOptions } from "../src/routes/messages/native-handler"
 import type {
   ResponseInputItem,
@@ -156,8 +158,6 @@ beforeAll(() => {
 })
 
 afterAll(() => {
-  for (const accountId of webSocketAccountIds)
-    tokenPool.removeAccountForTest(accountId)
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
 })
 
@@ -166,6 +166,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  for (const accountId of webSocketAccountIds)
+    tokenPool.removeAccountForTest(accountId)
   restoreResponsesWebSocketDependencies?.()
   restoreResponsesWebSocketDependencies = undefined
   fetchMock.mockClear()
@@ -1841,6 +1843,180 @@ describe("responses websocket message handling", () => {
       "Bearer ws-subagent-account-token",
     ])
   })
+
+  test.each([
+    { label: "after a main-model warmup", warmup: true },
+    { label: "after the main conversation starts", warmup: false },
+  ])(
+    "isolates Codex memory requests $label on the same socket",
+    async ({ warmup }) => {
+      installWebSocketMemoryAccounts()
+      const ws = await createUpgradedTestWebSocket({
+        "session-id": "ws-memory-root",
+        "thread-id": "ws-memory-root",
+      })
+      const send = (requestKind: "prewarm" | "memory" | "turn") => {
+        const memory = requestKind === "memory"
+        return seedProtocolDatabase().then(() =>
+          responsesWebSocket.message(
+            ws,
+            JSON.stringify({
+              type: "response.create",
+              model: memory ? "ws-memory-helper-model" : "ws-memory-main-model",
+              input:
+                memory ? "Consolidate stored memories" : "Continue the task",
+              ...(requestKind === "prewarm" && { generate: false }),
+              client_metadata: {
+                session_id: "ws-memory-root",
+                thread_id: "ws-memory-root",
+                "x-codex-turn-metadata": JSON.stringify({
+                  request_kind: requestKind,
+                  thread_source: memory ? "memory_consolidation" : "user",
+                  turn_trigger: memory ? "memory_consolidation" : "composer",
+                  turn_id: memory ? "memory-job" : "main-turn",
+                }),
+              },
+            }),
+          ),
+        )
+      }
+
+      if (warmup) {
+        await send("prewarm")
+        expect(capturedAuthorization).toHaveLength(0)
+        expect(
+          ws.sent.some((frame) => frame.includes("response.completed")),
+        ).toBe(true)
+        const assignments = await getStorageRuntime().storage.read((session) =>
+          session.query({
+            sql: "SELECT account_id FROM capi_conversation_accounts",
+            args: [],
+          }),
+        )
+        expect(assignments).toHaveLength(0)
+      }
+
+      queuedResponses.push(
+        createResponsesSseResponse("resp_ws_memory_isolation_1"),
+        createResponsesSseResponse("resp_ws_memory_isolation_2"),
+        createResponsesSseResponse("resp_ws_memory_isolation_3"),
+        createResponsesSseResponse("resp_ws_memory_isolation_4"),
+      )
+      await send(warmup ? "memory" : "turn")
+      await send(warmup ? "turn" : "memory")
+      await send(warmup ? "memory" : "turn")
+      await send(warmup ? "turn" : "memory")
+
+      const frames = ws.sent.map(
+        (frame) => JSON.parse(frame) as { type: string },
+      )
+      expect(
+        frames.filter(
+          (frame) => frame.type === "error" || frame.type === "response.failed",
+        ),
+      ).toEqual([])
+      expect(
+        frames.filter((frame) => frame.type === "response.completed"),
+      ).toHaveLength(warmup ? 5 : 4)
+      expect(capturedAuthorization).toEqual(
+        warmup ?
+          [
+            "Bearer ws-memory-helper-token",
+            "Bearer ws-memory-main-token",
+            "Bearer ws-memory-helper-token",
+            "Bearer ws-memory-main-token",
+          ]
+        : [
+            "Bearer ws-memory-main-token",
+            "Bearer ws-memory-helper-token",
+            "Bearer ws-memory-main-token",
+            "Bearer ws-memory-helper-token",
+          ],
+      )
+      const sessionIds = capturedUpstreamHeaders.map((headers) =>
+        headers.get("x-client-session-id"),
+      )
+      expect(typeof sessionIds[0]).toBe("string")
+      expect(typeof sessionIds[1]).toBe("string")
+      expect(sessionIds[0]).not.toBe(sessionIds[1])
+      expect(sessionIds[2]).toBe(sessionIds[0])
+      expect(sessionIds[3]).toBe(sessionIds[1])
+      expect(ws.data.affinity).toEqual({
+        key: "ws-memory-root",
+        source: "codex_session",
+      })
+    },
+  )
+
+  test.each([true, false])(
+    "keeps a memory continuation's account after the socket remembers a fork (thread present: %s)",
+    async (includeThread) => {
+      installWebSocketMemoryAccounts()
+      const ws = await createUpgradedTestWebSocket({
+        "session-id": "ws-memory-root",
+      })
+      queuedResponses.push(
+        createResponsesSseResponse("resp_original_memory"),
+        createResponsesSseResponse("resp_child_chat"),
+        createResponsesSseResponse("resp_memory_continued"),
+      )
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "ws-memory-helper-model",
+          input: "root memory history",
+          client_metadata: {
+            session_id: "ws-memory-root",
+            ...(includeThread ? { thread_id: "ws-memory-root" } : {}),
+            "x-codex-turn-metadata": { request_kind: "memory" },
+          },
+        }),
+      )
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "ws-memory-main-model",
+          input: "child chat history",
+          client_metadata: {
+            session_id: "ws-memory-root",
+            thread_id: "ws-memory-child",
+            "x-codex-turn-metadata": {
+              request_kind: "turn",
+              forked_from_thread_id: "ws-memory-parent",
+            },
+          },
+        }),
+      )
+      const forkAffinity = structuredClone(ws.data.affinity)
+      await responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "ws-memory-helper-model",
+          previous_response_id: "resp_original_memory",
+          input: "continue root memory history",
+        }),
+      )
+      expect(capturedAuthorization).toEqual([
+        "Bearer ws-memory-helper-token",
+        "Bearer ws-memory-main-token",
+        "Bearer ws-memory-helper-token",
+      ])
+      const sessionIds = capturedUpstreamHeaders.map((headers) =>
+        headers.get("x-client-session-id"),
+      )
+      expect(sessionIds[0]).not.toBe(sessionIds[1])
+      expect(sessionIds[2]).toBe(sessionIds[0])
+      expect(
+        ws.sent
+          .map((frame) => JSON.parse(frame) as { type: string })
+          .filter((frame) => frame.type === "error"),
+      ).toEqual([])
+      expect(ws.data.affinity).toEqual(forkAffinity)
+    },
+  )
 
   test("preserves unrelated WebSocket handshake affinity over fork metadata", async () => {
     state.models = responsesCapableModels
@@ -5018,6 +5194,24 @@ function createWebSocketModel(modelId: string) {
       type: "chat",
     },
   }
+}
+
+function installWebSocketMemoryAccounts(): void {
+  for (const [index, kind] of ["main", "helper"].entries()) {
+    const model = `ws-memory-${kind}-model`
+    const account = tokenPool.addAccount(
+      `github-ws-memory-${kind}`,
+      "individual",
+      webSocketAccountIds[index],
+    )
+    account.copilotToken = `ws-memory-${kind}-token`
+    account.healthy = true
+    account.models = new Set([model])
+    account.modelsData = [createWebSocketModel(model)]
+  }
+  tokenPool.rebuildModelIndex()
+  state.models = tokenPool.getAllModels()
+  state.isMultiToken = true
 }
 
 function findWebSocketAffinity(modelId: string, accountId: number): string {

@@ -1,6 +1,9 @@
 import {
+  getRoutingAffinity,
   normalizeRoutingAffinityKey,
   parseRoutingMetadataRecord,
+  resolveResponsesMemoryRoutingAffinity,
+  resolveRoutingAffinityFromHeaders,
 } from "~/lib/routing-affinity"
 
 export function getModelFallbackConversationIdentity(options: {
@@ -8,18 +11,13 @@ export function getModelFallbackConversationIdentity(options: {
   payload?: unknown
   conversationKey?: string
 }): string | undefined {
-  const payload =
-    (
-      options.payload !== null
-      && typeof options.payload === "object"
-      && !Array.isArray(options.payload)
-    ) ?
-      (options.payload as Record<string, unknown>)
-    : {}
+  const payload = payloadRecord(options.payload)
   const client = parseRoutingMetadataRecord(payload.client_metadata) ?? {}
   const metadata = parseRoutingMetadataRecord(payload.metadata) ?? {}
   const claude = parseRoutingMetadataRecord(metadata.user_id) ?? {}
   const headers = options.headers
+  const memory = memoryConversationIdentity(client, headers)
+  if (memory) return memory
   // Child threads may share account affinity with their parent; they must not
   // share model fallback or client retry evidence with their siblings.
   const identities = [
@@ -53,4 +51,24 @@ export function getModelFallbackConversationIdentity(options: {
     if (normalized) return normalized
   }
   return undefined
+}
+
+function payloadRecord(payload: unknown): Record<string, unknown> {
+  return (
+      payload !== null && typeof payload === "object" && !Array.isArray(payload)
+    ) ?
+      (payload as Record<string, unknown>)
+    : {}
+}
+
+function memoryConversationIdentity(
+  clientMetadata: unknown,
+  headers: Headers | undefined,
+): string | undefined {
+  const installedAffinity = getRoutingAffinity()
+  if (installedAffinity?.memoryThreadKey) return installedAffinity.key
+  return resolveResponsesMemoryRoutingAffinity(
+    clientMetadata,
+    resolveRoutingAffinityFromHeaders(headers ?? new Headers()),
+  )?.key
 }
