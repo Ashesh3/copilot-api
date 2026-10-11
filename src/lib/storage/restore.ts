@@ -396,7 +396,10 @@ class RecordDecoder {
         value: { ...value, integration_id: null } as JsonValue,
       }
     }
-    return stripRetiredHistoryMetadata(record, value)
+    return stripRetiredHistoryMetadata(
+      upgradeConversationAccountModel(record, this.sourceVersion),
+      value,
+    )
   }
   private async flush(): Promise<void> {
     if (this.batch.length === 0) return
@@ -418,6 +421,21 @@ class RecordDecoder {
       if (!this.singletonKeys.has(`capi_metadata:${JSON.stringify([key])}`))
         invalid()
     }
+  }
+}
+
+function upgradeConversationAccountModel(
+  record: TransferRecord,
+  sourceVersion: number | undefined,
+): TransferRecord {
+  if (
+    record.table !== "capi_conversation_accounts"
+    || (sourceVersion ?? 2) >= 9
+  )
+    return record
+  return {
+    ...record,
+    value: { ...object(record.value), model_id: null } as JsonValue,
   }
 }
 

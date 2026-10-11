@@ -10,8 +10,9 @@ See the [table review](database-table-review.md) for table purposes and retentio
 
 Account distribution stores a dedicated policy version and small per-model
 scheduler state. Each identified conversation owns one 32-byte binary lookup key
-and numeric account ID in a `WITHOUT ROWID` table. Mapping and scheduler updates
-commit atomically; percentage saves do not rewrite existing owners. Assignments
+and numeric account ID plus its last admitted model in a `WITHOUT ROWID` table.
+Mapping and scheduler updates commit atomically. A model switch may replace an
+ineligible owner; percentage saves do not rewrite existing owners. Assignments
 have no automatic expiry and are distinct from the process-local model-fallback
 cache. New accounts receive no percentage until shares are reassigned in the UI.
 

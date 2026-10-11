@@ -27,6 +27,8 @@ export interface EligibleAccountWeight {
 export interface AccountAssignmentInput {
   affinityKey: string
   modelId: string
+  /** Discovery and already-admitted dispatches must not change model ownership. */
+  recordModel?: boolean
   eligibleAccountIds: ReadonlyArray<number>
   preferredAccountId?: number
   preferredReason?: "issuer" | "pinned"
@@ -46,6 +48,12 @@ export interface AccountAssignment {
   reason: "new" | "existing" | "legacy" | "issuer" | "pinned" | "inherited"
   eligibleAccountWeights: Array<EligibleAccountWeight>
   allocationVersion: number
+}
+
+export interface StoredAccountAssignment {
+  accountId: number
+  /** Null for assignments created before model tracking or by discovery. */
+  modelId: string | null
 }
 
 export class AccountDistributionConflictError extends StorageConflictError {
@@ -151,15 +159,21 @@ export async function readAccountDistributionPolicy(
   return { configured: true, version: Number(version), allocations }
 }
 
-async function findOwner(session: SqlSession, key: Uint8Array) {
+async function findAssignment(
+  session: SqlSession,
+  key: Uint8Array,
+): Promise<StoredAccountAssignment | undefined> {
   const rows = await session.query({
-    sql: "SELECT account_id FROM capi_conversation_accounts WHERE conversation_key = ?",
+    sql: "SELECT account_id,model_id FROM capi_conversation_accounts WHERE conversation_key = ?",
     args: [key],
   })
   if (!rows[0]) return undefined
   if (!validAccountId(rows[0].account_id))
     throw new StorageSchemaError("Invalid conversation owner")
-  return rows[0].account_id
+  const modelId = rows[0].model_id
+  if (modelId !== null && (typeof modelId !== "string" || !modelId))
+    throw new StorageSchemaError("Invalid conversation model")
+  return { accountId: rows[0].account_id, modelId }
 }
 
 async function eligibleWeights(
@@ -300,20 +314,40 @@ function assignmentSeed(
   return undefined
 }
 
-// eslint-disable-next-line max-params -- The indexed key and previously read owner remain separate from caller input.
+async function validateAssignmentCandidates(
+  session: SqlSession,
+  input: AccountAssignmentInput,
+): Promise<void> {
+  if (
+    input.expectedRevision !== undefined
+    && input.expectedRevision !== (await readStoreRevision(session))
+  )
+    throw new AccountDistributionRevisionError()
+  input.validateCandidates?.()
+}
+
+/** Only a fresh inference can replace a recorded model or its account. */
+function changesAssignmentModel(
+  input: AccountAssignmentInput,
+  existing: StoredAccountAssignment,
+): boolean {
+  return input.recordModel !== false && existing.modelId !== input.modelId
+}
+
+// eslint-disable-next-line max-params, complexity -- Keep model changes, candidate validation, scheduler and ownership atomic in one transaction.
 async function resolveAssignment(
   session: SqlSession,
   input: AccountAssignmentInput,
   key: Uint8Array,
-  existing?: number,
+  existing?: StoredAccountAssignment,
 ): Promise<AccountAssignment> {
   if (
     existing !== undefined
     && input.preferredAccountId !== undefined
-    && existing !== input.preferredAccountId
+    && existing.accountId !== input.preferredAccountId
   )
     throw new AccountDistributionConflictError(
-      existing,
+      existing.accountId,
       input.preferredAccountId,
     )
   const policy = await readAccountDistributionPolicy(session)
@@ -326,15 +360,30 @@ async function resolveAssignment(
     eligibleAccountWeights: eligible.weights,
     allocationVersion: policy.version,
   }
-  if (existing !== undefined)
-    return { ...metadata, accountId: existing, reason: "existing" }
-  if (
-    input.expectedRevision !== undefined
-    && input.expectedRevision !== (await readStoreRevision(session))
+  if (existing) {
+    const changingModel = changesAssignmentModel(input, existing)
+    const servesModel = eligible.ids.has(existing.accountId)
+    if (
+      !changingModel
+      || servesModel
+      || input.preferredAccountId !== undefined
+    ) {
+      if (changingModel && servesModel) {
+        await validateAssignmentCandidates(session, input)
+        await session.execute({
+          sql: "UPDATE capi_conversation_accounts SET model_id=? WHERE conversation_key=?",
+          args: [input.modelId, key],
+        })
+        input.validateCandidates?.()
+      }
+      return { ...metadata, accountId: existing.accountId, reason: "existing" }
+    }
+  }
+  await validateAssignmentCandidates(session, input)
+  const seed = assignmentSeed(
+    existing ? { ...input, inheritedAccountId: undefined } : input,
+    policy.configured,
   )
-    throw new AccountDistributionRevisionError()
-  input.validateCandidates?.()
-  const seed = assignmentSeed(input, policy.configured)
   let accountId: number
   let reason: AccountAssignment["reason"]
   if (seed) {
@@ -352,10 +401,18 @@ async function resolveAssignment(
     )
     reason = "new"
   }
-  await session.execute({
-    sql: "INSERT INTO capi_conversation_accounts(conversation_key,account_id) VALUES(?,?)",
-    args: [key, accountId],
-  })
+  const modelId = input.recordModel === false ? null : input.modelId
+  await session.execute(
+    existing ?
+      {
+        sql: "UPDATE capi_conversation_accounts SET account_id=?,model_id=? WHERE conversation_key=?",
+        args: [accountId, modelId, key],
+      }
+    : {
+        sql: "INSERT INTO capi_conversation_accounts(conversation_key,account_id,model_id) VALUES(?,?,?)",
+        args: [key, accountId, modelId],
+      },
+  )
   input.validateCandidates?.()
   return { ...metadata, accountId, reason }
 }
@@ -402,7 +459,15 @@ export function createAccountDistributionRepository(storage: Storage) {
   return {
     lookup: (affinityKey: string): Promise<number | undefined> => {
       const key = conversationKey(affinityKey)
-      return storage.read((session) => findOwner(session, key))
+      return storage.read(
+        async (session) => (await findAssignment(session, key))?.accountId,
+      )
+    },
+    lookupAssignment: (
+      affinityKey: string,
+    ): Promise<StoredAccountAssignment | undefined> => {
+      const key = conversationKey(affinityKey)
+      return storage.read((session) => findAssignment(session, key))
     },
     /** Read several owners from one snapshot, in the order of their keys. */
     lookupAll: (
@@ -413,7 +478,8 @@ export function createAccountDistributionRepository(storage: Storage) {
       )
       return storage.read(async (session) => {
         const owners: Array<number | undefined> = []
-        for (const key of keys) owners.push(await findOwner(session, key))
+        for (const key of keys)
+          owners.push((await findAssignment(session, key))?.accountId)
         return owners
       })
     },
@@ -509,14 +575,26 @@ export function createAccountDistributionRepository(storage: Storage) {
         eligibleAccountIds: [...input.eligibleAccountIds],
       }
       const found = await storage.read(async (session) => {
-        const existing = await findOwner(session, key)
-        return existing === undefined ? undefined : (
-            resolveAssignment(session, owned, key, existing)
-          )
+        const existing = await findAssignment(session, key)
+        if (!existing) return undefined
+        // A model change needs the write lock before rereading its owner.
+        // Already-admitted dispatch and unchanged models retain the read path.
+        if (
+          changesAssignmentModel(owned, existing)
+          && (owned.preferredAccountId === undefined
+            || owned.eligibleAccountIds.includes(existing.accountId))
+        )
+          return undefined
+        return resolveAssignment(session, owned, key, existing)
       })
       if (found) return found
       return storage.transaction(async (session) =>
-        resolveAssignment(session, owned, key, await findOwner(session, key)),
+        resolveAssignment(
+          session,
+          owned,
+          key,
+          await findAssignment(session, key),
+        ),
       )
     },
   }

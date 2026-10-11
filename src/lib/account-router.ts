@@ -5,6 +5,7 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import type {
   RoutedAccountPin,
   RoutedAccountAssignmentMetadata,
+  RoutedAccountSelection,
 } from "~/lib/account-routing-selection"
 import type { RoutingAffinitySource } from "~/lib/routing-affinity"
 import type { Account } from "~/lib/token-pool"
@@ -153,6 +154,9 @@ export async function selectRoutedModel(
   return {
     accountPin: {
       accountId: account.id,
+      ...(options?.createAssignment === false ?
+        {}
+      : { admittedModelId: modelId }),
       eligibleAccountIds: selection.eligibleAccountIds,
       selectionMode: selection.selectionMode,
       ...assignmentMetadata(selection),
@@ -233,6 +237,19 @@ function assignmentMetadata(
         eligibleAccountWeights: selection.eligibleAccountWeights,
         allocationVersion: selection.allocationVersion,
       }
+}
+
+function retainAccountSelection(
+  pin: RoutedAccountPin | undefined,
+  selection: RoutedAccountSelection,
+  modelId: string | undefined,
+): void {
+  if (!pin || !selection.account) return
+  pin.accountId = selection.account.id
+  pin.eligibleAccountIds = [...selection.eligibleAccountIds]
+  pin.selectionMode = selection.selectionMode
+  Object.assign(pin, assignmentMetadata(selection))
+  if (modelId !== undefined) pin.admittedModelId ??= modelId
 }
 
 type RoutedFetchResult = {
@@ -785,6 +802,7 @@ async function selectControlPlaneAccount(
     affinityKey: getEffectiveAffinityKey(),
     ...getCodexThreadAffinityKeys(),
     modelAgnostic: options.modelId === undefined,
+    recordModel: false,
     candidates,
     copilotSessionToken: options.copilotSessionToken,
     modelId: options.modelId ?? "control-plane",
@@ -996,6 +1014,11 @@ async function routedFetchInner(
   } = options
   const asyncPinnedAccountId = pinnedRoutedAccountStorage.getStore()
   const selectedAccountPin = selectedRoutedAccountStorage.getStore()
+  const mutableAccountPin = routedAccountPin ?? selectedAccountPin
+  const admittedModel =
+    path === "/v1/messages/count_tokens" || path === "/responses/input_tokens" ?
+      undefined
+    : modelId
   const context: RoutedFetchContext = {
     affinityKey:
       (
@@ -1061,6 +1084,7 @@ async function routedFetchInner(
           && path !== "/responses/input_tokens",
       })
       if (selection.account) account = selection.account
+      retainAccountSelection(mutableAccountPin, selection, admittedModel)
       const snapshot = leaseAccount(account)
       return await withActiveAccount(snapshot, async () => {
         const result = await singleTokenRoutedFetch({
@@ -1091,13 +1115,7 @@ async function routedFetchInner(
       && path !== "/responses/input_tokens",
   })
   const account = selection.account
-  const mutableAccountPin = routedAccountPin ?? selectedAccountPin
-  if (mutableAccountPin && account) {
-    mutableAccountPin.accountId = account.id
-    mutableAccountPin.eligibleAccountIds = [...selection.eligibleAccountIds]
-    mutableAccountPin.selectionMode = selection.selectionMode
-    Object.assign(mutableAccountPin, assignmentMetadata(selection))
-  }
+  retainAccountSelection(mutableAccountPin, selection, admittedModel)
   if (!account) {
     if (tokenPool.hasKnownModel(modelId)) {
       const response = createNoEnabledAccountResponse(modelId)

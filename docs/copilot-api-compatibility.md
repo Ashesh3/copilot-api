@@ -522,8 +522,12 @@ the established effective session/thread affinity (including Codex parent forks)
 Until percentages are explicitly saved, new ownership records use the existing
 equal rendezvous choice. After activation, new records use smooth weighted round
 robin among positive-share accounts eligible for the final model. The scheduler
-is model-specific; ownership is model-independent. Endpoint fallback does not
-authorize moving encrypted or signed history to another account. Eligibility
+is model-specific; each conversation has one owner and a last admitted model.
+When inference changes models, an eligible existing owner is preferred even at
+0%. If it cannot serve the new model, positive-share eligible accounts are
+scheduled and the owner/model update commits atomically. Before activation,
+reassignment uses equal rendezvous selection. Same-model failures retain the
+owner; an endpoint change alone does not reassign it. Eligibility
 comes from the raw current model catalog plus operator routing policy.
 
 Codex sends an agent tree's root thread as `session-id` and the requesting
@@ -557,9 +561,12 @@ conversation routing. A WebSocket continuation cannot change between memory
 and conversation scope by replacing or omitting the request-kind metadata.
 Explicit Claude/Copilot affinity headers still take precedence.
 
-Older account assignments have no request-kind provenance and are not reset by
-this change. A chat already assigned by memory work may still require a fresh
-chat after upgrading when its recorded account lacks the requested model.
+Older account assignments acquire model provenance on their first inference
+after upgrading. That inference keeps an eligible owner or attempts the same
+reassignment, including chats previously bound to an incompatible account by
+memory work. A failed allocation leaves the previous account and model intact.
+Discovery calls and already-admitted dispatches do not overwrite the last
+model. This prevents a delayed send from undoing a more recent model switch.
 
 In multi-account mode, affinity is necessary but not sufficient for session
 continuity. Account-binding control-plane calls and inference resolve or reserve
@@ -567,9 +574,10 @@ the same durable owner before endpoint selection. A session token is forwarded o
 its bounded issuer subject matches the selected account's bounded current
 issuer identity from authenticated user discovery (`analytics_tracking_id`),
 with legacy bearer `tid` assignments retained as a fallback. A recognized issuer
-can seed a missing assignment even at 0%. A contradictory stored owner or a
-recorded account that is unavailable for the requested model rejects locally
-without switching accounts. An unrecognized/malformed inference token is still
+can seed a missing assignment even at 0%. A contradictory stored owner or an
+explicitly pinned account unavailable for the requested model rejects locally.
+Model switches drop incompatible model-scoped session tokens under the existing
+validation rules. An unrecognized/malformed inference token is still
 omitted under the existing compatibility rules. Calls without affinity retain
 conservative first-eligible selection and the existing issuer checks. No raw
 session-token-to-account map is stored.
@@ -587,8 +595,12 @@ Complete parseable Auto and intent records are forwarded without projecting
 away future fields. Initial account selection may use bounded session-token
 issuer proof, then endpoint evaluation, dispatch, and any retry share the same
 request-local numeric pin backed by the durable conversation assignment.
-Model-policy calls and local count/warmup probes honor recorded owners without
-allocating new conversations. Percentage edits affect new ownership records only;
+Model-policy calls honor recorded owners. Local count/warmup probes may preview
+a different-model replacement without allocating or updating the record.
+WebSocket model switches use full replay; a `previous_response_id` continuation
+must still match its response snapshot's model. Account reassignment does not
+make opaque upstream compaction or reasoning state portable.
+Percentage edits affect new allocations only;
 0% does not disable existing owners. Clients without a stable affinity key and
 dormant predeployment conversations cannot obtain retrospective ownership guarantees.
 

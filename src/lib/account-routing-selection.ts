@@ -23,6 +23,8 @@ export interface RoutedAccountAssignmentMetadata {
 
 export interface RoutedAccountPin extends RoutedAccountAssignmentMetadata {
   accountId?: number
+  /** Dispatch reuses this admission without replacing a newer turn's model. */
+  admittedModelId?: string
   eligibleAccountIds?: Array<number>
   selectionMode?: "sticky" | "default"
 }
@@ -83,6 +85,7 @@ interface PersistentCandidateOptions {
    * an inherited account serves the thread's model is not yet known.
    */
   modelAgnostic?: boolean
+  recordModel?: boolean
   candidates: ReadonlyArray<Account>
   copilotSessionToken?: string
   modelId: string
@@ -107,6 +110,8 @@ export interface ConversationAffinity {
    * this version on their earlier account.
    */
   placementKey: string
+  /** A child cannot reassign an unavailable ancestor on its own behalf. */
+  preserveOwner?: boolean
 }
 
 /**
@@ -150,7 +155,11 @@ export async function resolveConversationAffinity(options: {
   if (options.servesModel(owner))
     return { ...thread, inheritedAccountId: owner }
   if (!tokenPool.getHealthyAccountIds().includes(owner))
-    return { key: inherited[index], placementKey: affinityKey }
+    return {
+      key: inherited[index],
+      placementKey: affinityKey,
+      preserveOwner: true,
+    }
   return { key: threadAffinityKey, placementKey: threadAffinityKey }
 }
 
@@ -190,18 +199,62 @@ function existingCandidateSelection(
  * As in admission, an inherited owner only seeds a thread without its own
  * record, so a pin or recognized issuer still takes precedence.
  */
-async function readOnlyOwner(
+async function readOnlyCandidateSelection(
+  options: PersistentCandidateOptions,
   repository: DistributionRepository,
+  context: {
+    conversation: ConversationAffinity
+    preferredId: number | undefined
+  },
+): Promise<RoutedAccountSelection> {
+  const { conversation, preferredId } = context
+  const recorded = await repository.lookupAssignment(conversation.key)
+  if (
+    recorded
+    && preferredId === undefined
+    && !options.modelAgnostic
+    && !conversation.preserveOwner
+    && recorded.modelId !== options.modelId
+    && !options.candidates.some((account) => account.id === recorded.accountId)
+  ) {
+    const policy = await repository.load()
+    const positiveIds = new Set(
+      policy.allocations
+        .filter((row) => row.percentage > 0)
+        .map((row) => row.accountId),
+    )
+    const candidates = options.candidates.filter(
+      (account) => !policy.configured || positiveIds.has(account.id),
+    )
+    if (candidates.length === 0)
+      throw assignmentError(
+        "account_distribution_unavailable",
+        "No eligible account has a positive allocation for this model.",
+        503,
+      )
+    return legacyCandidateSelection({ ...options, candidates })
+  }
+  const owner =
+    recorded?.accountId
+    ?? (preferredId === undefined ? conversation.inheritedAccountId : undefined)
+  return existingCandidateSelection(options, owner, preferredId)
+}
+
+function shouldRecordModel(
+  options: PersistentCandidateOptions,
   conversation: ConversationAffinity,
-  preferredId: number | undefined,
-): Promise<number | undefined> {
-  const recorded = await repository.lookup(conversation.key)
-  if (recorded !== undefined || preferredId !== undefined) return recorded
-  return conversation.inheritedAccountId
+): boolean {
+  return (
+    options.recordModel !== false
+    && !options.modelAgnostic
+    && !conversation.preserveOwner
+    && options.accountPin?.admittedModelId === undefined
+  )
 }
 
 async function assignmentFailure(options: {
   error: unknown
+  affinityKey: string
   candidates: ReadonlyArray<Account>
   repository: DistributionRepository
   preferredId?: number
@@ -220,6 +273,7 @@ async function assignmentFailure(options: {
       options.candidates.length === 0
       && !(await options.repository.load()).configured
       && options.preferredId === undefined
+      && (await options.repository.lookup(options.affinityKey)) === undefined
     )
       return
     if (options.preferredId !== undefined)
@@ -294,11 +348,10 @@ export async function selectPersistentCandidateAccount(
     throw conflictingConversationAccount()
   const preferredId = pinnedId ?? issuer?.id
   if (options.createAssignment === false)
-    return existingCandidateSelection(
-      placed,
-      await readOnlyOwner(repository, conversation, preferredId),
+    return readOnlyCandidateSelection(placed, repository, {
+      conversation,
       preferredId,
-    )
+    })
   let assignment: AccountAssignment
   try {
     // The transaction rereads the thread's owner, so a concurrent first turn
@@ -306,6 +359,7 @@ export async function selectPersistentCandidateAccount(
     assignment = await repository.assign({
       affinityKey: conversation.key,
       modelId: options.modelId,
+      recordModel: shouldRecordModel(options, conversation),
       eligibleAccountIds: candidateIds(options.candidates),
       preferredAccountId: preferredId,
       preferredReason: pinnedId !== undefined ? "pinned" : "issuer",
@@ -321,6 +375,7 @@ export async function selectPersistentCandidateAccount(
   } catch (error) {
     await assignmentFailure({
       error,
+      affinityKey: conversation.key,
       candidates: options.candidates,
       repository,
       preferredId,

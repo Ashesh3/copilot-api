@@ -602,8 +602,8 @@ request, token, concurrent-load or spending shares. The Usage page compares new
 assignments with their eligible weighted targets separately from request counts.
 
 Conversation ownership is stored permanently in SQLite using a compact 32-byte
-identity digest and stable account ID. Percentage edits and restarts do not move
-recorded conversations, including Codex forks that share their parent's account
+identity digest, stable account ID and last admitted model. Percentage edits and
+restarts do not move recorded conversations, including Codex forks that share their parent's account
 affinity. Recognized Claude, Copilot and Codex session/thread identifiers are
 supported; without a stable identifier, the existing first-eligible default
 remains. Existing equal hashing continues until the first percentage save, while
@@ -614,7 +614,7 @@ Each Codex subagent or fork is recorded under its own thread ID. On its first
 turn it takes the account of its fork parent, or else of its agent tree's root
 thread, when that account offers its model. Otherwise, such as a subagent asking
 for a model that only another account offers, it gets a new assignment. It keeps
-that account on later turns, and forks of it start from it. Fresh subagents
+that account on later turns for the same model, and forks of it start from it. Fresh subagents
 start from their agent tree's root thread. The root thread keeps its account.
 
 Codex background memory requests (`request_kind: "memory"`) use a separate
@@ -624,13 +624,23 @@ changing its remembered model fallback. Ordinary turns, warmups and compaction
 keep the chat's normal account continuity. WebSocket continuations keep the
 original request's memory or chat scope.
 
-Assignments recorded by older versions are retained. If background memory
-already assigned a chat to an account that lacks its model, start a fresh chat
-after upgrading; existing records do not identify whether their owner was
-chosen for memory or for conversation history.
+When a conversation switches models, its existing account is preferred if it
+is healthy, enabled and allowed to serve the new model by model-routing rules.
+Otherwise, routing chooses an eligible replacement using the saved positive
+allocations (or equal hashing before distribution is configured) and atomically
+updates that thread's assignment. Subsequent turns use the replacement account;
+parent threads, sibling threads and memory work retain their own assignments.
+Warmups and token-count probes can preview a model switch without recording it.
+An eligible existing owner remains usable at 0%, as for ordinary continuations.
 
-Disabling/removing a recorded owner, or requesting a model unavailable on it,
-returns an explicit continuity error instead of silently changing accounts.
+Older assignments have no recorded model. Their first inference keeps an
+eligible owner or makes the same best-effort reassignment, so an old incompatible
+assignment need not force a fresh chat. If no eligible replacement has a positive
+allocation, routing reports unavailability and preserves the assignment.
+
+For the same recorded model, disabling/removing its owner or losing model
+eligibility still returns an explicit continuity error. Explicit account pins
+and recognized session-token issuers also retain their continuity checks.
 Authentication rejections also retain identity. A `421` response refreshes that
 account's endpoint and catalog, then retries once on the same identity. Eligible
 anonymous quota failover stays within the same GitHub instance. An all-zero or
