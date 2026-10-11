@@ -13,6 +13,7 @@ import {
 } from "bun:test"
 import consola from "consola"
 
+import { createAccountDistributionRepository } from "~/lib/storage/account-distribution-repository"
 import { getStorageRuntime } from "~/lib/storage/runtime"
 
 import type { NativeMessagesRequestOptions } from "../src/routes/messages/native-handler"
@@ -1843,6 +1844,148 @@ describe("responses websocket message handling", () => {
       "Bearer ws-subagent-account-token",
     ])
   })
+
+  test.each([
+    { ownerServesBoth: false, prewarm: false },
+    { ownerServesBoth: true, prewarm: false },
+    { ownerServesBoth: false, prewarm: true },
+  ])(
+    "keeps a Codex WebSocket model switch on an eligible owner or persists its replacement (owner serves both: $ownerServesBoth, prewarm: $prewarm)",
+    async ({ ownerServesBoth, prewarm }) => {
+      const firstModel = "ws-model-switch-gpt"
+      const nextModel = "ws-model-switch-kimi"
+      for (const [index, model] of [firstModel, nextModel].entries()) {
+        const account = tokenPool.addAccount(
+          `github-ws-model-switch-${index}`,
+          "individual",
+          webSocketAccountIds[index],
+        )
+        account.copilotToken = `ws-model-switch-token-${index}`
+        account.healthy = true
+        const models =
+          ownerServesBoth && index === 0 ? [firstModel, nextModel] : [model]
+        account.models = new Set(models)
+        account.modelsData = models.map((id) => createWebSocketModel(id))
+      }
+      tokenPool.rebuildModelIndex()
+      state.models = tokenPool.getAllModels()
+      state.isMultiToken = true
+      const thread = findWebSocketAffinity(nextModel, webSocketAccountIds[1])
+      const ws = await createUpgradedTestWebSocket({
+        "session-id": thread,
+        "thread-id": thread,
+      })
+      const switchedOutput: Array<ResponseInputItem> = [
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            { type: "output_text", text: "Kimi answer", annotations: [] },
+          ],
+        },
+      ]
+      queuedResponses.push(
+        createResponsesSseResponse("resp_ws_before_model_switch"),
+        createResponsesSseResponse(
+          "resp_ws_after_model_switch",
+          switchedOutput,
+        ),
+        createResponsesSseResponse("resp_ws_model_switch_continued"),
+      )
+      const metadata = {
+        session_id: thread,
+        thread_id: thread,
+        "x-codex-turn-metadata": {
+          request_kind: "turn",
+          thread_source: "user",
+          turn_trigger: "composer",
+        },
+      }
+      const replay = [
+        { role: "user", content: "Start with GPT" },
+        { role: "assistant", content: "GPT answer" },
+        { role: "user", content: "Switch to Kimi" },
+      ]
+      const send = (payload: Record<string, unknown>) =>
+        seedProtocolDatabase().then(() =>
+          responsesWebSocket.message(
+            ws,
+            JSON.stringify({ type: "response.create", ...payload }),
+          ),
+        )
+      for (const [index, payload] of [
+        {
+          model: firstModel,
+          input: "Start with GPT",
+          client_metadata: metadata,
+        },
+        { model: nextModel, input: replay, client_metadata: metadata },
+        {
+          previous_response_id: "resp_ws_after_model_switch",
+          input: "Continue with Kimi",
+        },
+      ].entries()) {
+        if (prewarm && index === 1) {
+          await send({ ...payload, generate: false })
+          expect(capturedAuthorization).toEqual([
+            "Bearer ws-model-switch-token-0",
+          ])
+          expect(
+            await createAccountDistributionRepository(
+              getStorageRuntime().storage,
+            ).lookupAssignment(thread),
+          ).toEqual({ accountId: webSocketAccountIds[0], modelId: firstModel })
+          expect(
+            ws.sent.filter((frame) =>
+              frame.includes('"type":"response.completed"'),
+            ),
+          ).toHaveLength(2)
+        }
+        await send(payload)
+      }
+
+      const frames = ws.sent.map(
+        (frame) => JSON.parse(frame) as { type: string },
+      )
+      expect(
+        frames.filter(
+          (frame) => frame.type === "error" || frame.type === "response.failed",
+        ),
+      ).toEqual([])
+      expect(
+        frames.filter((frame) => frame.type === "response.completed"),
+      ).toHaveLength(prewarm ? 4 : 3)
+      expect(capturedAuthorization).toEqual(
+        ownerServesBoth ?
+          [
+            "Bearer ws-model-switch-token-0",
+            "Bearer ws-model-switch-token-0",
+            "Bearer ws-model-switch-token-0",
+          ]
+        : [
+            "Bearer ws-model-switch-token-0",
+            "Bearer ws-model-switch-token-1",
+            "Bearer ws-model-switch-token-1",
+          ],
+      )
+      expect(lastRequestBody).toMatchObject({
+        model: nextModel,
+        client_metadata: { session_id: thread, thread_id: thread },
+      })
+      expect(JSON.stringify(lastRequestBody?.input)).toContain("GPT answer")
+      expect(JSON.stringify(lastRequestBody?.input)).toContain("Kimi answer")
+      expect(JSON.stringify(lastRequestBody?.input)).toContain(
+        "Continue with Kimi",
+      )
+      expect(lastRequestBody?.previous_response_id).toBeUndefined()
+      expect(
+        await createAccountDistributionRepository(
+          getStorageRuntime().storage,
+        ).lookup(thread),
+      ).toBe(ownerServesBoth ? webSocketAccountIds[0] : webSocketAccountIds[1])
+      expect(ws.data.closed).toBe(false)
+    },
+  )
 
   test.each([
     { label: "after a main-model warmup", warmup: true },

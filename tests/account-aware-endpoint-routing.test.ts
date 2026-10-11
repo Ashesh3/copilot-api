@@ -31,6 +31,8 @@ import {
   resetRoutingTelemetryForTest,
 } from "~/lib/routing-telemetry"
 import { state } from "~/lib/state"
+import { createAccountDistributionRepository } from "~/lib/storage/account-distribution-repository"
+import { getStorageRuntime } from "~/lib/storage/runtime"
 import { tokenPool } from "~/lib/token-pool"
 import { server } from "~/server"
 
@@ -544,6 +546,125 @@ test.each([
   },
 )
 
+test.each([false, true])(
+  "keeps a Codex HTTP model switch on an eligible owner or persists its replacement (owner serves both: %s)",
+  async (ownerServesBoth) => {
+    const firstModel = "gpt-6.1-sol"
+    const nextModel = "kimi-k3"
+    const firstAccount = registerAccount({
+      accountId: 52_401,
+      endpoints: ["/responses"],
+      modelId: firstModel,
+      token: "tid=model-switch-first;exp=1900000000",
+    })
+    registerAccount({
+      accountId: 52_402,
+      endpoints: ["/chat/completions"],
+      modelId: nextModel,
+      token: "tid=model-switch-second;exp=1900000000",
+    })
+    if (ownerServesBoth) {
+      firstAccount.models.add(nextModel)
+      firstAccount.modelsData.push(createModel(nextModel, ["/responses"]))
+    }
+    tokenPool.rebuildModelIndex()
+    state.models = tokenPool.getAllModels()
+    const thread = Array.from(
+      { length: 10_000 },
+      (_, index) => `http-model-switch-${index}`,
+    ).find(
+      (candidate) =>
+        tokenPool.getAccountForModelBySession(nextModel, candidate)?.id
+        === 52_402,
+    )
+    if (!thread) throw new Error("Expected second-account model affinity")
+    const token = sessionToken({
+      modelId: firstModel,
+      subject: "model-switch-first",
+    })
+    const input: Array<{ role: "assistant" | "user"; content: string }> = []
+    const statuses: Array<number> = []
+    const models: Array<unknown> = []
+    for (const [index, model] of [firstModel, nextModel, nextModel].entries()) {
+      input.push({ role: "user", content: `Continue the task: turn ${index}` })
+      const response = await seedProtocolDatabase().then(() =>
+        server.request("/v1/responses", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${state.apiKeyAuth ?? PROTOCOL_GATEWAY_KEY}`,
+            "content-type": "application/json",
+            "copilot-session-token": token,
+            "session-id": thread,
+            "thread-id": thread,
+          },
+          body: JSON.stringify({
+            model,
+            input,
+            client_metadata: {
+              session_id: thread,
+              thread_id: thread,
+              "x-codex-turn-metadata": {
+                request_kind: "turn",
+                thread_source: "user",
+                turn_trigger: "composer",
+                turn_id: `model-switch-turn-${index}`,
+              },
+            },
+          }),
+        }),
+      )
+      statuses.push(response.status)
+      const body = (await response.json()) as { model?: unknown }
+      models.push(body.model)
+      input.push({ role: "assistant", content: "ok" })
+    }
+
+    expect(statuses).toEqual([200, 200, 200])
+    expect(models).toEqual([firstModel, nextModel, nextModel])
+    expect(upstreamRequests).toEqual(
+      ownerServesBoth ?
+        [
+          {
+            authorization: "Bearer tid=model-switch-first;exp=1900000000",
+            path: "/responses",
+          },
+          {
+            authorization: "Bearer tid=model-switch-first;exp=1900000000",
+            path: "/responses",
+          },
+          {
+            authorization: "Bearer tid=model-switch-first;exp=1900000000",
+            path: "/responses",
+          },
+        ]
+      : [
+          {
+            authorization: "Bearer tid=model-switch-first;exp=1900000000",
+            path: "/responses",
+          },
+          {
+            authorization: "Bearer tid=model-switch-second;exp=1900000000",
+            path: "/chat/completions",
+          },
+          {
+            authorization: "Bearer tid=model-switch-second;exp=1900000000",
+            path: "/chat/completions",
+          },
+        ],
+    )
+    expect(upstreamSessionTokens.map((entry) => entry.token)).toEqual([
+      token,
+      null,
+      null,
+    ])
+    expect(
+      await createAccountDistributionRepository(
+        getStorageRuntime().storage,
+      ).lookup(thread),
+    ).toBe(ownerServesBoth ? 52_401 : 52_402)
+  },
+)
+
 test("preserves recorded session ownership when its account loses model eligibility", async () => {
   const modelId = "session-continuity-eligibility-change"
   const accountA = registerAccount({
@@ -967,6 +1088,7 @@ test("inherits the selected account into an empty retry pin and fails closed if 
 
   expect(retryPin).toEqual({
     accountId: accountA.id,
+    admittedModelId: modelId,
     eligibleAccountIds: [accountA.id],
     selectionMode: "default",
   })

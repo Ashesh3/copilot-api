@@ -26,6 +26,10 @@ import {
   conversationModelsMigration,
   conversationModelTables,
 } from "~/lib/storage/migrations/008-conversation-models"
+import {
+  conversationAccountModelMigration,
+  conversationAccountModelTables,
+} from "~/lib/storage/migrations/009-conversation-account-model"
 
 export const storageMigrations = [
   initialMigration,
@@ -36,9 +40,10 @@ export const storageMigrations = [
   historyRetentionMigration,
   accountDistributionMigration,
   conversationModelsMigration,
+  conversationAccountModelMigration,
 ] as const
 
-export const currentSchemaVersion = conversationModelsMigration.version
+export const currentSchemaVersion = conversationAccountModelMigration.version
 const versionTwoTables = { ...initialTables, ...gatewaySecretTables }
 const versionThreeTables = Object.fromEntries(
   Object.entries(versionTwoTables).filter(([name]) => name !== "capi_debug"),
@@ -54,9 +59,13 @@ const versionSevenTables = {
   ...versionFiveTables,
   ...accountDistributionTables,
 }
-export const currentTables = {
+const versionEightTables = {
   ...versionSevenTables,
   ...conversationModelTables,
+}
+export const currentTables = {
+  ...versionEightTables,
+  ...conversationAccountModelTables,
 }
 const versionThreeIndexes = Object.fromEntries(
   Object.entries(initialIndexes).filter(
@@ -114,6 +123,13 @@ export function storageSchema(version: number) {
     case 7: {
       return {
         tables: versionSevenTables,
+        indexes: currentIndexes,
+        counterKeys: currentCounterKeys,
+      }
+    }
+    case 8: {
+      return {
+        tables: versionEightTables,
         indexes: currentIndexes,
         counterKeys: currentCounterKeys,
       }

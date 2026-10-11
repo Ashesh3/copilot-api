@@ -252,6 +252,136 @@ test("duplicate concurrent first assignments across adapters consume one schedul
   }
 })
 
+test("model changes replace an ineligible owner using positive shares and retain the new owner", async () => {
+  const { repository, ids } = await fixture([0, 50, 50, 0])
+  const request = {
+    affinityKey: "model-switch",
+    modelId: "model-a",
+    eligibleAccountIds: [ids[0]],
+    preferredAccountId: ids[0],
+  }
+  expect((await repository.assign(request)).accountId).toBe(ids[0])
+  const switched = {
+    affinityKey: request.affinityKey,
+    modelId: "model-b",
+    eligibleAccountIds: ids.slice(1),
+  }
+  expect(await repository.assign(switched)).toMatchObject({
+    accountId: ids[1],
+    reason: "new",
+  })
+  expect(await repository.lookup(request.affinityKey)).toBe(ids[1])
+  expect(await repository.assign(switched)).toMatchObject({
+    accountId: ids[1],
+    reason: "existing",
+  })
+  expect(
+    (await repository.assign({ ...switched, affinityKey: "next-model-b" }))
+      .accountId,
+  ).toBe(ids[2])
+})
+
+test("a same-account model change updates the last model without advancing the scheduler", async () => {
+  const { repository, storage, ids } = await fixture([0, 50, 50, 0])
+  const request = {
+    affinityKey: "same-account-switch",
+    modelId: "model-a",
+    eligibleAccountIds: ids,
+  }
+  await repository.assign({ ...request, preferredAccountId: ids[0] })
+  expect(
+    await repository.assign({ ...request, modelId: "model-b" }),
+  ).toMatchObject({ accountId: ids[0], reason: "existing" })
+  // Losing eligibility for the last model is not a new model switch.
+  expect(
+    await repository.assign({
+      ...request,
+      modelId: "model-b",
+      eligibleAccountIds: ids.slice(1),
+    }),
+  ).toMatchObject({ accountId: ids[0], reason: "existing" })
+  expect(
+    await storage.read((session) =>
+      session.query({
+        sql: "SELECT model_id FROM capi_conversation_accounts",
+        args: [],
+      }),
+    ),
+  ).toEqual([{ model_id: "model-b" }])
+  expect(
+    (
+      await repository.assign({
+        ...request,
+        affinityKey: "next-model-b",
+        modelId: "model-b",
+      })
+    ).accountId,
+  ).toBe(ids[1])
+})
+
+test("duplicate concurrent model switches across adapters allocate one replacement", async () => {
+  const { repository, ids, path } = await fixture([0, 50, 50, 0])
+  await repository.assign({
+    affinityKey: "raced-switch",
+    modelId: "model-a",
+    eligibleAccountIds: [ids[0]],
+    preferredAccountId: ids[0],
+  })
+  const other = new LocalSqliteStorage(path)
+  try {
+    const request = {
+      affinityKey: "raced-switch",
+      modelId: "model-b",
+      eligibleAccountIds: ids.slice(1),
+    }
+    const results = await Promise.all([
+      repository.assign(request),
+      createAccountDistributionRepository(other).assign(request),
+    ])
+    expect(results.map((result) => result.accountId)).toEqual([ids[1], ids[1]])
+    expect(
+      (await repository.assign({ ...request, affinityKey: "next" })).accountId,
+    ).toBe(ids[2])
+  } finally {
+    await other.close()
+  }
+})
+
+test("a failed model-switch commit preserves ownership and scheduler credits", async () => {
+  const { repository, storage, ids } = await fixture([0, 50, 50, 0])
+  await repository.assign({
+    affinityKey: "failed-switch",
+    modelId: "model-a",
+    eligibleAccountIds: [ids[0]],
+    preferredAccountId: ids[0],
+  })
+  const failed = createAccountDistributionRepository(
+    faultStorage(storage, {
+      beforeCommit: () => {
+        throw new Error("injected switch rollback")
+      },
+    }),
+  )
+  const request = {
+    affinityKey: "failed-switch",
+    modelId: "model-b",
+    eligibleAccountIds: ids.slice(1),
+  }
+  await expect(failed.assign(request)).rejects.toThrow(
+    "injected switch rollback",
+  )
+  expect(await repository.lookup(request.affinityKey)).toBe(ids[0])
+  expect(
+    await storage.read((session) =>
+      session.query({
+        sql: "SELECT model_id FROM capi_conversation_accounts",
+        args: [],
+      }),
+    ),
+  ).toEqual([{ model_id: "model-a" }])
+  expect((await repository.assign(request)).accountId).toBe(ids[1])
+})
+
 test("failed commit rolls ownership and scheduler back, while reopening retains both", async () => {
   const { repository, storage, ids, path } = await fixture([50, 50])
   const failed = createAccountDistributionRepository(

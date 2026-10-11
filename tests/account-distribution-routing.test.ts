@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/require-await -- The synthetic validator preserves the asynchronous upstream interface. */
 /* eslint-disable @typescript-eslint/await-thenable, @typescript-eslint/no-confusing-void-expression -- Bun asynchronous matchers must be awaited. */
+/* eslint-disable max-lines -- Shared account and storage fixtures cover ownership, model switches and dispatch races together. */
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { Hono } from "hono"
 
@@ -19,6 +20,7 @@ import {
 import { getAccountsService } from "~/lib/accounts-service"
 import { mergeConfigWithDefaults } from "~/lib/config"
 import { GitHubDeviceLoginService } from "~/lib/github-device-login"
+import { setModelRoutingOverride } from "~/lib/model-routing"
 import {
   installResponsesRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
@@ -216,7 +218,7 @@ test("new weighted ownership selects endpoint authority and survives percentage 
   expect((await select("new-conversation")).accountPin?.accountId).toBe(ids[0])
 })
 
-test("legacy owners are recorded before first activation and model changes never create a second owner", async () => {
+test("legacy owners are recorded before first activation and switches require positive allocations", async () => {
   const first = await select("legacy-owner")
   const owner = first.accountPin?.accountId
   expect(owner).toBeDefined()
@@ -225,11 +227,242 @@ test("legacy owners are recorded before first activation and model changes never
   await configure([100, 0])
   await select("first-owned")
   await expect(select("first-owned", "second-only")).rejects.toMatchObject({
-    response: { status: 409 },
+    response: { status: 503 },
   })
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookup(
+      "first-owned",
+    ),
+  ).toBe(ids[0])
   await expect(
     select("no-positive-owner", "second-only"),
   ).rejects.toMatchObject({ response: { status: 503 } })
+})
+
+test("a model switch reassigns the thread and preserves its new owner on later turns", async () => {
+  await configure([50, 50])
+  expect(
+    (await select("model-switch", "first-only")).accountPin?.accountId,
+  ).toBe(ids[0])
+  expect(
+    (await select("model-switch", "second-only")).accountPin?.accountId,
+  ).toBe(ids[1])
+  expect((await select("model-switch", "shared")).accountPin?.accountId).toBe(
+    ids[1],
+  )
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookup(
+      "model-switch",
+    ),
+  ).toBe(ids[1])
+})
+
+test("model-switch probes preview a replacement without changing the owner or last model", async () => {
+  await configure([50, 50])
+  await select("switch-probe", "first-only")
+  const preview = await runWithRoutingAffinity(
+    { key: "switch-probe", source: "copilot_session" },
+    () => selectRoutedModel("second-only", { createAssignment: false }),
+  )
+  expect(preview.accountPin?.accountId).toBe(ids[1])
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookup(
+      "switch-probe",
+    ),
+  ).toBe(ids[0])
+  expect(
+    await fixture.storage.read((session) =>
+      session.query({
+        sql: "SELECT model_id FROM capi_conversation_accounts",
+        args: [],
+      }),
+    ),
+  ).toEqual([{ model_id: "first-only" }])
+  expect(
+    (await select("switch-probe", "second-only")).accountPin?.accountId,
+  ).toBe(ids[1])
+})
+
+test("legacy assignments recover when their model is available on a different account", async () => {
+  await configure([50, 50])
+  await select("legacy-switch", "first-only")
+  await fixture.storage.atomicBatch([
+    { sql: "UPDATE capi_conversation_accounts SET model_id=NULL", args: [] },
+  ])
+  expect(
+    (await select("legacy-switch", "second-only")).accountPin?.accountId,
+  ).toBe(ids[1])
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookup(
+      "legacy-switch",
+    ),
+  ).toBe(ids[1])
+})
+
+test("unavailable accounts still reject the same model without changing ownership", async () => {
+  await configure([50, 50])
+  await select("same-model-failure", "shared")
+  const first = tokenPool
+    .getAllAccounts()
+    .find((account) => account.id === ids[0])
+  if (!first) throw new Error("Missing fixture account")
+  tokenPool.markUnhealthy(first)
+  await expect(select("same-model-failure", "shared")).rejects.toMatchObject({
+    response: { status: 409 },
+  })
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookup(
+      "same-model-failure",
+    ),
+  ).toBe(ids[0])
+})
+
+test("a model switch honors a disabled model route even when the old account advertises it", async () => {
+  await configure([50, 50])
+  await select("model-route-switch", "first-only")
+  await withSettingsActor("admin:fixture", () =>
+    setModelRoutingOverride("shared", ids[0], false),
+  )
+  const selected = await select("model-route-switch", "shared")
+  expect(selected.accountPin?.accountId).toBe(ids[1])
+  expect(selected.model?.supported_endpoints).toEqual(["/chat/completions"])
+})
+
+test("a model switch follows equal hashing before distribution has been configured", async () => {
+  expect(
+    (await select("unconfigured-switch", "first-only")).accountPin?.accountId,
+  ).toBe(ids[0])
+  expect(
+    (await select("unconfigured-switch", "second-only")).accountPin?.accountId,
+  ).toBe(ids[1])
+  expect(
+    (await select("unconfigured-switch", "first-only")).accountPin?.accountId,
+  ).toBe(ids[0])
+})
+
+test("an unknown switched model cannot escape to the default account", async () => {
+  await select("unknown-model-switch", "second-only")
+  await expect(
+    select("unknown-model-switch", "absent-model"),
+  ).rejects.toMatchObject({
+    response: { status: 503 },
+  })
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookupAssignment(
+      "unknown-model-switch",
+    ),
+  ).toEqual({ accountId: ids[1], modelId: "second-only" })
+})
+
+test("a delayed dispatch on the same account cannot undo a newer model admission", async () => {
+  await configure([100, 0])
+  const initial = await select("delayed-model", "first-only")
+  await select("delayed-model", "shared")
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true })) as unknown as typeof fetch
+  await runWithRoutingAffinity(
+    { key: "delayed-model", source: "copilot_session" },
+    () =>
+      runWithRoutedModelSelection(initial, async () => {
+        const result = await routedFetch(
+          "/responses",
+          { method: "POST" },
+          { modelId: "first-only" },
+        )
+        await result.response.body?.cancel()
+        expect(result.account?.id).toBe(ids[0])
+      }),
+  )
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookupAssignment(
+      "delayed-model",
+    ),
+  ).toEqual({ accountId: ids[0], modelId: "shared" })
+})
+
+test("a stale dispatch pin cannot move a conversation back after reassignment", async () => {
+  await configure([50, 50])
+  const initial = await select("stale-model-pin", "first-only")
+  await select("stale-model-pin", "second-only")
+  await expect(
+    runWithRoutingAffinity(
+      { key: "stale-model-pin", source: "copilot_session" },
+      () =>
+        runWithRoutedModelSelection(initial, () =>
+          routedFetch(
+            "/responses",
+            { method: "POST" },
+            { modelId: "first-only" },
+          ),
+        ),
+    ),
+  ).rejects.toMatchObject({
+    clientBody: { error: { code: "conversation_account_conflict" } },
+  })
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookupAssignment(
+      "stale-model-pin",
+    ),
+  ).toEqual({ accountId: ids[1], modelId: "second-only" })
+})
+
+test("single-account retry pins cannot overwrite a newer model admission", async () => {
+  await accounts.update(
+    ids[1],
+    { enabled: false },
+    await createAccountMutationContext(
+      fixture.storage,
+      "account.update",
+      { enabled: false },
+      "owner:test",
+    ),
+  )
+  tokenPool.deleteAccount(ids[1])
+  state.isMultiToken = false
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true })) as unknown as typeof fetch
+  const pin = {}
+  const send = () =>
+    routedFetch(
+      "/responses",
+      { method: "POST" },
+      { modelId: "first-only", routedAccountPin: pin },
+    )
+  await withRequestSnapshot(getStorageRuntime().snapshot.get(), () =>
+    runWithRoutingAffinity(
+      { key: "single-model-pin", source: "copilot_session" },
+      async () => {
+        await (await send()).response.body?.cancel()
+        await selectRoutedModel("shared")
+        await (await send()).response.body?.cancel()
+      },
+    ),
+  )
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookupAssignment(
+      "single-model-pin",
+    ),
+  ).toEqual({ accountId: ids[0], modelId: "shared" })
+})
+
+test("a model switch under stale routing policy leaves the prior assignment intact", async () => {
+  await configure([50, 50])
+  await select("stale-model-policy", "first-only")
+  const snapshot = getStorageRuntime().snapshot.get()
+  await configure([0, 100])
+  await expect(
+    withRequestSnapshot(snapshot, () =>
+      select("stale-model-policy", "second-only"),
+    ),
+  ).rejects.toMatchObject({ response: { status: 503 } })
+  expect(
+    await createAccountDistributionRepository(fixture.storage).lookupAssignment(
+      "stale-model-policy",
+    ),
+  ).toEqual({ accountId: ids[0], modelId: "first-only" })
+  expect(
+    (await select("stale-model-policy", "second-only")).accountPin?.accountId,
+  ).toBe(ids[1])
 })
 
 test("Codex forks reuse the effective parent's permanent account", async () => {
@@ -280,6 +513,30 @@ function codexTurn(thread: CodexThread, modelId: string) {
 
 const codexRoot = { session: "codex-root", thread: "codex-root" }
 const codexSubagent = { session: "codex-root", thread: "codex-subagent" }
+
+test("switching a subagent model reassigns only its thread and later forks inherit it", async () => {
+  await configure([50, 50])
+  await codexTurn(codexRoot, "first-only")
+  await codexTurn(codexSubagent, "first-only")
+  expect(
+    (await codexTurn(codexSubagent, "second-only")).accountPin?.accountId,
+  ).toBe(ids[1])
+  const repository = createAccountDistributionRepository(fixture.storage)
+  expect(await repository.lookup("codex-root")).toBe(ids[0])
+  expect(await repository.lookup("codex-subagent")).toBe(ids[1])
+  expect(
+    (
+      await codexTurn(
+        {
+          session: "codex-root",
+          thread: "nested-switch",
+          forkedFrom: "codex-subagent",
+        },
+        "shared",
+      )
+    ).accountPin?.accountId,
+  ).toBe(ids[1])
+})
 
 /** A third account with the first account's catalog: `shared` and `first-only`. */
 async function addFirstOnlyAccount(): Promise<number> {
