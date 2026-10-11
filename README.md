@@ -496,7 +496,11 @@ The dashboard is the recommended interface for these controls:
 - **Fallbacks** switch models after upstream HTTP 422 or a buffered native
   Messages refusal or Responses `content_filter` result, before client output
   starts. They can continue through every enabled rule in a chain. Each target
-  also follows Model Redirects, including effort and verbosity overrides. A cycle
+  also follows Model Redirects, including effort and verbosity overrides. Targets
+  with no eligible Copilot account or configured custom chat provider are silently
+  skipped along their configured fallback rules. If no target remains available,
+  the original upstream result is returned. Existing conversation account
+  assignments are preserved. A cycle
   in redirects, fallbacks, or their combination pauses both features until the
   conflicting rules are fixed; the dashboard shows the loop.
   Successful conversation routes and hashed old-thinking fingerprints persist

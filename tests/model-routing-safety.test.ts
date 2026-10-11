@@ -16,10 +16,14 @@ import {
   setModelRedirectsForTest,
 } from "~/lib/model-redirect"
 import { analyzeModelRoutingSafety } from "~/lib/model-routing-safety"
+import { state } from "~/lib/state"
 
+import { fallbackModels } from "./helpers/fallback-models"
 import { useProtocolDatabase } from "./helpers/protocol-database"
 
 useProtocolDatabase()
+
+const originalState = { models: state.models, isMultiToken: state.isMultiToken }
 
 function redirect(sourceModel: string, targetModel: string, extra = {}) {
   return {
@@ -47,11 +51,25 @@ function fallbacks(edges: Array<[string, string]>) {
 }
 
 beforeEach(() => {
+  state.isMultiToken = false
+  state.models = fallbackModels([
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-sol-fast",
+    "fast-a",
+    "fast-b",
+    "a",
+    "c",
+    "d",
+    "gpt-5.2",
+    "end",
+  ])
   setModelRedirectsForTest([])
   fallbacks([])
 })
 
 afterEach(() => {
+  Object.assign(state, originalState)
   setModelRedirectsForTest([])
   setModelFallbackConfigForTest(null)
 })

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, test } from "bun:test"
 
 import { HTTPError } from "~/lib/error"
 import {
@@ -18,14 +18,24 @@ import {
   addModelRedirect,
   setModelRedirectsForTest,
 } from "~/lib/model-redirect"
+import { state } from "~/lib/state"
 import { withRequestSnapshot } from "~/lib/storage/request-snapshot"
 import { getStorageRuntime } from "~/lib/storage/runtime"
 
+import { fallbackModels } from "./helpers/fallback-models"
 import { useProtocolDatabase } from "./helpers/protocol-database"
 
 useProtocolDatabase()
 
+const originalState = { models: state.models, isMultiToken: state.isMultiToken }
+
+beforeEach(() => {
+  state.isMultiToken = false
+  state.models = fallbackModels(["astra", "sol", "sol-fast"])
+})
+
 afterEach(() => {
+  Object.assign(state, originalState)
   setModelFallbackConfigForTest(null)
   setModelRedirectsForTest([])
 })

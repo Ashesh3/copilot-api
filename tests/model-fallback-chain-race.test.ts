@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, test } from "bun:test"
 
 import { HTTPError } from "~/lib/error"
 import {
@@ -10,10 +10,19 @@ import {
   setModelFallbackConfigForTest,
   validateModelFallbackConfig,
 } from "~/lib/model-fallback-config"
+import { state } from "~/lib/state"
 
+import { fallbackModels } from "./helpers/fallback-models"
 import { useProtocolDatabase } from "./helpers/protocol-database"
 
 useProtocolDatabase()
+
+const originalState = { models: state.models, isMultiToken: state.isMultiToken }
+
+beforeEach(() => {
+  state.isMultiToken = false
+  state.models = fallbackModels(["race-a", "race-b", "race-c"])
+})
 
 function history(signatures: Array<string>) {
   return {
@@ -26,6 +35,7 @@ function history(signatures: Array<string>) {
 }
 
 afterEach(() => {
+  Object.assign(state, originalState)
   setModelFallbackConfigForTest(null)
 })
 

@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/require-await, @typescript-eslint/await-thenable, @typescript-eslint/no-confusing-void-expression -- async attempt callbacks and Bun rejection assertions model upstream outcomes */
-import { afterEach, expect, spyOn, test } from "bun:test"
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
 
 import { setConfigForTest } from "~/lib/config"
 import { HTTPError, LocalHTTPError } from "~/lib/error"
@@ -14,10 +14,19 @@ import {
   resolveResponsesRequestRoutingAffinity,
   runWithRoutingAffinity,
 } from "~/lib/routing-affinity"
+import { state } from "~/lib/state"
 
+import { fallbackModels } from "./helpers/fallback-models"
 import { useProtocolDatabase } from "./helpers/protocol-database"
 
 useProtocolDatabase()
+
+const originalState = { models: state.models, isMultiToken: state.isMultiToken }
+
+beforeEach(() => {
+  state.isMultiToken = false
+  state.models = fallbackModels(["source", "target"])
+})
 
 const config = {
   enabled: true,
@@ -327,6 +336,7 @@ test("concurrent successful transitions merge all known foreign signatures", asy
 })
 
 afterEach(() => {
+  Object.assign(state, originalState)
   setModelFallbackConfigForTest(null)
   setConfigForTest(null)
 })
