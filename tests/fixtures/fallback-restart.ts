@@ -5,10 +5,12 @@ import {
   runWithModelFallback,
 } from "../../src/lib/model-fallback"
 import { setModelFallbackConfig } from "../../src/lib/model-fallback-config"
+import { state } from "../../src/lib/state"
 import {
   closeStorageRuntime,
   initializeStorageRuntime,
 } from "../../src/lib/storage/runtime"
+import { fallbackModels } from "../helpers/fallback-models"
 
 const [databasePath, phase] = process.argv.slice(2)
 if (!databasePath || !phase)
@@ -16,7 +18,10 @@ if (!databasePath || !phase)
 await initializeStorageRuntime({
   config: { kind: "sqlite", path: databasePath },
 })
+const originalState = { models: state.models, isMultiToken: state.isMultiToken }
 try {
+  state.isMultiToken = false
+  state.models = fallbackModels(["source", "target"])
   if (phase === "seed") {
     await setModelFallbackConfig({
       enabled: true,
@@ -54,5 +59,6 @@ try {
   )
   process.stdout.write(JSON.stringify(sent))
 } finally {
+  Object.assign(state, originalState)
   await closeStorageRuntime()
 }

@@ -9,7 +9,7 @@ export interface ConversationModelRoute {
   source: string
   target: string
   resolved: string
-  reason?: ModelFallbackReason
+  reason?: ModelFallbackReason | "unavailable"
 }
 
 export interface ConversationModelBinding {
@@ -78,8 +78,13 @@ function decodeJson(value: unknown): unknown {
   }
 }
 
-function fallbackReason(value: unknown): ModelFallbackReason {
-  if (value === "http_422" || value === "refusal" || value === "content_filter")
+function fallbackReason(value: unknown): ConversationModelRoute["reason"] {
+  if (
+    value === "http_422"
+    || value === "refusal"
+    || value === "content_filter"
+    || value === "unavailable"
+  )
     return value
   return invalid()
 }
