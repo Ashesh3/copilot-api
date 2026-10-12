@@ -159,10 +159,12 @@ export function responsesResultToChatCompletion(
   }
 }
 
+// eslint-disable-next-line max-params -- Observe terminal usage before translated writes without changing existing callers.
 export async function streamResponsesAsChatCompletions(
   stream: WriteSseStream,
   responseStream: AsyncIterable<{ data?: string; event?: string }>,
   requestedModel: string,
+  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void,
 ): Promise<ResponsesAsChatStreamResult> {
   const state = createStreamState(requestedModel)
   let finalUsage = extractUsage(null)
@@ -180,6 +182,18 @@ export async function streamResponsesAsChatCompletions(
       terminal: isResponsesTerminalEvent(chunk.event),
     }) as ResponseStreamEvent | undefined
     if (event === undefined) continue
+    if (
+      event.type === "response.completed"
+      || event.type === "response.incomplete"
+    ) {
+      const usage = extractUsage(event.response.usage)
+      if (usage.observedUsage) {
+        onUsage?.({
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+        })
+      }
+    }
     const result = await emitTranslatedEvent(stream, event, state)
     if (result.terminal) {
       terminal = result.terminal
