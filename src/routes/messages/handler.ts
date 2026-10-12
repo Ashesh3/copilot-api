@@ -1718,8 +1718,9 @@ const streamResponsesDirect = async (
       terminal: isResponsesTerminalEventName(chunk.event),
     }) as ResponseStreamEvent | undefined
     if (parsed === undefined) continue
-    // Capture usage from response.completed events
+    // Publish received terminal usage before translated writes can be cancelled.
     if (isResponseCompleted(parsed) && parsed.response.usage) {
+      setResponsesUsageContext(c, parsed.response)
       streamInputTokens = parsed.response.usage.input_tokens
       streamOutputTokens = parsed.response.usage.output_tokens ?? 0
       streamCachedTokens =
@@ -1731,7 +1732,6 @@ const streamResponsesDirect = async (
 
     const result = await writeResponsesEvents(stream, parsed, streamState)
     if (result.kind === "success") {
-      setResponsesUsageContext(c, result.response)
       await owner.adapter.succeed(async () => {
         await writeAnthropicEvents(
           stream,

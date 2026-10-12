@@ -92,6 +92,7 @@ import {
   writeSseHeartbeat,
 } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
+import { normalizeUsageTokenCount } from "~/lib/storage/usage-counters"
 import { tokenPool } from "~/lib/token-pool"
 import { emitResponsesToolSpans } from "~/lib/tool-spans"
 import { allowResponsesPermissionReview } from "~/routes/permission-review"
@@ -299,10 +300,10 @@ async function streamImmediateNativeResponses(
       const outbound = processNativeResponsesChunk(normalized, writeContext)
       if (outbound === undefined) continue
       updateResponsesFailureState(failureState, outbound)
+      const result = getCompletedBufferedResponse(outbound)
+      updateNativeResponsesUsage(options.c, result)
       await writeNativeResponsesChunk(outbound, stream)
       if (await commitReceivedResponsesTerminal(lifecycle, normalized.event)) {
-        const result = getCompletedBufferedResponse(outbound)
-        updateNativeResponsesUsage(options.c, result)
         updateNativeResponsesSpan(options.streamSpan, result)
       }
     }
@@ -379,13 +380,12 @@ async function streamBufferedNativeResponses(
       ),
       stream,
     )
+    updateNativeResponsesUsage(options.c, resolved)
     await emitResponsesResultAsStream(
       stream,
       withRequestedResponseModel(resolved, options.requestedModel),
     )
-    if (await lifecycle.succeed("synthetic")) {
-      updateNativeResponsesUsage(options.c, resolved)
-    }
+    await lifecycle.succeed("synthetic")
   } catch (error) {
     await failResponsesLifecycle(lifecycle, stream, error)
   } finally {
@@ -2149,6 +2149,31 @@ const mapCCUsage = (
   }
 }
 
+function mapCCStreamUsage(usage: CCStreamState["usage"]): ResponseUsage | null {
+  if (usage.inputTokens === undefined && usage.outputTokens === undefined) {
+    return null
+  }
+  const inputTokens =
+    usage.inputTokens === undefined ?
+      0
+    : (normalizeUsageTokenCount(usage.inputTokens) ?? Number.NaN)
+  const outputTokens =
+    usage.outputTokens === undefined ?
+      0
+    : (normalizeUsageTokenCount(usage.outputTokens) ?? Number.NaN)
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens:
+      normalizeUsageTokenCount(inputTokens + outputTokens) ?? Number.NaN,
+    ...(usage.cachedTokens === undefined ?
+      {}
+    : {
+        input_tokens_details: { cached_tokens: usage.cachedTokens },
+      }),
+  }
+}
+
 const buildCCResponseResult = (
   state: CCStreamState,
   outputItems: Array<ResponseOutputItem>,
@@ -2161,24 +2186,7 @@ const buildCCResponseResult = (
   output: outputItems,
   output_text: resultOpts.outputText,
   status: resultOpts.status,
-  usage:
-    (
-      state.usage.inputTokens === undefined
-      || state.usage.outputTokens === undefined
-    ) ?
-      null
-    : {
-        input_tokens: state.usage.inputTokens,
-        output_tokens: state.usage.outputTokens,
-        total_tokens: state.usage.inputTokens + state.usage.outputTokens,
-        ...(state.usage.cachedTokens === undefined ?
-          {}
-        : {
-            input_tokens_details: {
-              cached_tokens: state.usage.cachedTokens,
-            },
-          }),
-      },
+  usage: mapCCStreamUsage(state.usage),
   error: null,
   incomplete_details: null,
   instructions: null,

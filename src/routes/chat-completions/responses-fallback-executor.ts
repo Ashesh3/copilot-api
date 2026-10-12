@@ -388,6 +388,7 @@ function executeStreamingResponsesFallback(
               stream,
               withSseHeartbeat(response, stream),
               options.requestedModel,
+              (usage) => setRequestContext(c, usage),
             )
             setStreamUsage(c, span, result)
             if (

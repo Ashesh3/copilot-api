@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
+import { SSEStreamingApi } from "hono/streaming"
 
 import type { ResponsesWebSocketData } from "~/routes/responses/websocket"
 import type { ModelsResponse } from "~/services/copilot/get-models"
@@ -252,6 +253,71 @@ test("native buffered SSE counts the accepted terminal usage", async () => {
     requestCount: 1,
   })
 })
+
+test.each([false, true])(
+  "native HTTP retains observed usage when its terminal write is cancelled (buffered=%s)",
+  async (buffered) => {
+    const terminalStarted = Promise.withResolvers<undefined>()
+    const releaseTerminalWrite = Promise.withResolvers<undefined>()
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- Preserve the real method and call it with its original stream receiver.
+    const originalWrite = SSEStreamingApi.prototype.writeSSE
+    let terminalWrite: Promise<void> | undefined
+    let terminalFinished = false
+    const writes = spyOn(
+      SSEStreamingApi.prototype,
+      "writeSSE",
+    ).mockImplementation(function (this: SSEStreamingApi, message) {
+      if (message.event === "response.completed") {
+        terminalWrite = releaseTerminalWrite.promise
+          .then(() => originalWrite.call(this, message))
+          .finally(() => {
+            terminalFinished = true
+          })
+        terminalStarted.resolve(undefined)
+        return terminalWrite
+      }
+      return originalWrite.call(this, message)
+    })
+    upstream.push(nativeStream())
+    const response = await postResponses({
+      stream: true,
+      ...(buffered ?
+        {
+          tools: [
+            {
+              type: "function",
+              name: "web_search",
+              description: "Search",
+              parameters: { type: "object", properties: {} },
+              strict: false,
+            },
+          ],
+        }
+      : {}),
+    })
+    try {
+      // Hold the terminal sink write so cancellation reaches real Hono while
+      // the route is suspended after parsing the upstream terminal usage.
+      await terminalStarted.promise
+      expect(terminalFinished).toBe(false)
+      expect((await usageHistory()).lifetime.requestCount).toBe(0)
+      await response.body?.cancel("client disconnected during terminal write")
+      expect((await usageHistory()).lifetime).toMatchObject({
+        inputTokens: 17,
+        outputTokens: 4,
+        requestCount: 1,
+      })
+      releaseTerminalWrite.resolve(undefined)
+      await terminalWrite
+      expect(requests).toHaveLength(1)
+    } finally {
+      await response.body?.cancel().catch(() => {})
+      releaseTerminalWrite.resolve(undefined)
+      await terminalWrite
+      writes.mockRestore()
+    }
+  },
+)
 
 test("native SSE counts incomplete usage but excludes failed and provisional usage", async () => {
   upstream.push(
@@ -584,3 +650,69 @@ test.each([false, true])(
     expect((await usageHistory()).lifetime.requestCount).toBe(reported ? 1 : 0)
   },
 )
+
+test.each([
+  {
+    name: "output-only",
+    usage: { completion_tokens: 7 },
+    input: 0,
+    output: 7,
+    gaps: 0,
+    wire: { input_tokens: 0, output_tokens: 7, total_tokens: 7 },
+  },
+  {
+    name: "input-only",
+    usage: { prompt_tokens: 11 },
+    input: 11,
+    output: 0,
+    gaps: 0,
+    wire: { input_tokens: 11, output_tokens: 0, total_tokens: 11 },
+  },
+  {
+    name: "null-input",
+    usage: { prompt_tokens: null, completion_tokens: 7 },
+    input: 0,
+    output: 7,
+    gaps: 1,
+    wire: { input_tokens: null, output_tokens: 7, total_tokens: null },
+  },
+  {
+    name: "malformed-output",
+    usage: { prompt_tokens: 11, completion_tokens: "7" },
+    input: 11,
+    output: 0,
+    gaps: 1,
+    wire: { input_tokens: 11, output_tokens: null, total_tokens: null },
+  },
+])("Chat to Responses WebSocket preserves $name usage", async (expected) => {
+  upstream.push(
+    new Response(
+      `data: ${JSON.stringify({
+        choices: [
+          { index: 0, delta: { content: "answer" }, finish_reason: "stop" },
+        ],
+        usage: expected.usage,
+      })}\n\ndata: [DONE]\n\n`,
+      { headers: { "content-type": "text/event-stream" } },
+    ),
+  )
+  const ws = socket()
+  await sendTurn(ws, { model: "usage-chat" })
+  expect(ws.sent.at(-1)).toMatchObject({
+    type: "response.completed",
+    response: { usage: expected.wire },
+  })
+  expect((await usageHistory()).lifetime).toMatchObject({
+    inputTokens: expected.input,
+    outputTokens: expected.output,
+    requestCount: 1,
+  })
+  const runtime = getHistoryRuntime()
+  expect(
+    (
+      await runtime.writer.read((pending) =>
+        runtime.repository.collectionStatus({}, pending),
+      )
+    ).unknownGaps,
+  ).toBe(expected.gaps)
+})
