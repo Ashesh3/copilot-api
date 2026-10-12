@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto"
 
+import {
+  addUsageTokenCount,
+  normalizeUsageTokenCount,
+} from "~/lib/storage/usage-counters"
 import { getHistoryRuntime, getTelemetryWriter } from "~/lib/telemetry-writer"
 
 const STORAGE_VERSION = 2
@@ -240,33 +244,47 @@ export function recordUsage(
   model?: string,
 ): void {
   try {
-    const input = finiteNonnegative(inputTokens),
-      output = finiteNonnegative(outputTokens)
-    if (input === null || output === null) return
+    const input = normalizeUsageTokenCount(inputTokens),
+      output = normalizeUsageTokenCount(outputTokens)
     const now = Date.now(),
       normalizedModel = normalizeModel(model)
     const bucket = {
       timestamp: minuteFor(now),
-      inputTokens: input,
-      outputTokens: output,
+      inputTokens: input ?? 0,
+      outputTokens: output ?? 0,
       requestCount: 1,
       ...(normalizedModel ? { model: normalizedModel } : {}),
     }
     if (testData) {
       testData.buckets.push(bucket)
-      testData.lifetime.inputTokens += input
-      testData.lifetime.outputTokens += output
+      testData.lifetime.inputTokens += bucket.inputTokens
+      testData.lifetime.outputTokens += bucket.outputTokens
       testData.lifetime.requestCount++
       testData.lifetime.firstRequestAt ??= now
       return
     }
-    getTelemetryWriter()?.enqueue({
+    const writer = getTelemetryWriter()
+    writer?.enqueue({
       id: randomUUID(),
       kind: "usage",
       generation: 0,
       recordedAt: now,
       payload: { ...bucket, firstRequestAt: now },
     })
+    if (input === null || output === null) {
+      writer?.enqueue({
+        id: randomUUID(),
+        kind: "collection-gap",
+        generation: 0,
+        recordedAt: now,
+        payload: {
+          historyKind: "usage",
+          unknown: true,
+          reason: "invalid-token-count",
+          startedAt: now,
+        },
+      })
+    }
   } catch {
     /* Collection cannot interrupt inference. */
   }
@@ -298,25 +316,36 @@ export async function getUsageResponse(): Promise<Record<string, unknown>> {
           testData.buckets.filter((bucket) => bucket.timestamp >= cutoff),
         ),
         lifetime: testData.lifetime,
+        collection: undefined,
       }
-    : await getHistoryRuntime().writer.read((pending) =>
-        getHistoryRuntime().repository.readUsageTotals(cutoff, pending),
-      )
-  const lifetimeTokens = data.lifetime.inputTokens + data.lifetime.outputTokens
+    : await getHistoryRuntime().writer.read(async (pending) => {
+        const { repository, writer } = getHistoryRuntime()
+        return {
+          ...(await repository.readUsageTotals(cutoff, pending)),
+          collection: {
+            ...writer.status(),
+            ...(await repository.collectionStatus({}, pending)),
+          },
+        }
+      })
+  const lifetimeTokens = combinedTokens(
+    data.lifetime.inputTokens,
+    data.lifetime.outputTokens,
+  )
 
   return {
     twenty_four_hour: {
-      tokens_used: data.window.inputTokens + data.window.outputTokens,
+      tokens_used: combinedTokens(
+        data.window.inputTokens,
+        data.window.outputTokens,
+      ),
       request_count: data.window.requests,
       total_input_tokens: data.window.inputTokens,
       total_output_tokens: data.window.outputTokens,
     },
     ...(runtime ?
       {
-        collection: {
-          ...runtime.writer.status(),
-          ...(await runtime.repository.collectionStatus()),
-        },
+        collection: data.collection,
       }
     : {}),
     lifetime: {
@@ -330,6 +359,12 @@ export async function getUsageResponse(): Promise<Record<string, unknown>> {
         : Math.floor(data.lifetime.firstRequestAt / 1000),
     },
   }
+}
+
+function combinedTokens(input: number, output: number): number {
+  // If the sum cannot be represented exactly, retain a known lower bound.
+  return addUsageTokenCount(Math.max(input, output), Math.min(input, output))
+    .total
 }
 
 /** Explicit in-memory fixture only; production always uses the selected database. */

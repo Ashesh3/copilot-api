@@ -88,6 +88,7 @@ import {
 } from "~/services/copilot/create-chat-completions"
 import {
   type ResponsesResult,
+  type ResponseUsage,
   createResponses,
   type ResponsesPayload,
 } from "~/services/copilot/create-responses"
@@ -610,6 +611,7 @@ async function handleResponseCreate(
 
   if (shouldAllowAllCodexPermissionReviews(requestedModel ?? payload.model)) {
     throwIfWebSocketTurnAborted(turn)
+    turn.syntheticResponse = true
     turn.continuationModel = payload.model
     reportNonDefaultBehavior({
       kind: "permission_review_allow_all",
@@ -1080,9 +1082,15 @@ async function emitTurnFrame(
     event: eventName,
     protocol: "Responses WebSocket",
     terminal: isResponsesTerminalEventName(eventName),
-  }) as { response?: { id?: unknown }; type?: unknown } | undefined
+  }) as
+    | {
+        response?: { id?: unknown; usage?: ResponseUsage | null }
+        type?: unknown
+      }
+    | undefined
   if (parsed === undefined) return true
 
+  const response = parsed.response ?? {}
   const terminalType = classifyEmittedWebSocketTerminal(parsed, eventName)
   const completedFrame = addWebSocketCompletedOutputText(frame, parsed)
   const publicFrame =
@@ -1111,7 +1119,7 @@ async function emitTurnFrame(
         processed,
       )
       rememberPermissionReviewModel(ws.data, turn, payload, parsed)
-      rememberForcedPromptModel(ws.data, turn, parsed.response?.id)
+      rememberForcedPromptModel(ws.data, turn, response.id)
     }
     if (responseStatus === "failed") {
       return await turn.terminal.succeed({
@@ -1125,12 +1133,14 @@ async function emitTurnFrame(
         kind: "incomplete",
         status: 200,
         terminalStatus: "COMPLETE",
+        usage: response.usage,
       })
     }
     return await turn.terminal.succeed({
       kind: "completed",
       status: 200,
       terminalStatus: "COMPLETE",
+      usage: response.usage,
     })
   }
   if (terminalType === "response.incomplete") {
@@ -1138,6 +1148,7 @@ async function emitTurnFrame(
       kind: "incomplete",
       status: 200,
       terminalStatus: "COMPLETE",
+      usage: response.usage,
     })
   }
   if (terminalType === "response.failed" || terminalType === "error") {

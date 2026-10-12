@@ -88,6 +88,18 @@ export interface NativeMessageUsage {
   created: number
   input: number
   output: number
+  observed: boolean
+}
+
+export function hasNativeUsageCounts(
+  usage: Partial<AnthropicResponse["usage"]> | undefined,
+): boolean {
+  return (
+    usage?.input_tokens !== undefined
+    || usage?.output_tokens !== undefined
+    || usage?.cache_read_input_tokens !== undefined
+    || usage?.cache_creation_input_tokens !== undefined
+  )
 }
 
 export async function createNativeMessages(
@@ -127,6 +139,7 @@ async function consumeNativeMessageStream(
   },
   response: AsyncIterable<AnthropicStreamChunk>,
   state: {
+    c: Context
     adapter: MessagesTerminalAdapter
     lifecycle: NativeForwardingState
     requestedModel: string | undefined
@@ -169,18 +182,20 @@ async function forwardNativeChunk(
   let data = chunk.data
   const parsed = parseNativeEvent(data, chunk.event)
   if (parsed === undefined) return { terminal: false, text: "" }
-  switch (chunk.event) {
+  const eventType = chunk.event ?? parsed.type
+  switch (eventType) {
     case "message_start": {
       data = rewriteMessageStart(data, state.requestedModel, state.usage)
+      publishNativeStreamUsage(state.c, state.usage)
       break
     }
     case "message_delta": {
       trackMessageDelta(data, state.usage)
+      publishNativeStreamUsage(state.c, state.usage)
       break
     }
     // No default
   }
-  const eventType = chunk.event ?? parsed.type
   if (eventType === "message_delta") {
     setPendingNativeMessageDelta(state.lifecycle, chunk.event, data)
   }
@@ -432,7 +447,13 @@ async function streamNativeMessages(
 
         return streamSSE(c, async (stream) => {
           stream.onAbort(() => downstreamAbort.abort())
-          const usage = { input: 0, output: 0, cached: 0, created: 0 }
+          const usage: NativeMessageUsage = {
+            input: 0,
+            output: 0,
+            cached: 0,
+            created: 0,
+            observed: false,
+          }
           let responseText = ""
           const lifecycle: NativeForwardingState = {
             terminal: "open",
@@ -466,7 +487,7 @@ async function streamNativeMessages(
             responseText = await consumeNativeMessageStream(
               stream,
               asAnthropicStream(response),
-              { adapter, lifecycle, requestedModel, usage },
+              { c, adapter, lifecycle, requestedModel, usage },
             )
           } catch (error) {
             if (isAbortError(error)) {
@@ -494,13 +515,23 @@ async function streamNativeMessages(
   )
 }
 
+/** Cancellation may finalize the response before the producer's finally runs. */
+function publishNativeStreamUsage(c: Context, usage: NativeMessageUsage): void {
+  if (!usage.observed) return
+  setRequestContext(c, {
+    inputTokens: usage.input + usage.cached + usage.created,
+    outputTokens: usage.output,
+  })
+}
+
 function recordNativeStreamUsage(
   c: Context,
   streamSpan: Sentry.Span,
   usage: NativeMessageUsage,
 ): void {
+  if (!usage.observed) return
   const inputTokens = usage.input + usage.cached + usage.created
-  setRequestContext(c, { inputTokens, outputTokens: usage.output })
+  publishNativeStreamUsage(c, usage)
   streamSpan.setAttribute("gen_ai.usage.input_tokens", inputTokens)
   streamSpan.setAttribute("gen_ai.usage.output_tokens", usage.output)
   if (usage.cached > 0) {
@@ -749,6 +780,7 @@ function rewriteMessageStart(
       }
     }
     if (parsed.message?.usage) {
+      usage.observed ||= hasNativeUsageCounts(parsed.message.usage)
       usage.input = parsed.message.usage.input_tokens ?? 0
       usage.output = parsed.message.usage.output_tokens ?? 0
       usage.cached = parsed.message.usage.cache_read_input_tokens ?? 0
@@ -782,6 +814,7 @@ export function trackMessageDelta(
         cache_creation_input_tokens?: number
       }
     }
+    usage.observed ||= hasNativeUsageCounts(parsed.usage)
     if (parsed.usage?.output_tokens !== undefined) {
       usage.output = parsed.usage.output_tokens
     }

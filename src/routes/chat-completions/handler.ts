@@ -476,7 +476,7 @@ async function setInputTokenContext(
 
   try {
     const tokenCount = await getTokenCount(payload, selectedModel)
-    setRequestContext(c, { inputTokens: tokenCount.input })
+    setRequestContext(c, { estimatedInputTokens: tokenCount.input })
   } catch {
     consola.warn("Failed to calculate token count")
   }

@@ -154,7 +154,7 @@ test("failed index upgrade leaves schema five usable for an atomic retry", async
         args: [],
       }),
     ),
-  ).toEqual([{ value: "9" }])
+  ).toEqual([{ value: "10" }])
 })
 
 test("schema five archive retains lifetime usage and drops old model detail", async () => {

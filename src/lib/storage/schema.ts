@@ -30,6 +30,7 @@ import {
   conversationAccountModelMigration,
   conversationAccountModelTables,
 } from "~/lib/storage/migrations/009-conversation-account-model"
+import { usageTokenCountersMigration } from "~/lib/storage/migrations/010-usage-token-counters"
 
 export const storageMigrations = [
   initialMigration,
@@ -41,9 +42,10 @@ export const storageMigrations = [
   accountDistributionMigration,
   conversationModelsMigration,
   conversationAccountModelMigration,
+  usageTokenCountersMigration,
 ] as const
 
-export const currentSchemaVersion = conversationAccountModelMigration.version
+export const currentSchemaVersion = usageTokenCountersMigration.version
 const versionTwoTables = { ...initialTables, ...gatewaySecretTables }
 const versionThreeTables = Object.fromEntries(
   Object.entries(versionTwoTables).filter(([name]) => name !== "capi_debug"),
@@ -134,6 +136,7 @@ export function storageSchema(version: number) {
         counterKeys: currentCounterKeys,
       }
     }
+    case 9:
     case currentSchemaVersion: {
       return {
         tables: currentTables,

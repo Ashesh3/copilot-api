@@ -21,6 +21,10 @@ import {
   resetHistory,
 } from "~/lib/storage/history-reset"
 import { pruneHistoryCounters } from "~/lib/storage/history-retention"
+import {
+  addUsageTokenCount,
+  normalizeUsageTokenCount,
+} from "~/lib/storage/usage-counters"
 
 export function isHistoryRecordKind(
   value: unknown,
@@ -119,6 +123,69 @@ export function sumHistoryCounters(
   return result
 }
 
+/** Preserve the measured side and the request even when one count is unknown. */
+function normalizeUsageRecord(
+  record: HistoryRecord,
+  budget: { input: number; output: number },
+): Array<HistoryRecord> {
+  if (record.kind !== "usage") return [record]
+  const payload = historyObject(record.payload)
+  const inputTokens = normalizeUsageTokenCount(payload.inputTokens)
+  const outputTokens = normalizeUsageTokenCount(payload.outputTokens)
+  const combinedBefore = addUsageTokenCount(budget.input, budget.output)
+  const input = addUsageTokenCount(budget.input, inputTokens ?? 0)
+  const output = addUsageTokenCount(budget.output, outputTokens ?? 0)
+  const combinedOverflow =
+    !combinedBefore.overflow
+    && addUsageTokenCount(input.total, output.total).overflow
+  const overflow = input.overflow || output.overflow || combinedOverflow
+  budget.input = input.total
+  budget.output = output.total
+  if (inputTokens !== null && outputTokens !== null && !overflow)
+    return [record]
+  return [
+    {
+      ...record,
+      payload: {
+        ...payload,
+        inputTokens: input.overflow ? 0 : (inputTokens ?? 0),
+        outputTokens: output.overflow ? 0 : (outputTokens ?? 0),
+      },
+    },
+    {
+      id: `invalid-token-count-${record.id}`,
+      kind: "collection-gap",
+      generation: record.generation,
+      recordedAt: record.recordedAt,
+      payload: {
+        historyKind: "usage",
+        unknown: true,
+        reason: overflow ? "token-count-overflow" : "invalid-token-count",
+      },
+    },
+  ]
+}
+
+/** One snapshot bounds every bucket and the lifetime before coalescing. */
+async function normalizeUsageRecords(
+  session: SqlSession,
+  records: ReadonlyArray<HistoryRecord>,
+): Promise<Array<HistoryRecord>> {
+  if (!records.some((record) => record.kind === "usage")) return [...records]
+  const [stored] = await session.query({
+    sql: "SELECT input_tokens,output_tokens,(SELECT TOTAL(input_tokens) FROM capi_usage_minutes) AS retained_input,(SELECT TOTAL(output_tokens) FROM capi_usage_minutes) AS retained_output FROM capi_usage_lifetime WHERE id=1",
+    args: [],
+  })
+  const budget = {
+    input: Math.max(number(stored.input_tokens), number(stored.retained_input)),
+    output: Math.max(
+      number(stored.output_tokens),
+      number(stored.retained_output),
+    ),
+  }
+  return records.flatMap((record) => normalizeUsageRecord(record, budget))
+}
+
 async function uncommitted(
   session: SqlSession,
   pending: ReadonlyArray<PendingHistoryRecord>,
@@ -136,12 +203,13 @@ async function uncommitted(
     })
     if (rows.length > 0) applied.add(id)
   }
-  return pending
+  const retained = pending
     .filter((item) => !item.batchId || !applied.has(item.batchId))
     .flatMap((item) => {
       const record = normalizeHistoryRecordAfterReset(item.record, reset)
       return record ? [record] : []
     })
+  return normalizeUsageRecords(session, retained)
 }
 
 /** Filter raw events before coalescing so a reset can split the current minute. */
@@ -251,14 +319,18 @@ async function applyUsageBatch(
   for (let offset = 0; offset < rows.length; offset += 180) {
     const chunk = rows.slice(offset, offset + 180)
     await session.execute({
-      sql: `INSERT INTO capi_usage_minutes (minute,model,input_tokens,output_tokens,request_count) VALUES ${chunk.map(() => "(?,?,?,?,?)").join(",")} ON CONFLICT(minute,model) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens, output_tokens=output_tokens+excluded.output_tokens, request_count=request_count+excluded.request_count`,
+      sql: `INSERT INTO capi_usage_minutes (minute,model,input_tokens,output_tokens,request_count) VALUES ${chunk.map(() => "(?,?,?,?,?)").join(",")} ON CONFLICT(minute,model) DO UPDATE SET input_tokens=${usageIncrementSql("input_tokens", "excluded.input_tokens")}, output_tokens=${usageIncrementSql("output_tokens", "excluded.output_tokens")}, request_count=request_count+excluded.request_count`,
       args: chunk.flat(),
     })
   }
   await session.execute({
-    sql: "UPDATE capi_usage_lifetime SET input_tokens=input_tokens+?,output_tokens=output_tokens+?,request_count=request_count+?,first_request_at=CASE WHEN first_request_at IS NULL THEN ? ELSE MIN(first_request_at,?) END WHERE id=1",
-    args: [input, output, count, first, first],
+    sql: `UPDATE capi_usage_lifetime SET input_tokens=${usageIncrementSql("input_tokens", "?")},output_tokens=${usageIncrementSql("output_tokens", "?")},request_count=request_count+?,first_request_at=CASE WHEN first_request_at IS NULL THEN ? ELSE MIN(first_request_at,?) END WHERE id=1`,
+    args: [input, input, output, output, count, first, first],
   })
+}
+
+function usageIncrementSql(column: string, increment: string): string {
+  return `CASE WHEN ${increment} <= 9007199254740990-${column} THEN ${column}+${increment} ELSE ${column} END`
 }
 
 async function applyRoutingBatch(
@@ -405,11 +477,12 @@ export function createHistoryRepository(
           return
         }
         const reset = await readHistoryReset(session)
+        const retained = records.flatMap((record) => {
+          const normalized = normalizeHistoryRecordAfterReset(record, reset)
+          return normalized ? [normalized] : []
+        })
         const accepted = coalesce(
-          records.flatMap((record) => {
-            const normalized = normalizeHistoryRecordAfterReset(record, reset)
-            return normalized ? [normalized] : []
-          }),
+          await normalizeUsageRecords(session, retained),
         )
         await applyUsageBatch(session, accepted)
         await applyRoutingBatch(session, accepted)

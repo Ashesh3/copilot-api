@@ -603,7 +603,7 @@ async function handleGoogleAIInner(c: Context) {
         (await getTokenCount(localCandidate.payload, selectedModel)).input
       : await estimateTokenCount(localCandidate.payload)
     setRequestContext(c, {
-      inputTokens: totalTokens,
+      estimatedInputTokens: totalTokens,
       requestedModel: rawModel,
       model,
       provider: "GoogleAI",
@@ -680,7 +680,7 @@ async function handleGoogleAIInner(c: Context) {
   try {
     if (selectedModel) {
       const tokenCount = await getTokenCount(countPayload, selectedModel)
-      setRequestContext(c, { inputTokens: tokenCount.input })
+      setRequestContext(c, { estimatedInputTokens: tokenCount.input })
     }
   } catch {
     // Token counting is best effort for generation routes.
@@ -783,7 +783,7 @@ async function handleCustomGoogleRequest(
     applyGoogleForcedSystemPrompt(c, replacedPayload, options.rawModel)
     const totalTokens = await estimateTokenCount(replacedPayload)
     setRequestContext(c, {
-      inputTokens: totalTokens,
+      estimatedInputTokens: totalTokens,
       requestedModel: options.rawModel,
       model: options.reference.upstreamModel,
       provider: options.reference.provider.name,
@@ -1195,6 +1195,7 @@ async function handleWithAnthropicMessages(
         chunkShim,
         output.wrapSource(response as AsyncIterable<AnthropicStreamChunk>),
         options.requestedModel,
+        (observedUsage) => setRequestContext(c, observedUsage),
       )
       if (usage.receivedFailure !== undefined) {
         await adapter.failReceived(receivedGoogleFailure(usage.receivedFailure))

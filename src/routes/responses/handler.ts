@@ -300,7 +300,11 @@ async function streamImmediateNativeResponses(
       if (outbound === undefined) continue
       updateResponsesFailureState(failureState, outbound)
       await writeNativeResponsesChunk(outbound, stream)
-      await commitReceivedResponsesTerminal(lifecycle, normalized.event)
+      if (await commitReceivedResponsesTerminal(lifecycle, normalized.event)) {
+        const result = getCompletedBufferedResponse(outbound)
+        updateNativeResponsesUsage(options.c, result)
+        updateNativeResponsesSpan(options.streamSpan, result)
+      }
     }
     await lifecycle.finishSource()
   } catch (error) {
@@ -379,7 +383,9 @@ async function streamBufferedNativeResponses(
       stream,
       withRequestedResponseModel(resolved, options.requestedModel),
     )
-    await lifecycle.succeed("synthetic")
+    if (await lifecycle.succeed("synthetic")) {
+      updateNativeResponsesUsage(options.c, resolved)
+    }
   } catch (error) {
     await failResponsesLifecycle(lifecycle, stream, error)
   } finally {
@@ -443,11 +449,10 @@ async function writeBufferedNativeResponsesChunks(
 async function commitReceivedResponsesTerminal(
   lifecycle: ReturnType<typeof createResponsesTerminalLifecycle>,
   event: string | undefined,
-): Promise<void> {
+): Promise<boolean> {
   const terminal = classifyResponsesTerminal(event)
   if (terminal === "response.completed" || terminal === "response.incomplete") {
-    await lifecycle.succeed(terminal)
-    return
+    return await lifecycle.succeed(terminal)
   }
   if (terminal === "response.failed" || terminal === "error") {
     await lifecycle.fail({
@@ -455,6 +460,7 @@ async function commitReceivedResponsesTerminal(
       error: RECEIVED_RESPONSES_FAILURE,
     })
   }
+  return false
 }
 
 async function failResponsesLifecycle(
@@ -487,6 +493,17 @@ function updateNativeResponsesSpan(
     reasoningTokens: usage.reasoningTokens,
   })
   setSentryOutputMessages(streamSpan, result?.output_text ?? "")
+}
+
+function updateNativeResponsesUsage(
+  c: Context,
+  result: ResponsesResult | null,
+): void {
+  if (!result?.usage || result.status === "failed") return
+  setRequestContext(c, {
+    inputTokens: result.usage.input_tokens,
+    outputTokens: result.usage.output_tokens,
+  })
 }
 
 type ResponsesReasoningEffort = ReasoningEffort | number
@@ -1186,6 +1203,7 @@ const handleResponsesInner = async (
                 outputCount: resolved.output.length,
                 status: resolved.status,
               })
+              updateNativeResponsesUsage(c, resolved)
               return c.json(
                 withRequestedResponseModel(resolved, requestedModel),
               )
@@ -1275,6 +1293,7 @@ const handleResponsesInner = async (
       status: resolved.status,
     })
 
+    updateNativeResponsesUsage(c, resolved)
     return c.json(withRequestedResponseModel(resolved, requestedModel))
   })
 }
@@ -2142,19 +2161,24 @@ const buildCCResponseResult = (
   output: outputItems,
   output_text: resultOpts.outputText,
   status: resultOpts.status,
-  usage: {
-    input_tokens: state.usage.inputTokens ?? 0,
-    output_tokens: state.usage.outputTokens ?? 0,
-    total_tokens:
-      (state.usage.inputTokens ?? 0) + (state.usage.outputTokens ?? 0),
-    ...(state.usage.cachedTokens === undefined ?
-      {}
+  usage:
+    (
+      state.usage.inputTokens === undefined
+      || state.usage.outputTokens === undefined
+    ) ?
+      null
     : {
-        input_tokens_details: {
-          cached_tokens: state.usage.cachedTokens,
-        },
-      }),
-  },
+        input_tokens: state.usage.inputTokens,
+        output_tokens: state.usage.outputTokens,
+        total_tokens: state.usage.inputTokens + state.usage.outputTokens,
+        ...(state.usage.cachedTokens === undefined ?
+          {}
+        : {
+            input_tokens_details: {
+              cached_tokens: state.usage.cachedTokens,
+            },
+          }),
+      },
   error: null,
   incomplete_details: null,
   instructions: null,

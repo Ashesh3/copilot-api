@@ -174,6 +174,18 @@ Decisions, Images, or Responses compaction.
 - Manual approval for primary generation endpoints.
 - Optional Sentry tracing.
 
+Usage totals include token counts reported by upstream inference responses.
+Local prompt estimates and token-count requests do not contribute to usage.
+Streaming usage is saved once the response ends; responses without reported
+usage do not add an estimated token count.
+
+Upgrading repairs token counters corrupted by older tokenizer saturation
+values. Valid token counters, request counts, and the first-request timestamp
+are preserved. An invalid lifetime token counter is rebuilt from retained,
+valid minute counters and remains a lower bound: expired or corrupted input
+history cannot be recovered. The collection-gap indicator records this missing
+history instead of presenting the repaired total as complete.
+
 ### Client compatibility
 
 - Claude Code Messages, scoped OAuth, authenticated Remote Control,

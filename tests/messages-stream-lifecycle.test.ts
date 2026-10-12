@@ -19,6 +19,7 @@ import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "../src/lib/sse-lifecycle"
 import { state } from "../src/lib/state"
+import { getUsageResponse } from "../src/lib/usage-tracker"
 import { emitAnthropicStreamError } from "../src/routes/messages/stream-translation"
 import { server } from "../src/server"
 import {
@@ -598,6 +599,13 @@ test("keeps the Anthropic event order unchanged when the first event is immediat
     "message_delta",
     "message_stop",
   ])
+  expect(await getUsageResponse()).toMatchObject({
+    lifetime: {
+      total_input_tokens: 1,
+      total_output_tokens: 1,
+      total_requests: 1,
+    },
+  })
 })
 
 test("closes Chat text and emits one error on EOF without finish", async () => {
@@ -615,6 +623,9 @@ test("closes Chat text and emits one error on EOF without finish", async () => {
     "content_block_stop",
     "error",
   ])
+  expect(await getUsageResponse()).toMatchObject({
+    lifetime: { total_requests: 0, total_tokens: 0 },
+  })
 })
 
 test("skips a malformed Chat delta before one Messages terminal", async () => {

@@ -24,6 +24,7 @@ import { validateStoredModelRouting } from "~/lib/model-routing"
 import { validateStoredModelSettings } from "~/lib/model-settings"
 import { StorageConflictError, StorageSchemaError } from "~/lib/storage/errors"
 import { pruneHistoryCounters } from "~/lib/storage/history-retention"
+import { repairUsageTokenCounters } from "~/lib/storage/migrations/010-usage-token-counters"
 import { readStoreRevision } from "~/lib/storage/operations"
 import { validateTransferredState } from "~/lib/storage/restore"
 import { getStorageRuntime } from "~/lib/storage/runtime"
@@ -677,6 +678,7 @@ export async function applyLegacyImport(
     if (marker[0]?.value !== operationId)
       invalid("Legacy import ownership changed")
     await validateTransferredState(session)
+    await repairUsageTokenCounters(session)
     await pruneHistoryCounters(session, Date.now())
     await session.execute({
       sql: "UPDATE capi_metadata SET value='1' WHERE key='config_revision'",

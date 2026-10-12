@@ -5,6 +5,7 @@ import type {
   StreamTerminalFailure,
   StreamTerminalLifecycle,
 } from "~/lib/stream-terminal-lifecycle"
+import type { ResponseUsage } from "~/services/copilot/create-responses"
 
 import { runWithCopilotContractObservabilityScope } from "~/lib/copilot-contract-observability"
 import {
@@ -31,6 +32,7 @@ import {
 } from "~/lib/request-session"
 import { runWithRoutingAffinity } from "~/lib/routing-affinity"
 import { createStreamTerminalLifecycle } from "~/lib/stream-terminal-lifecycle"
+import { recordUsage } from "~/lib/usage-tracker"
 
 import type { ResponsesStreamFailureState } from "./stream-lifecycle"
 
@@ -41,6 +43,7 @@ export interface ResponsesWebSocketTurn {
   failureState: ResponsesStreamFailureState
   failureWriters: WeakMap<StreamTerminalFailure, () => Promise<void>>
   outputStarted: boolean
+  syntheticResponse?: boolean
   terminal: StreamTerminalLifecycle<ResponsesWebSocketTerminalSuccess>
   inputLength: number
   lifecycle?: LogicalRequestLifecycle
@@ -62,6 +65,7 @@ export type ResponsesWebSocketTerminalSuccess = {
   kind: "completed" | "incomplete" | "received_failure"
   status: number
   terminalStatus: "COMPLETE" | "ERROR"
+  usage?: Partial<ResponseUsage> | null
 }
 
 export interface WebSocketTerminalClassification {
@@ -122,6 +126,23 @@ export function createResponsesWebSocketTurn(
   turn.terminal = createStreamTerminalLifecycle({
     isDownstreamAborted: () => abortController.signal.aborted,
     onSuccess: (success) => {
+      if (
+        success.kind !== "received_failure"
+        && !turn.syntheticResponse
+        && success.usage
+        && (success.usage.input_tokens !== undefined
+          || success.usage.output_tokens !== undefined)
+      ) {
+        recordUsage(
+          success.usage.input_tokens === undefined ?
+            0
+          : success.usage.input_tokens,
+          success.usage.output_tokens === undefined ?
+            0
+          : success.usage.output_tokens,
+          turn.model,
+        )
+      }
       finalizeResponsesWebSocketTurn(data, turn, {
         status: success.status,
         terminalStatus: success.terminalStatus,

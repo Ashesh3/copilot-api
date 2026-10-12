@@ -26,6 +26,7 @@ import {
 } from "~/lib/storage/errors"
 import { pruneHistoryCounters } from "~/lib/storage/history-retention"
 import { parseStorageCounter } from "~/lib/storage/migrations"
+import { repairUsageTokenCounters } from "~/lib/storage/migrations/010-usage-token-counters"
 import { readStoreRevision } from "~/lib/storage/operations"
 import {
   currentCounterKeys,
@@ -651,6 +652,7 @@ export async function restoreBackup(
         if (rows[0]?.count !== count) invalid()
       }
       operationSignal.throwIfAborted()
+      await repairUsageTokenCounters(session)
       await pruneHistoryCounters(session, Date.now())
       operationSignal.throwIfAborted()
       await session.execute({

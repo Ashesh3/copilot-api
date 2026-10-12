@@ -189,3 +189,32 @@ test("empty database and explicit memory fixtures retain zero and recorded-usage
     enableDatabaseUsageForTest()
   }
 })
+
+test("combined totals remain a known lower bound when valid token channels cannot be added exactly", async () => {
+  const f = await fixture()
+  const input = Number.MAX_SAFE_INTEGER - 2
+  recordUsage(input, 7, "large-provider-count")
+  const expected = {
+    twenty_four_hour: {
+      total_input_tokens: input,
+      total_output_tokens: 7,
+      tokens_used: input,
+      request_count: 1,
+    },
+    lifetime: {
+      total_input_tokens: input,
+      total_output_tokens: 7,
+      total_tokens: input,
+      total_requests: 1,
+    },
+  }
+  expect(await getUsageResponse()).toMatchObject({
+    ...expected,
+    collection: { unknownGaps: 1 },
+  })
+  await f.history.writer.flush()
+  expect(await getUsageResponse()).toMatchObject({
+    ...expected,
+    collection: { pendingRecords: 0, degraded: false, unknownGaps: 1 },
+  })
+})
