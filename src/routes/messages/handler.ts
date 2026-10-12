@@ -1765,7 +1765,7 @@ function setResponsesUsageContext(
   c: Context,
   response: ResponsesResult | null,
 ): void {
-  if (!response?.usage) return
+  if (!response?.usage || response.status === "failed") return
   setRequestContext(c, {
     inputTokens: response.usage.input_tokens,
     outputTokens: response.usage.output_tokens,
