@@ -333,7 +333,7 @@ async function executeNonStreamingResponsesFallback(
         : initial
 
       recordAccountContext(c)
-      setResponsesUsageContext(c, result.usage)
+      setResponsesUsageContext(c, result)
       setResponsesUsageSpanAttributes(span, result.usage)
       setSentryOutputMessages(span, getResponsesResultOutputText(result))
 
@@ -473,7 +473,7 @@ async function executeStreamingMcpWebSearchFallback(
             await withHeartbeatWhilePending(preflush.pending, stream),
           )
       recordAccountContext(c)
-      setResponsesUsageContext(c, response.usage)
+      setResponsesUsageContext(c, response)
       const result = responsesResultToChatCompletion(
         response,
         options.requestedModel,
@@ -532,7 +532,7 @@ function handleUnexpectedNonStream({
     response,
     options.requestedModel,
   )
-  setResponsesUsageContext(c, response.usage)
+  setResponsesUsageContext(c, response)
   setResponsesUsageSpanAttributes(span, response.usage)
   setSentryOutputMessages(span, getResponsesResultOutputText(response))
   finishSpan()
@@ -546,14 +546,11 @@ function recordAccountContext(c: Context): void {
   }
 }
 
-function setResponsesUsageContext(
-  c: Context,
-  usage: ResponseUsage | null | undefined,
-): void {
-  if (!usage) return
+function setResponsesUsageContext(c: Context, response: ResponsesResult): void {
+  if (!response.usage || response.status === "failed") return
   setRequestContext(c, {
-    inputTokens: usage.input_tokens,
-    outputTokens: usage.output_tokens,
+    inputTokens: response.usage.input_tokens,
+    outputTokens: response.usage.output_tokens,
   })
 }
 

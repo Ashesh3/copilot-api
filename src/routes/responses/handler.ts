@@ -2739,7 +2739,7 @@ function setResponsesResultContext(c: Context, result: ResponsesResult): void {
   if (nativeAccountId !== undefined) {
     setRequestContext(c, { accountId: nativeAccountId })
   }
-  if (!result.usage) return
+  if (!result.usage || result.status === "failed") return
   setRequestContext(c, {
     inputTokens: result.usage.input_tokens,
     outputTokens: result.usage.output_tokens,

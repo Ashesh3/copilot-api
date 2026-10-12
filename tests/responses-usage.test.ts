@@ -614,6 +614,64 @@ test("WebSocket warmups and failed responses never count as successful usage", a
   expect((await usageHistory()).lifetime.requestCount).toBe(0)
 })
 
+test.each(["response.completed", "response.incomplete"])(
+  "WebSocket excludes failed response usage carried in %s",
+  async (type) => {
+    upstream.push(
+      eventStream([{ type, response: result({ status: "failed" }) }]),
+    )
+    await sendTurn(socket())
+    expect((await usageHistory()).lifetime.requestCount).toBe(0)
+  },
+)
+
+test.each([
+  { stream: false, webSearch: false, event: "response.completed" },
+  { stream: true, webSearch: false, event: "response.completed" },
+  { stream: true, webSearch: false, event: "response.incomplete" },
+  { stream: true, webSearch: true, event: "response.completed" },
+])(
+  "Chat HTTP excludes failed Responses usage: %p",
+  async ({ stream, webSearch, event }) => {
+    const failed = result({ status: "failed" })
+    upstream.push(
+      stream && !webSearch ?
+        eventStream([{ type: event, response: failed }])
+      : Response.json(failed),
+    )
+    await seedProtocolDatabase()
+    const response = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "usage-native",
+        messages: [{ role: "user", content: "hello" }],
+        stream,
+        ...(webSearch ?
+          {
+            tools: [
+              {
+                type: "function",
+                function: {
+                  name: "web_search",
+                  parameters: { type: "object", properties: {} },
+                },
+              },
+            ],
+          }
+        : {}),
+      }),
+    })
+    expect(response.status).toBe(200)
+    await response.text()
+    expect(requests).toHaveLength(1)
+    expect((await usageHistory()).lifetime.requestCount).toBe(0)
+  },
+)
+
 test("WebSocket synthetic permission reviews do not create zero-usage requests", async () => {
   setConfigForTest({ permissionReviewAllowAll: true })
   const ws = socket()

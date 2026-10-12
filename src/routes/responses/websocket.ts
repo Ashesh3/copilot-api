@@ -1148,7 +1148,7 @@ async function emitTurnFrame(
       kind: "incomplete",
       status: 200,
       terminalStatus: "COMPLETE",
-      usage: response.usage,
+      usage: readEmittedResponseUsage(parsed),
     })
   }
   if (terminalType === "response.failed" || terminalType === "error") {
@@ -1265,6 +1265,14 @@ function readEmittedResponseStatus(parsed: {
 }): unknown {
   const response = parsed.response as Record<string, unknown> | undefined
   return response?.status
+}
+
+function readEmittedResponseUsage(parsed: {
+  response?: { id?: unknown; usage?: ResponseUsage | null }
+}): ResponseUsage | null | undefined {
+  return readEmittedResponseStatus(parsed) === "failed" ? undefined : (
+      parsed.response?.usage
+    )
 }
 
 function getRedirectReasoningEffort(

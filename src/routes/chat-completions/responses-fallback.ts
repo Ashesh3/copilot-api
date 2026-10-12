@@ -183,8 +183,9 @@ export async function streamResponsesAsChatCompletions(
     }) as ResponseStreamEvent | undefined
     if (event === undefined) continue
     if (
-      event.type === "response.completed"
-      || event.type === "response.incomplete"
+      (event.type === "response.completed"
+        || event.type === "response.incomplete")
+      && event.response.status !== "failed"
     ) {
       const usage = extractUsage(event.response.usage)
       if (usage.observedUsage) {
@@ -786,7 +787,9 @@ async function emitTranslatedEvent(
         terminal:
           event.type === "response.completed" ? "completed" : "incomplete",
         usage: {
-          ...extractUsage(event.response.usage),
+          ...extractUsage(
+            event.response.status === "failed" ? null : event.response.usage,
+          ),
           responseText:
             getResponsesResultOutputText(event.response)
             || state.accumulatedText,
