@@ -19,6 +19,8 @@ import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "../src/lib/sse-lifecycle"
 import { state } from "../src/lib/state"
+import { getHistoryRuntime } from "../src/lib/telemetry-writer"
+import { getUsageResponse } from "../src/lib/usage-tracker"
 import { server } from "../src/server"
 import {
   PROTOCOL_GATEWAY_KEY,
@@ -38,6 +40,7 @@ let nextResponsesStreamError:
   | { kind: "error"; marker: string }
   | { kind: "failed"; marker: string }
   | undefined
+let responsesUsageOverride: Record<string, unknown> | undefined
 let responsesStreamMode:
   | "complete"
   | "duplicate"
@@ -331,7 +334,17 @@ function createResponsesSse(): Response {
       { headers: { "content-type": "text/event-stream" }, status: 200 },
     )
   }
-  const terminal = `event: response.completed\ndata: ${JSON.stringify(responsesCompletedEvent)}\n\n`
+  const completed =
+    responsesUsageOverride === undefined ?
+      responsesCompletedEvent
+    : {
+        ...responsesCompletedEvent,
+        response: {
+          ...responsesCompletedEvent.response,
+          usage: responsesUsageOverride,
+        },
+      }
+  const terminal = `event: response.completed\ndata: ${JSON.stringify(completed)}\n\n`
   if (responsesStreamMode === "malformed-recover") {
     return responsesStream(
       `${prefix}event: response.output_text.delta\ndata: {malformed\n\n${terminal}`,
@@ -438,6 +451,7 @@ beforeEach(() => {
   lastUpstreamHeaders = undefined
   delayBufferedWebSearchResponse = false
   nextResponsesStreamError = undefined
+  responsesUsageOverride = undefined
   responsesStreamMode = "complete"
   delayedResponsesController = undefined
   responsesThrowController = undefined
@@ -1074,6 +1088,42 @@ test("retains Responses partial output before a transport throw", async () => {
   expect(chatFinishFrames(body)).toHaveLength(0)
 })
 
+test.each([
+  { usage: {}, input: 0, output: 0, requests: 0, gaps: 0 },
+  {
+    usage: { input_tokens: 0, output_tokens: 0 },
+    input: 0,
+    output: 0,
+    requests: 1,
+    gaps: 0,
+  },
+  {
+    usage: { input_tokens: null, output_tokens: 7 },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+])(
+  "Responses to Chat accounts only supplied token fields: %p",
+  async (expected) => {
+    responsesUsageOverride = expected.usage
+    const body = await (await postStreamingResponsesChat()).text()
+    expect(chatFinishFrames(body)).toHaveLength(1)
+    expect(await getUsageResponse()).toMatchObject({
+      lifetime: {
+        total_input_tokens: expected.input,
+        total_output_tokens: expected.output,
+        total_requests: expected.requests,
+      },
+    })
+    await getHistoryRuntime().writer.flush()
+    expect((await getUsageResponse()).collection).toMatchObject({
+      unknownGaps: expected.gaps,
+    })
+  },
+)
+
 test.each(["received-error", "received-failed"] as const)(
   "preserves one received Responses terminal for %s without reporting it",
   async (mode) => {
@@ -1093,6 +1143,9 @@ test.each(["received-error", "received-failed"] as const)(
       expect(doneCount(body)).toBe(1)
       expect(logSpy).not.toHaveBeenCalled()
       expect(sentrySpy).not.toHaveBeenCalled()
+      expect(await getUsageResponse()).toMatchObject({
+        lifetime: { total_requests: 0, total_tokens: 0 },
+      })
     } finally {
       logSpy.mockRestore()
       sentrySpy.mockRestore()

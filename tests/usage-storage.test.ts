@@ -66,6 +66,72 @@ test("usage reads include pending exactly once then survive a fresh runtime", as
   expect((await f.runtime.repository.readUsage(0)).buckets).toHaveLength(2)
 })
 
+test.each([
+  Number.MAX_SAFE_INTEGER,
+  Number.MAX_SAFE_INTEGER + 1,
+  Number.POSITIVE_INFINITY,
+  Number.NaN,
+  -1,
+  1.5,
+  "123" as unknown as number,
+])(
+  "invalid input token count %s preserves output and request history",
+  async (input) => {
+    const f = await fixture()
+    recordUsage(input, 7, "invalid-input")
+    recordUsage(11, 13, "valid")
+    const expected = {
+      twenty_four_hour: {
+        total_input_tokens: 11,
+        total_output_tokens: 20,
+        tokens_used: 31,
+        request_count: 2,
+      },
+      lifetime: {
+        total_input_tokens: 11,
+        total_output_tokens: 20,
+        total_tokens: 31,
+        total_requests: 2,
+      },
+    }
+    expect(await getUsageResponse()).toMatchObject(expected)
+    await f.runtime.writer.flush()
+    expect(await getUsageResponse()).toMatchObject({
+      ...expected,
+      collection: {
+        degraded: false,
+        pendingRecords: 0,
+        knownLostRecords: 0,
+        unknownGaps: 1,
+      },
+    })
+    await f.restart()
+    expect(await getUsageResponse()).toMatchObject(expected)
+  },
+)
+
+test("invalid output and two invalid token fields never poison a usage batch", async () => {
+  const f = await fixture()
+  recordUsage(17, Number.MAX_SAFE_INTEGER, "bad-output")
+  recordUsage(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, "bad-both")
+  recordUsage(0, 0, "reported-zero")
+  await f.runtime.writer.flush()
+  expect(await getUsageResponse()).toMatchObject({
+    twenty_four_hour: {
+      total_input_tokens: 17,
+      total_output_tokens: 0,
+      tokens_used: 17,
+      request_count: 3,
+    },
+    lifetime: {
+      total_input_tokens: 17,
+      total_output_tokens: 0,
+      total_requests: 3,
+    },
+    collection: { degraded: false, pendingRecords: 0, unknownGaps: 2 },
+  })
+})
+
 test("routing persists dimensions, fractions, outcomes and lifetime across restart", async () => {
   const f = await fixture()
   enableDatabaseRoutingTelemetryForTest()

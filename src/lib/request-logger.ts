@@ -15,10 +15,10 @@ import {
   getRoutingTelemetryRequestState,
   suppressRequestModelDiagnostics,
 } from "./request-session"
+import { diagnosticInputTokens, observeRequestUsage } from "./request-usage"
 import { recordRoutingRequest } from "./routing-telemetry"
 import { applySentryRequestDiagnostics, getSentryModelName } from "./sentry"
 import { state } from "./state"
-import { recordUsage } from "./usage-tracker"
 
 /**
  * Request context stored for logging on response
@@ -28,6 +28,7 @@ export interface RequestContext {
   requestedModel?: string
   model?: string
   inputLength?: number
+  estimatedInputTokens?: number
   inputTokens?: number
   outputTokens?: number
   provider?: string
@@ -730,9 +731,10 @@ function buildModificationsLine(ctx: RequestContext): string | undefined {
     )
   }
 
-  if (ctx.inputTokens !== undefined) {
+  const inputTokens = diagnosticInputTokens(ctx)
+  if (inputTokens !== undefined) {
     modParts.push(
-      `${colors.yellow}${ctx.inputTokens.toLocaleString()} tokens${colors.reset}`,
+      `${colors.yellow}${inputTokens.toLocaleString()} tokens${colors.reset}`,
     )
   }
 
@@ -791,8 +793,9 @@ function buildPlainModificationsLine(ctx: RequestContext): string | undefined {
     modParts.push(`replace: ${ctx.replacements.join(", ")}`)
   }
 
-  if (ctx.inputTokens !== undefined) {
-    modParts.push(`${ctx.inputTokens.toLocaleString()} tokens`)
+  const inputTokens = diagnosticInputTokens(ctx)
+  if (inputTokens !== undefined) {
+    modParts.push(`${inputTokens.toLocaleString()} tokens`)
   }
 
   if (modParts.length === 0) return undefined
@@ -841,7 +844,7 @@ function sendRequestLogToSentry(opts: {
     requestedModel:
       ctx?.requestedModel ? getSentryModelName(ctx.requestedModel) : undefined,
     provider: ctx?.provider,
-    inputTokens: ctx?.inputTokens,
+    inputTokens: diagnosticInputTokens(ctx),
     accountId: ctx?.accountId,
     nonDefaultBehaviors: ctx?.nonDefaultBehaviors?.map(
       (behavior) => `${behavior.kind}: ${behavior.message}`,
@@ -917,10 +920,11 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   // Timestamp
   lines.push(`  ${colors.dim}${getTimeString()}${colors.reset}`)
 
-  // Record token usage for the usage tracker
-  if (ctx?.inputTokens || ctx?.outputTokens) {
-    recordUsage(ctx.inputTokens ?? 0, ctx.outputTokens ?? 0, ctx.model)
-  }
+  // Stream usage arrives after the response headers and replaces estimates.
+  c.res = observeRequestUsage(
+    c.res,
+    () => c.get(REQUEST_CONTEXT_KEY) as RequestContext | undefined,
+  )
 
   // Print all lines to terminal
   console.log(lines.join("\n"))

@@ -126,7 +126,7 @@ export async function handleCountTokens(c: Context) {
     signal: c.req.raw.signal,
   })
 
-  setRequestContext(c, { inputTokens: result.input_tokens })
+  setRequestContext(c, { estimatedInputTokens: result.input_tokens })
   consola.info(`Token count: ${result.input_tokens} (${requestedModel})`)
   return c.json(result)
 }
@@ -161,7 +161,7 @@ async function countCustomProviderTokens(
   const inputTokens = await estimateTokenCount(
     translateToOpenAI(anthropicPayload),
   )
-  setRequestContext(c, { inputTokens })
+  setRequestContext(c, { estimatedInputTokens: inputTokens })
   consola.info(`Token count: ${inputTokens} (${requestedModel})`)
   return c.json({ input_tokens: inputTokens })
 }

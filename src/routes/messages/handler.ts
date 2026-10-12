@@ -747,7 +747,7 @@ const streamChatCompletionsWithWebSearch = async (
 }
 
 const streamChatCompletionsDirect = async (
-  target: { stream: SSEStream; owner: MessagesStreamOwner },
+  target: { c: Context; stream: SSEStream; owner: MessagesStreamOwner },
   response: AsyncIterable<{ data?: string }>,
   requestedModel?: string,
 ): Promise<{
@@ -756,7 +756,7 @@ const streamChatCompletionsDirect = async (
   cachedTokens: number
   responseText: string
 }> => {
-  const { stream, owner } = target
+  const { c, stream, owner } = target
   const streamState: AnthropicStreamState = {
     terminal: "open",
     messageStartSent: false,
@@ -793,6 +793,7 @@ const streamChatCompletionsDirect = async (
       const chunk = parsedValue as ChatCompletionChunk
 
       if (chunk.usage) {
+        setChatUsageContext(c, chunk.usage)
         streamInputTokens = chunk.usage.prompt_tokens
         streamOutputTokens = chunk.usage.completion_tokens
         streamCachedTokens =
@@ -817,6 +818,7 @@ const streamChatCompletionsDirect = async (
         finalSeen = true
         await consumeTrailingChatUsage(iterator, (usageChunk) => {
           if (!usageChunk.usage) return
+          setChatUsageContext(c, usageChunk.usage)
           streamInputTokens = usageChunk.usage.prompt_tokens
           streamOutputTokens = usageChunk.usage.completion_tokens
           streamCachedTokens =
@@ -848,6 +850,17 @@ const streamChatCompletionsDirect = async (
     cachedTokens: streamCachedTokens,
     responseText: streamText,
   }
+}
+
+function setChatUsageContext(
+  c: Context,
+  usage: { prompt_tokens: number; completion_tokens: number } | undefined,
+): void {
+  if (!usage) return
+  setRequestContext(c, {
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+  })
 }
 
 const hasChatFinishReason = (chunk: ChatCompletionChunk): boolean =>
@@ -895,7 +908,7 @@ const tryCountTokens = async (
     const selectedModel = state.models?.data.find((m) => m.id === payload.model)
     if (selectedModel) {
       const tokenCount = await getTokenCount(payload, selectedModel)
-      setRequestContext(c, { inputTokens: tokenCount.input })
+      setRequestContext(c, { estimatedInputTokens: tokenCount.input })
     }
   } catch {
     // Token counting is best-effort, don't fail the request
@@ -1134,6 +1147,7 @@ const executeChatCompletions = async (
       finalResponse,
       requestedModel,
     )
+    setChatUsageContext(c, finalResponse.usage)
     logger.debug("Translated Anthropic response", {
       blockCount: anthropicResponse.content.length,
       model: anthropicResponse.model,
@@ -1215,6 +1229,8 @@ const executeChatCompletions = async (
               )
 
               setChatCompletionSpanResult(streamSpan, buffered.initialResponse)
+              if (!buffered.hadWebSearch)
+                setChatUsageContext(c, buffered.initialResponse?.usage)
 
               if (buffered.hadWebSearch && buffered.initialResponse) {
                 finishSpan()
@@ -1249,6 +1265,7 @@ const executeChatCompletions = async (
                   resolved,
                   requestedModel,
                 )
+                setChatUsageContext(c, resolved.usage)
                 await owner.adapter.succeed(async () => {
                   await emitAnthropicResponseAsStream(stream, anthropicResponse)
                 })
@@ -1257,7 +1274,7 @@ const executeChatCompletions = async (
             }
 
             const directResult = await streamChatCompletionsDirect(
-              { stream, owner },
+              { c, stream, owner },
               withSseHeartbeat(
                 response as AsyncIterable<{ data?: string }>,
                 stream,
@@ -1466,7 +1483,7 @@ async function handleCustomProviderChatCompletionStream(
           })
           try {
             const directResult = await streamChatCompletionsDirect(
-              { stream, owner },
+              { c, stream, owner },
               withSseHeartbeat(
                 response as AsyncIterable<{ data?: string }>,
                 stream,
@@ -1474,10 +1491,6 @@ async function handleCustomProviderChatCompletionStream(
               options.responseModel,
             )
 
-            setRequestContext(c, {
-              inputTokens: directResult.inputTokens,
-              outputTokens: directResult.outputTokens,
-            })
             streamSpan.setAttribute(
               "gen_ai.usage.input_tokens",
               directResult.inputTokens,
@@ -1672,8 +1685,8 @@ const streamResponsesWithWebSearch = async (
 }
 
 const streamResponsesDirect = async (
+  target: { c: Context; owner: MessagesStreamOwner },
   stream: SSEStream,
-  owner: MessagesStreamOwner,
   response: ResponsesStream,
 ): Promise<{
   inputTokens: number
@@ -1682,6 +1695,7 @@ const streamResponsesDirect = async (
   reasoningTokens: number
   responseText: string
 }> => {
+  const { c, owner } = target
   const streamState = createResponsesStreamState()
   owner.setCloseOpenBlocks(() => closeResponsesOpenBlocks(streamState))
   let streamInputTokens = 0
@@ -1717,6 +1731,7 @@ const streamResponsesDirect = async (
 
     const result = await writeResponsesEvents(stream, parsed, streamState)
     if (result.kind === "success") {
+      setResponsesUsageContext(c, result.response)
       await owner.adapter.succeed(async () => {
         await writeAnthropicEvents(
           stream,
@@ -1743,6 +1758,17 @@ const streamResponsesDirect = async (
     reasoningTokens: streamReasoningTokens,
     responseText,
   }
+}
+
+function setResponsesUsageContext(
+  c: Context,
+  response: ResponsesResult | null,
+): void {
+  if (!response?.usage) return
+  setRequestContext(c, {
+    inputTokens: response.usage.input_tokens,
+    outputTokens: response.usage.output_tokens,
+  })
 }
 
 function isResponsesTerminalEventName(event: string | undefined): boolean {
@@ -1857,6 +1883,8 @@ const executeResponsesApi = async (
                   owner,
                   withSseHeartbeat(response as ResponsesStream, stream),
                 )
+                if (!buffered.hadWebSearch)
+                  setResponsesUsageContext(c, buffered.initialResult)
 
                 const inputTokens =
                   buffered.initialResult?.usage?.input_tokens ?? 0
@@ -1922,6 +1950,7 @@ const executeResponsesApi = async (
                   )
                   const anthropicResponse =
                     translateResponsesResultToAnthropic(resolved)
+                  setResponsesUsageContext(c, resolved)
                   if (requestedModel) anthropicResponse.model = requestedModel
                   await owner.adapter.succeed(async () => {
                     await emitAnthropicResponseAsStream(
@@ -1934,8 +1963,8 @@ const executeResponsesApi = async (
               }
 
               const directUsage = await streamResponsesDirect(
+                { c, owner },
                 stream,
-                owner,
                 withSseHeartbeat(response as ResponsesStream, stream),
               )
 
@@ -2037,6 +2066,7 @@ const executeResponsesApi = async (
   })
 
   const anthropicResponse = translateResponsesResultToAnthropic(resolved)
+  setResponsesUsageContext(c, resolved)
   if (requestedModel) anthropicResponse.model = requestedModel
   logger.debug("Translated Anthropic response", {
     blockCount: anthropicResponse.content.length,

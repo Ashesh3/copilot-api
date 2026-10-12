@@ -6,6 +6,7 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
+import { getUsageResponse } from "../src/lib/usage-tracker"
 import { server } from "../src/server"
 import {
   PROTOCOL_GATEWAY_KEY,
@@ -184,6 +185,48 @@ beforeEach(() => {
   setModelRedirectsForTest([])
   setModelSettingsForTest([])
 })
+
+test.each([false, true])(
+  "records provider usage through the Messages to Responses route (stream=%s)",
+  async (stream) => {
+    fetchMock.mockImplementationOnce((_url: string, init?: RequestInit) => {
+      lastResponsesPayload = parseRequestBody(init)
+      return stream ?
+          new Response(
+            `event: response.completed\ndata: ${JSON.stringify({
+              type: "response.completed",
+              sequence_number: 0,
+              response: responsesResult,
+            })}\n\n`,
+            { headers: { "content-type": "text/event-stream" } },
+          )
+        : Response.json(responsesResult)
+    })
+    await seedProtocolDatabase()
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Hello" }],
+        max_tokens: 32,
+        stream,
+      }),
+    })
+    expect(response.status).toBe(200)
+    await response.text()
+    expect(await getUsageResponse()).toMatchObject({
+      lifetime: {
+        total_input_tokens: 1,
+        total_output_tokens: 1,
+        total_requests: 1,
+      },
+    })
+  },
+)
 
 test("degrades unsigned thinking into Responses text while preserving history", async () => {
   const response = await seedProtocolDatabase().then(() =>

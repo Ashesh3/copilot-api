@@ -7,6 +7,7 @@ import {
   StorageSchemaError,
 } from "~/lib/storage/errors"
 import { initialMigration } from "~/lib/storage/migrations/001-initial"
+import { repairUsageTokenCounters } from "~/lib/storage/migrations/010-usage-token-counters"
 import {
   currentSchemaVersion,
   storageMigrations,
@@ -152,6 +153,9 @@ export async function migrateStorage(storage: Storage): Promise<void> {
       const version = await appliedVersion(session)
       await validateSchema(session, version)
       for (const migration of storageMigrations.slice(version)) {
+        // Recover available detail before the immutable retention migration
+        // deletes it while upgrading pre-v6 databases.
+        if (migration.version === 6) await repairUsageTokenCounters(session)
         for (const sql of migration.statements)
           await session.execute({ sql, args: [] })
         await session.execute({

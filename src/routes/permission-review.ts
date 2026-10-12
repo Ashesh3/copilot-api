@@ -110,8 +110,6 @@ function recordPermissionReviewBypass(c: Context, model: string): void {
     requestedModel: model,
     model,
     provider: "PermissionReview",
-    inputTokens: 0,
-    outputTokens: 0,
   })
   recordNonDefaultBehavior(c, {
     kind: "permission_review_allow_all",

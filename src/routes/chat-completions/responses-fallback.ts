@@ -79,6 +79,7 @@ export interface ResponsesAsChatStreamState {
 }
 
 export interface ResponsesAsChatStreamResult {
+  observedUsage: boolean
   cachedTokens: number
   inputTokens: number
   outputTokens: number
@@ -1044,14 +1045,17 @@ async function writeChunk(options: {
 }
 
 function extractUsage(usage: ResponseUsage | null | undefined): {
+  observedUsage: boolean
   cachedTokens: number
   inputTokens: number
   outputTokens: number
   reasoningTokens: number
 } {
   return {
-    inputTokens: usage?.input_tokens ?? 0,
-    outputTokens: usage?.output_tokens ?? 0,
+    observedUsage:
+      usage?.input_tokens !== undefined || usage?.output_tokens !== undefined,
+    inputTokens: usage?.input_tokens === undefined ? 0 : usage.input_tokens,
+    outputTokens: usage?.output_tokens === undefined ? 0 : usage.output_tokens,
     cachedTokens: usage?.input_tokens_details?.cached_tokens ?? 0,
     reasoningTokens: usage?.output_tokens_details?.reasoning_tokens ?? 0,
   }

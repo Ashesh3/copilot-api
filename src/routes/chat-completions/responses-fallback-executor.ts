@@ -572,6 +572,7 @@ function setStreamUsage(
   c: Context,
   span: Sentry.Span,
   usage: {
+    observedUsage: boolean
     cachedTokens: number
     inputTokens: number
     outputTokens: number
@@ -579,10 +580,11 @@ function setStreamUsage(
     responseText: string
   },
 ): void {
-  setRequestContext(c, {
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-  })
+  if (usage.observedUsage)
+    setRequestContext(c, {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+    })
   span.setAttribute("gen_ai.usage.input_tokens", usage.inputTokens)
   span.setAttribute("gen_ai.usage.output_tokens", usage.outputTokens)
   setOptionalTokenDetails(span, usage)

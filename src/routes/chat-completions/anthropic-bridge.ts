@@ -34,6 +34,7 @@ import {
 } from "~/routes/messages/anthropic-types"
 import {
   createNativeMessages,
+  hasNativeUsageCounts,
   type NativeMessagesRequestOptions,
   resolveNativeWebSearch,
 } from "~/routes/messages/native-handler"
@@ -171,6 +172,12 @@ async function executeBridgeWebSearch(
     response,
     options.nativeOptions.requestedModel ?? options.payload.model,
   )
+  if (result.usage) {
+    setRequestContext(c, {
+      inputTokens: result.usage.prompt_tokens,
+      outputTokens: result.usage.completion_tokens,
+    })
+  }
 
   if (!requestedStream) return c.json(result)
   return streamSSE(c, async (stream) => {
@@ -267,6 +274,7 @@ async function executeBridgeStreaming(
               stream,
               withSseHeartbeat(response, stream),
               requestedModel,
+              (usage) => setRequestContext(c, usage),
             )
             if (usage.receivedFailure) {
               await adapter.failReceived(usage.receivedFailure)
@@ -275,10 +283,12 @@ async function executeBridgeStreaming(
             } else {
               await adapter.finishSource()
             }
-            setRequestContext(c, {
-              inputTokens: usage.inputTokens,
-              outputTokens: usage.outputTokens,
-            })
+            if (usage.usageObserved) {
+              setRequestContext(c, {
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+              })
+            }
             streamSpan.setAttribute(
               "gen_ai.usage.input_tokens",
               usage.inputTokens,
@@ -659,6 +669,7 @@ interface BridgeStreamState {
   outputTokens: number
   cachedTokens: number
   cacheWriteTokens: number
+  usageObserved: boolean
   responseText: string
   anthropicStopReason: AnthropicResponse["stop_reason"]
   finishReason: "stop" | "length" | "tool_calls" | "content_filter" | null
@@ -679,16 +690,20 @@ type WriteBridgeChunk = (
 interface BridgeStreamContext {
   state: BridgeStreamState
   writeChunk: WriteBridgeChunk
+  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void
 }
 
+// eslint-disable-next-line max-params -- Optional observation preserves existing bridge callers and wire output.
 export async function streamAnthropicAsChatCompletions(
   stream: { writeSSE: (data: { data: string }) => Promise<void> },
   response: AsyncIterable<AnthropicStreamChunk>,
   requestedModel: string,
+  onUsage?: BridgeStreamContext["onUsage"],
 ): Promise<{
   inputTokens: number
   outputTokens: number
   cachedTokens: number
+  usageObserved: boolean
   receivedFailure?: unknown
   responseText: string
   terminalSeen: boolean
@@ -703,6 +718,7 @@ export async function streamAnthropicAsChatCompletions(
     outputTokens: 0,
     cachedTokens: 0,
     cacheWriteTokens: 0,
+    usageObserved: false,
     responseText: "",
     anthropicStopReason: null,
     finishReason: null,
@@ -738,6 +754,7 @@ export async function streamAnthropicAsChatCompletions(
   const context: BridgeStreamContext = {
     state,
     writeChunk,
+    onUsage,
   }
 
   let receivedFailure: unknown
@@ -763,6 +780,7 @@ export async function streamAnthropicAsChatCompletions(
       state.inputTokens + state.cachedTokens + state.cacheWriteTokens,
     outputTokens: state.outputTokens,
     cachedTokens: state.cachedTokens,
+    usageObserved: state.usageObserved,
     ...(receivedFailure === undefined ? {} : { receivedFailure }),
     responseText: state.responseText,
     terminalSeen: state.terminalSeen,
@@ -779,6 +797,7 @@ async function handleBridgeStreamEvent(
     case "message_start": {
       state.id = event.message.id
       updateBridgeUsage(state, event.message.usage)
+      publishBridgeUsage(context)
       if (!state.roleEmitted) {
         state.roleEmitted = true
         await writeChunk({ role: "assistant" })
@@ -821,6 +840,7 @@ async function handleBridgeStreamEvent(
     }
     case "message_delta": {
       if (event.usage) updateBridgeUsage(state, event.usage)
+      publishBridgeUsage(context)
       if (event.delta.stop_reason) {
         state.anthropicStopReason = event.delta.stop_reason
         state.finishReason = mapStopReason(event.delta.stop_reason)
@@ -875,12 +895,15 @@ async function finishBridgeStream({
     reasoningOpaque ? { reasoning_opaque: reasoningOpaque } : {},
     {
       finishReason: state.finishReason ?? "stop",
-      usage: {
-        prompt_tokens: promptTokens,
-        completion_tokens: state.outputTokens,
-        total_tokens: promptTokens + state.outputTokens,
-        prompt_tokens_details: { cached_tokens: state.cachedTokens },
-      },
+      usage:
+        state.usageObserved ?
+          {
+            prompt_tokens: promptTokens,
+            completion_tokens: state.outputTokens,
+            total_tokens: promptTokens + state.outputTokens,
+            prompt_tokens_details: { cached_tokens: state.cachedTokens },
+          }
+        : undefined,
       ...(state.anthropicStopReason === "pause_turn" ?
         { copilotStopReason: "pause_turn" }
       : {}),
@@ -892,13 +915,25 @@ async function finishBridgeStream({
 
 function updateBridgeUsage(
   state: BridgeStreamState,
-  usage: Partial<AnthropicResponse["usage"]>,
+  usage: Partial<AnthropicResponse["usage"]> | undefined,
 ): void {
+  if (!usage) return
+  state.usageObserved ||= hasNativeUsageCounts(usage)
   state.inputTokens = usage.input_tokens ?? state.inputTokens
   state.outputTokens = usage.output_tokens ?? state.outputTokens
   state.cachedTokens = usage.cache_read_input_tokens ?? state.cachedTokens
   state.cacheWriteTokens =
     usage.cache_creation_input_tokens ?? state.cacheWriteTokens
+}
+
+/** Publish measured usage before a downstream write can block or be cancelled. */
+function publishBridgeUsage({ state, onUsage }: BridgeStreamContext): void {
+  if (!state.usageObserved) return
+  onUsage?.({
+    inputTokens:
+      state.inputTokens + state.cachedTokens + state.cacheWriteTokens,
+    outputTokens: state.outputTokens,
+  })
 }
 
 async function handleBridgeContentDelta(

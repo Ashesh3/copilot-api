@@ -29,7 +29,7 @@ let callsPerSearchResponse = 1
 let searchInvocationCount = 0
 
 test("tracks cumulative native cache usage without rebuilding the frame", () => {
-  const usage = { input: 5, output: 0, cached: 0, created: 0 }
+  const usage = { input: 5, output: 0, cached: 0, created: 0, observed: false }
   const frame = JSON.stringify({
     type: "message_delta",
     delta: { stop_reason: "end_turn" },
@@ -42,7 +42,13 @@ test("tracks cumulative native cache usage without rebuilding the frame", () => 
     copilot_usage: { total_nano_aiu: 123 },
   })
   trackMessageDelta(frame, usage)
-  expect(usage).toEqual({ input: 5, output: 3, cached: 2, created: 1 })
+  expect(usage).toEqual({
+    input: 5,
+    output: 3,
+    cached: 2,
+    created: 1,
+    observed: true,
+  })
   expect(JSON.parse(frame)).toMatchObject({
     usage: { cache_creation: { ephemeral_5m_input_tokens: 1 } },
     copilot_usage: { total_nano_aiu: 123 },

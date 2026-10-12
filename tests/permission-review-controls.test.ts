@@ -8,6 +8,7 @@ import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { state } from "~/lib/state"
 import { getStorageRuntime } from "~/lib/storage/runtime"
+import { getUsageResponse } from "~/lib/usage-tracker"
 import {
   responsesWebSocket,
   tryUpgradeResponsesWebSocket,
@@ -277,6 +278,9 @@ test.each([false, true])(
     if (stream)
       expect(parseEvents(body).at(-1)?.type).toBe("response.completed")
     expect(requests).toHaveLength(0)
+    expect(await getUsageResponse()).toMatchObject({
+      lifetime: { total_requests: 0, total_tokens: 0 },
+    })
     const assignments = await getStorageRuntime().storage.read((session) =>
       session.query({
         sql: "SELECT account_id FROM capi_conversation_accounts",
