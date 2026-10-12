@@ -8,6 +8,7 @@ import {
   useIntegrationFixture,
   initializeTestState,
   postJSON,
+  request,
   collectSSEEvents,
   TEST_TIMEOUT,
 } from "./setup"
@@ -323,6 +324,9 @@ const NATIVE_WEB_SEARCH_MODELS = [
   "claude-sonnet-4.5",
   "claude-sonnet-4",
 ]
+// Tool selection, MCP initialization/search and answer synthesis finish before
+// streaming starts. Hosted completions took 68-74s, beyond one generation's 60s.
+const WEB_SEARCH_TEST_TIMEOUT = TEST_TIMEOUT * 3
 // Claude Code's catalog marks these models `rejects_disabled_thinking`.
 const ALWAYS_THINKING_MODELS = [
   "claude-opus-5.5",
@@ -408,6 +412,32 @@ async function expectStreamedAnswer(res: Response): Promise<void> {
   expect(text.trim().length).toBeGreaterThan(0)
 }
 
+async function expectWebSearchAnswer(
+  model: string,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  const controller = new AbortController()
+  // Leave the harness time to report cancellation instead of leaking work into
+  // the next test when a real upstream stall exceeds the workflow deadline.
+  const timer = setTimeout(
+    () => controller.abort(),
+    WEB_SEARCH_TEST_TIMEOUT - 5_000,
+  )
+  try {
+    await expectStreamedAnswer(
+      await request("/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(claudeCodeWebSearchRequest(model, extra)),
+        signal: controller.signal,
+      }),
+    )
+  } finally {
+    clearTimeout(timer)
+    controller.abort()
+  }
+}
+
 describe("POST /v1/messages - web search", () => {
   test(
     "completes the Claude Code WebSearch side query on native Messages",
@@ -418,11 +448,9 @@ describe("POST /v1/messages - web search", () => {
         return
       }
 
-      await expectStreamedAnswer(
-        await postJSON("/v1/messages", claudeCodeWebSearchRequest(model)),
-      )
+      await expectWebSearchAnswer(model)
     },
-    TEST_TIMEOUT,
+    WEB_SEARCH_TEST_TIMEOUT,
   )
 
   test(
@@ -434,15 +462,10 @@ describe("POST /v1/messages - web search", () => {
         return
       }
 
-      await expectStreamedAnswer(
-        await postJSON(
-          "/v1/messages",
-          claudeCodeWebSearchRequest(model, {
-            output_config: { effort: "high" },
-          }),
-        ),
-      )
+      await expectWebSearchAnswer(model, {
+        output_config: { effort: "high" },
+      })
     },
-    TEST_TIMEOUT,
+    WEB_SEARCH_TEST_TIMEOUT,
   )
 })
