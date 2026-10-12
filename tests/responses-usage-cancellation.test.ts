@@ -31,10 +31,12 @@ const originalState = {
   models: state.models,
 }
 let upstream: Response | undefined
+let upstreamEndpoint = "/responses"
 let logs: ReturnType<typeof spyOn<typeof console, "log">>
 
 beforeEach(() => {
   enableDatabaseUsageForTest()
+  upstreamEndpoint = "/responses"
   logs = spyOn(console, "log").mockImplementation(() => {})
   setConfigForTest({})
   setModelRedirectsForTest([])
@@ -73,7 +75,7 @@ beforeEach(() => {
   globalThis.fetch = ((url: string | URL | Request) => {
     const requestUrl =
       typeof url === "string" || url instanceof URL ? url : url.url
-    expect(new URL(requestUrl).pathname).toBe("/responses")
+    expect(new URL(requestUrl).pathname).toBe(upstreamEndpoint)
     const response = upstream
     upstream = undefined
     if (!response) throw new Error("Unexpected upstream request")
@@ -111,9 +113,14 @@ function terminalFrame(status: "completed" | "incomplete"): string {
   })}\n\n`
 }
 
-for (const path of ["/v1/chat/completions", "/v1/messages"]) {
+for (const { path, buffered, chatUpstream } of [
+  { path: "/v1/chat/completions", buffered: false, chatUpstream: false },
+  { path: "/v1/messages", buffered: false, chatUpstream: false },
+  { path: "/v1/messages", buffered: true, chatUpstream: false },
+  { path: "/v1/messages", buffered: true, chatUpstream: true },
+]) {
   test.each(["completed", "incomplete"] as const)(
-    `${path} cancellation keeps received %s usage before translated terminal writes finish`,
+    `${path} buffered=${buffered} chatUpstream=${chatUpstream} cancellation keeps received %s usage before translated writes finish`,
     async (status) => {
       const blocked = Promise.withResolvers<undefined>()
       const release = Promise.withResolvers<undefined>()
@@ -138,7 +145,49 @@ for (const path of ["/v1/chat/completions", "/v1/messages"]) {
         await writeSse.call(this, message)
       })
       try {
-        upstream = new Response(terminalFrame(status), {
+        if (chatUpstream) {
+          upstreamEndpoint = "/chat/completions"
+          const model = state.models?.data[0]
+          if (!model) throw new Error("Missing fixture model")
+          model.supported_endpoints = ["/chat/completions"]
+        }
+        const upstreamBody =
+          chatUpstream ?
+            [
+              {
+                id: "chatcmpl_cancelled",
+                object: "chat.completion.chunk",
+                created: 1,
+                model: "responses-cancellation",
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      role: "assistant",
+                      content: "Completed upstream text",
+                    },
+                    finish_reason: status === "completed" ? "stop" : "length",
+                    logprobs: null,
+                  },
+                ],
+              },
+              {
+                id: "chatcmpl_cancelled",
+                object: "chat.completion.chunk",
+                created: 1,
+                model: "responses-cancellation",
+                choices: [],
+                usage: {
+                  prompt_tokens: 17,
+                  completion_tokens: 4,
+                  total_tokens: 21,
+                },
+              },
+            ]
+              .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+              .join("") + "data: [DONE]\n\n"
+          : terminalFrame(status)
+        upstream = new Response(upstreamBody, {
           headers: { "content-type": "text/event-stream" },
         })
         await seedProtocolDatabase()
@@ -153,6 +202,9 @@ for (const path of ["/v1/chat/completions", "/v1/messages"]) {
             messages: [{ role: "user", content: "Hello" }],
             max_tokens: 16,
             stream: true,
+            ...(buffered ?
+              { tools: [{ type: "web_search_20250305", name: "web_search" }] }
+            : {}),
           }),
         })
         expect(response.status).toBe(200)

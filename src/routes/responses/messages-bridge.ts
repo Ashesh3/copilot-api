@@ -25,7 +25,10 @@ import type {
 } from "~/services/copilot/create-responses"
 import type { ResponsesWireBody } from "~/services/copilot/responses-contract"
 
-import { readAnthropicUsage } from "~/lib/anthropic-usage"
+import {
+  readAnthropicUsage,
+  readAnthropicUsageTokenCount,
+} from "~/lib/anthropic-usage"
 import {
   fetchUrlAsDataUri,
   isLikelyBase64,
@@ -1510,7 +1513,9 @@ function mapAnthropicUsage(response: AnthropicResponse): ResponseUsage | null {
   return {
     input_tokens: usage.inputTokens,
     output_tokens: usage.outputTokens,
-    total_tokens: usage.inputTokens + usage.outputTokens,
+    total_tokens: readAnthropicUsageTokenCount(
+      usage.inputTokens + usage.outputTokens,
+    ),
     input_tokens_details: { cached_tokens: usage.cachedTokens },
     output_tokens_details: { reasoning_tokens: 0 },
   }
