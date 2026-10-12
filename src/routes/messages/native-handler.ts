@@ -9,6 +9,11 @@ import type { RetryBudget } from "~/services/copilot/transport-retry"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
 import {
+  hasAnthropicUsageCounts,
+  readAnthropicUsage,
+  readAnthropicUsageTokenCount,
+} from "~/lib/anthropic-usage"
+import {
   inspectHttpError,
   isAbortError,
   isHTTPError,
@@ -94,12 +99,7 @@ export interface NativeMessageUsage {
 export function hasNativeUsageCounts(
   usage: Partial<AnthropicResponse["usage"]> | undefined,
 ): boolean {
-  return (
-    usage?.input_tokens !== undefined
-    || usage?.output_tokens !== undefined
-    || usage?.cache_read_input_tokens !== undefined
-    || usage?.cache_creation_input_tokens !== undefined
-  )
+  return hasAnthropicUsageCounts(usage)
 }
 
 export async function createNativeMessages(
@@ -739,20 +739,16 @@ function recordUsage(
   span: Sentry.Span,
   usage: AnthropicResponse["usage"] | undefined,
 ): void {
-  if (!usage) return
-  const cached = usage.cache_read_input_tokens ?? 0
-  const created = usage.cache_creation_input_tokens ?? 0
+  const observed = readAnthropicUsage(usage)
+  if (!observed) return
   setRequestContext(c, {
-    inputTokens: usage.input_tokens + cached + created,
-    outputTokens: usage.output_tokens,
+    inputTokens: observed.inputTokens,
+    outputTokens: observed.outputTokens,
   })
-  span.setAttribute(
-    "gen_ai.usage.input_tokens",
-    usage.input_tokens + cached + created,
-  )
-  span.setAttribute("gen_ai.usage.output_tokens", usage.output_tokens)
-  if (cached > 0) {
-    span.setAttribute("gen_ai.usage.input_tokens.cached", cached)
+  span.setAttribute("gen_ai.usage.input_tokens", observed.inputTokens)
+  span.setAttribute("gen_ai.usage.output_tokens", observed.outputTokens)
+  if (observed.cachedTokens > 0) {
+    span.setAttribute("gen_ai.usage.input_tokens.cached", observed.cachedTokens)
   }
 }
 
@@ -781,10 +777,18 @@ function rewriteMessageStart(
     }
     if (parsed.message?.usage) {
       usage.observed ||= hasNativeUsageCounts(parsed.message.usage)
-      usage.input = parsed.message.usage.input_tokens ?? 0
-      usage.output = parsed.message.usage.output_tokens ?? 0
-      usage.cached = parsed.message.usage.cache_read_input_tokens ?? 0
-      usage.created = parsed.message.usage.cache_creation_input_tokens ?? 0
+      usage.input = readAnthropicUsageTokenCount(
+        parsed.message.usage.input_tokens,
+      )
+      usage.output = readAnthropicUsageTokenCount(
+        parsed.message.usage.output_tokens,
+      )
+      usage.cached = readAnthropicUsageTokenCount(
+        parsed.message.usage.cache_read_input_tokens,
+      )
+      usage.created = readAnthropicUsageTokenCount(
+        parsed.message.usage.cache_creation_input_tokens,
+      )
     }
     if (requestedModel && parsed.message?.model) {
       return JSON.stringify({
@@ -816,16 +820,20 @@ export function trackMessageDelta(
     }
     usage.observed ||= hasNativeUsageCounts(parsed.usage)
     if (parsed.usage?.output_tokens !== undefined) {
-      usage.output = parsed.usage.output_tokens
+      usage.output = readAnthropicUsageTokenCount(parsed.usage.output_tokens)
     }
     if (parsed.usage?.input_tokens !== undefined) {
-      usage.input = parsed.usage.input_tokens
+      usage.input = readAnthropicUsageTokenCount(parsed.usage.input_tokens)
     }
     if (parsed.usage?.cache_read_input_tokens !== undefined) {
-      usage.cached = parsed.usage.cache_read_input_tokens
+      usage.cached = readAnthropicUsageTokenCount(
+        parsed.usage.cache_read_input_tokens,
+      )
     }
     if (parsed.usage?.cache_creation_input_tokens !== undefined) {
-      usage.created = parsed.usage.cache_creation_input_tokens
+      usage.created = readAnthropicUsageTokenCount(
+        parsed.usage.cache_creation_input_tokens,
+      )
     }
   } catch {
     /* ignore */

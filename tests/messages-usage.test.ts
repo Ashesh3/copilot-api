@@ -96,7 +96,7 @@ function event(type: string, fields: Record<string, unknown> = {}): string {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`
 }
 
-function startEvent(usage?: Record<string, number>): string {
+function startEvent(usage?: Record<string, unknown>): string {
   return event("message_start", {
     message: {
       id: "msg_usage",
@@ -125,7 +125,7 @@ async function openRequest(
       "content-type": "application/json",
     },
     body: JSON.stringify(
-      path.includes(":streamGenerateContent") ?
+      /:(?:streamGenerateContent|generateContent)/.test(path) ?
         {
           contents: [{ role: "user", parts: [{ text: "Hello" }] }],
           ...overrides,
@@ -345,3 +345,138 @@ test.each([false, true])(
     await expectUsage(21, 2, 1)
   },
 )
+
+const upstreamUsageCases = [
+  {
+    name: "missing",
+    usage: undefined,
+    input: 0,
+    output: 0,
+    requests: 0,
+    gaps: 0,
+  },
+  { name: "empty", usage: {}, input: 0, output: 0, requests: 0, gaps: 0 },
+  {
+    name: "output-only",
+    usage: { output_tokens: 7 },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 0,
+  },
+  {
+    name: "null-input",
+    usage: { input_tokens: null, output_tokens: 7 },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    name: "null-output",
+    usage: { input_tokens: 13, output_tokens: null },
+    input: 13,
+    output: 0,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    name: "null-cache-read",
+    usage: {
+      input_tokens: 13,
+      output_tokens: 7,
+      cache_read_input_tokens: null,
+    },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    name: "null-cache-create",
+    usage: {
+      input_tokens: 13,
+      output_tokens: 7,
+      cache_creation_input_tokens: null,
+    },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    name: "string-input",
+    usage: { input_tokens: "12", output_tokens: 7 },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    name: "negative-cache",
+    usage: { input_tokens: 13, output_tokens: 7, cache_read_input_tokens: -1 },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+]
+
+for (const path of [
+  "/v1/messages",
+  "/v1/chat/completions",
+  "/v1/models/usage-native-messages",
+]) {
+  for (const mode of ["buffered", "start", "delta"]) {
+    test.each(upstreamUsageCases)(
+      `${path} ${mode} preserves $name usage accounting`,
+      async ({ usage, input, output, requests, gaps }) => {
+        enableDatabaseUsageForTest()
+        const streaming = mode !== "buffered"
+        const endpoint =
+          path.includes("/models/") ?
+            `${path}:${streaming ? "streamGenerateContent?alt=sse" : "generateContent"}`
+          : path
+        const upstream =
+          streaming ?
+            new Response(
+              [
+                startEvent(mode === "start" ? usage : undefined),
+                ...(mode === "delta" ?
+                  [
+                    event("message_delta", {
+                      delta: { stop_reason: "end_turn" },
+                      ...(usage ? { usage } : {}),
+                    }),
+                  ]
+                : []),
+                event("message_stop"),
+              ].join(""),
+              { headers: { "content-type": "text/event-stream" } },
+            )
+          : Response.json({
+              id: "msg_usage_partial",
+              type: "message",
+              role: "assistant",
+              model: "usage-native-messages",
+              content: [{ type: "text", text: "done" }],
+              stop_reason: "end_turn",
+              stop_sequence: null,
+              ...(usage ? { usage } : {}),
+            })
+        const response = await openRequest(endpoint, upstream, {
+          stream: streaming,
+        })
+        const body = await response.text()
+        await expectUsage(input, output, requests)
+        expect((await getUsageResponse()).collection).toMatchObject({
+          unknownGaps: gaps,
+        })
+        if (path === "/v1/messages" && usage)
+          expect(body).toContain(JSON.stringify(usage))
+        if (path === "/v1/chat/completions" && !requests)
+          expect(body).not.toContain('"usage":')
+      },
+    )
+  }
+}

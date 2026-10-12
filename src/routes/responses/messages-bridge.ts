@@ -25,6 +25,7 @@ import type {
 } from "~/services/copilot/create-responses"
 import type { ResponsesWireBody } from "~/services/copilot/responses-contract"
 
+import { readAnthropicUsage } from "~/lib/anthropic-usage"
 import {
   fetchUrlAsDataUri,
   isLikelyBase64,
@@ -1503,17 +1504,14 @@ function mapStopReason(
   return null
 }
 
-function mapAnthropicUsage(response: AnthropicResponse): ResponseUsage {
-  const cachedTokens = response.usage.cache_read_input_tokens ?? 0
-  const inputTokens =
-    response.usage.input_tokens
-    + cachedTokens
-    + (response.usage.cache_creation_input_tokens ?? 0)
+function mapAnthropicUsage(response: AnthropicResponse): ResponseUsage | null {
+  const usage = readAnthropicUsage(response.usage)
+  if (!usage) return null
   return {
-    input_tokens: inputTokens,
-    output_tokens: response.usage.output_tokens,
-    total_tokens: inputTokens + response.usage.output_tokens,
-    input_tokens_details: { cached_tokens: cachedTokens },
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+    total_tokens: usage.inputTokens + usage.outputTokens,
+    input_tokens_details: { cached_tokens: usage.cachedTokens },
     output_tokens_details: { reasoning_tokens: 0 },
   }
 }
