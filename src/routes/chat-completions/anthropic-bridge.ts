@@ -631,7 +631,9 @@ export function anthropicResponseToChat(
         usage: {
           prompt_tokens: usage.inputTokens,
           completion_tokens: usage.outputTokens,
-          total_tokens: usage.inputTokens + usage.outputTokens,
+          total_tokens: readAnthropicUsageTokenCount(
+            usage.inputTokens + usage.outputTokens,
+          ),
           prompt_tokens_details: { cached_tokens: usage.cachedTokens },
         },
       }
@@ -780,8 +782,9 @@ export async function streamAnthropicAsChatCompletions(
   }
 
   return {
-    inputTokens:
+    inputTokens: readAnthropicUsageTokenCount(
       state.inputTokens + state.cachedTokens + state.cacheWriteTokens,
+    ),
     outputTokens: state.outputTokens,
     cachedTokens: state.cachedTokens,
     usageObserved: state.usageObserved,
@@ -893,8 +896,9 @@ async function finishBridgeStream({
       .sort(([left], [right]) => left - right)
       .map(([, block]) => block),
   )
-  const promptTokens =
-    state.inputTokens + state.cachedTokens + state.cacheWriteTokens
+  const promptTokens = readAnthropicUsageTokenCount(
+    state.inputTokens + state.cachedTokens + state.cacheWriteTokens,
+  )
   await writeChunk(
     reasoningOpaque ? { reasoning_opaque: reasoningOpaque } : {},
     {
@@ -904,7 +908,9 @@ async function finishBridgeStream({
           {
             prompt_tokens: promptTokens,
             completion_tokens: state.outputTokens,
-            total_tokens: promptTokens + state.outputTokens,
+            total_tokens: readAnthropicUsageTokenCount(
+              promptTokens + state.outputTokens,
+            ),
             prompt_tokens_details: { cached_tokens: state.cachedTokens },
           }
         : undefined,
@@ -945,8 +951,9 @@ function updateBridgeUsage(
 function publishBridgeUsage({ state, onUsage }: BridgeStreamContext): void {
   if (!state.usageObserved) return
   onUsage?.({
-    inputTokens:
+    inputTokens: readAnthropicUsageTokenCount(
       state.inputTokens + state.cachedTokens + state.cacheWriteTokens,
+    ),
     outputTokens: state.outputTokens,
   })
 }

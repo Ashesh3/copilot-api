@@ -40,10 +40,11 @@ export function readAnthropicUsage(usage: AnthropicUsage):
     usage?.cache_creation_input_tokens,
   )
   return {
-    inputTokens:
+    inputTokens: readAnthropicUsageTokenCount(
       readAnthropicUsageTokenCount(usage?.input_tokens)
-      + cachedTokens
-      + cacheCreationTokens,
+        + cachedTokens
+        + cacheCreationTokens,
+    ),
     outputTokens: readAnthropicUsageTokenCount(usage?.output_tokens),
     cachedTokens,
     cacheCreationTokens,

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- Shared mounted HTTP and WebSocket fixtures cover actual usage and cancellation across Responses routes. */
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
 import { SSEStreamingApi } from "hono/streaming"
 
@@ -314,6 +315,157 @@ test.each([false, true])(
       await response.body?.cancel().catch(() => {})
       releaseTerminalWrite.resolve(undefined)
       await terminalWrite
+      writes.mockRestore()
+    }
+  },
+)
+
+test.each([
+  {
+    name: "direct",
+    trailing: false,
+    webSearch: false,
+    usage: { prompt_tokens: 17, completion_tokens: 4 },
+    input: 17,
+    output: 4,
+    gaps: 0,
+  },
+  {
+    name: "trailing-output-only",
+    trailing: true,
+    webSearch: false,
+    usage: { completion_tokens: 7 },
+    input: 0,
+    output: 7,
+    gaps: 0,
+  },
+  {
+    name: "trailing-invalid-input",
+    trailing: true,
+    webSearch: false,
+    usage: { prompt_tokens: null, completion_tokens: 7 },
+    input: 0,
+    output: 7,
+    gaps: 1,
+  },
+  {
+    name: "web-search",
+    trailing: false,
+    webSearch: true,
+    usage: { prompt_tokens: 17, completion_tokens: 4 },
+    input: 17,
+    output: 4,
+    gaps: 0,
+  },
+])(
+  "Chat to Responses HTTP retains $name usage when its write is cancelled",
+  async (expected) => {
+    const blocked = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- Invoke the saved real method with its stream receiver.
+    const originalWrite = SSEStreamingApi.prototype.writeSSE
+    let writing: Promise<void> | undefined
+    const writes = spyOn(
+      SSEStreamingApi.prototype,
+      "writeSSE",
+    ).mockImplementation(function (this: SSEStreamingApi, message) {
+      if (
+        message.event
+        === (expected.trailing ? "response.completed" : "response.created")
+      ) {
+        writing = release.promise.then(() => originalWrite.call(this, message))
+        blocked.resolve(undefined)
+        return writing
+      }
+      return originalWrite.call(this, message)
+    })
+    const completion = {
+      id: "chat_usage_cancel",
+      created: 1,
+      model: "usage-chat",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "answer" },
+          finish_reason: "stop",
+        },
+      ],
+      usage: expected.usage,
+    }
+    upstream.push(
+      expected.webSearch ?
+        Response.json(completion)
+      : new Response(
+          [
+            {
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: "answer" },
+                  finish_reason: "stop",
+                },
+              ],
+              ...(expected.trailing ? {} : { usage: expected.usage }),
+            },
+            ...(expected.trailing ?
+              [{ choices: [], usage: expected.usage }]
+            : []),
+          ]
+            .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+            .join("") + "data: [DONE]\n\n",
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    )
+    const response = await postResponses({
+      model: "usage-chat",
+      stream: true,
+      ...(expected.webSearch ?
+        {
+          tools: [
+            {
+              type: "function",
+              name: "web_search",
+              parameters: { type: "object", properties: {} },
+              strict: false,
+            },
+          ],
+        }
+      : {}),
+    })
+    if (!response.body) throw new Error("Missing Responses stream")
+    const reader = response.body.getReader()
+    const reading = (async () => {
+      while (!(await reader.read()).done) {
+        /* Drain until the held downstream write. */
+      }
+    })()
+    try {
+      await blocked.promise
+      expect((await usageHistory()).lifetime.requestCount).toBe(0)
+      await reader.cancel("client disconnected during translated write")
+      const expectedUsage = {
+        inputTokens: expected.input,
+        outputTokens: expected.output,
+        requestCount: 1,
+      }
+      expect((await usageHistory()).lifetime).toMatchObject(expectedUsage)
+      const runtime = getHistoryRuntime()
+      expect(
+        (
+          await runtime.writer.read((pending) =>
+            runtime.repository.collectionStatus({}, pending),
+          )
+        ).unknownGaps,
+      ).toBe(expected.gaps)
+      release.resolve(undefined)
+      await writing
+      await reader.cancel()
+      expect((await usageHistory()).lifetime).toMatchObject(expectedUsage)
+    } finally {
+      await reader.cancel().catch(() => {})
+      release.resolve(undefined)
+      await writing
+      await reading
       writes.mockRestore()
     }
   },

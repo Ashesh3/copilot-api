@@ -660,11 +660,11 @@ function setChatCompletionSpanResult(
 }
 
 const streamChatCompletionsWithWebSearch = async (
-  target: { stream: SSEStream; owner: MessagesStreamOwner },
+  target: { c: Context; stream: SSEStream; owner: MessagesStreamOwner },
   response: AsyncIterable<{ data?: string }>,
   requestedModel?: string,
 ): Promise<BufferedChatCompletionsResult> => {
-  const { stream, owner } = target
+  const { c, stream, owner } = target
   const bufferedChunks: Array<ChatCompletionChunk> = []
   let finalSeen = false
   const iterator = response[Symbol.asyncIterator]()
@@ -711,6 +711,7 @@ const streamChatCompletionsWithWebSearch = async (
   }
 
   // No web_search calls — replay buffered chunks
+  setChatUsageContext(c, initialResponse?.usage)
   const streamState: AnthropicStreamState = {
     terminal: "open",
     messageStartSent: false,
@@ -1220,7 +1221,7 @@ const executeChatCompletions = async (
 
             if (needsWebSearchBuffering) {
               const buffered = await streamChatCompletionsWithWebSearch(
-                { stream, owner },
+                { c, stream, owner },
                 withSseHeartbeat(
                   response as AsyncIterable<{ data?: string }>,
                   stream,
@@ -1229,8 +1230,6 @@ const executeChatCompletions = async (
               )
 
               setChatCompletionSpanResult(streamSpan, buffered.initialResponse)
-              if (!buffered.hadWebSearch)
-                setChatUsageContext(c, buffered.initialResponse?.usage)
 
               if (buffered.hadWebSearch && buffered.initialResponse) {
                 finishSpan()
@@ -1664,13 +1663,14 @@ const replayBufferedEvents = async (
 }
 
 const streamResponsesWithWebSearch = async (
+  target: { c: Context; owner: MessagesStreamOwner },
   stream: SSEStream,
-  owner: MessagesStreamOwner,
   response: ResponsesStream,
 ): Promise<{
   hadWebSearch: boolean
   initialResult: ResponsesResult | null
 }> => {
+  const { c, owner } = target
   const { events, hasWebSearch, completedResult } = await bufferResponsesStream(
     stream,
     response,
@@ -1680,6 +1680,7 @@ const streamResponsesWithWebSearch = async (
     return { hadWebSearch: true, initialResult: completedResult }
   }
 
+  setResponsesUsageContext(c, completedResult)
   await replayBufferedEvents(stream, owner, events)
   return { hadWebSearch: false, initialResult: completedResult }
 }
@@ -1879,12 +1880,10 @@ const executeResponsesApi = async (
             try {
               if (needsWebSearchBuffering) {
                 const buffered = await streamResponsesWithWebSearch(
+                  { c, owner },
                   stream,
-                  owner,
                   withSseHeartbeat(response as ResponsesStream, stream),
                 )
-                if (!buffered.hadWebSearch)
-                  setResponsesUsageContext(c, buffered.initialResult)
 
                 const inputTokens =
                   buffered.initialResult?.usage?.input_tokens ?? 0

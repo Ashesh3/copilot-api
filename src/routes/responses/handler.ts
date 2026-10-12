@@ -2536,6 +2536,7 @@ const streamChatCompletionsAsResponsesWithState = async (options: {
   }
   ccStream: AsyncIterable<{ data?: string; event?: string }>
   state: CCStreamState
+  onUsage?: (usage: CCStreamState["usage"]) => void
 }): Promise<{
   state: CCStreamState
   terminal?: "response.completed" | "response.incomplete"
@@ -2562,10 +2563,11 @@ const streamChatCompletionsAsResponsesWithState = async (options: {
     if (hasNonNullStreamError(chunk)) {
       throw chunk.error
     }
-    if (s.pendingFinishReason) {
-      if (chunk.usage) s.usage = extractCCUsage(chunk.usage)
-      continue
+    if (chunk.usage) {
+      s.usage = extractCCUsage(chunk.usage)
+      options.onUsage?.(s.usage)
     }
+    if (s.pendingFinishReason) continue
     await processChatCompletionsChunk(s, chunk, writeEvent)
   }
 
@@ -2585,7 +2587,6 @@ async function processChatCompletionsChunk(
 
   if (chunk.id) state.responseId = `resp_${chunk.id}`
   if (chunk.created) state.createdAt = chunk.created
-  if (chunk.usage) state.usage = extractCCUsage(chunk.usage)
   const shouldCreateResponse = !state.responseCreated
   if (shouldCreateResponse) {
     state.responseCreated = true
@@ -2959,6 +2960,7 @@ export const handleWithChatCompletions = async (
               stream: sseStream,
               ccStream: withSseHeartbeat(ccStream, sseStream),
               state: chatState,
+              onUsage: (usage) => setRequestContext(c, usage),
             })
             failureState.responseId = outcome.state.responseId
             failureState.model = outcome.state.resolvedModel
@@ -2974,11 +2976,6 @@ export const handleWithChatCompletions = async (
             await (outcome.terminal ?
               lifecycle.succeed(outcome.terminal)
             : lifecycle.finishSource())
-
-            setRequestContext(c, {
-              inputTokens: outcome.state.usage.inputTokens,
-              outputTokens: outcome.state.usage.outputTokens,
-            })
 
             streamSpan.setAttribute(
               "gen_ai.usage.input_tokens",
@@ -3187,6 +3184,7 @@ function handleStreamingChatFallbackWebSearch(
         lifecycle.abort()
         return
       }
+      setResponsesResultContext(c, result)
       await emitResponsesResultAsStream(stream, result)
       await lifecycle.succeed("synthetic")
     } catch (error) {
