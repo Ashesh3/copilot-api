@@ -180,11 +180,13 @@ Streaming usage is saved once the response ends; responses without reported
 usage do not add an estimated token count.
 
 Upgrading repairs token counters corrupted by older tokenizer saturation
-values. Valid token counters, request counts, and the first-request timestamp
-are preserved. An invalid lifetime token counter is rebuilt from retained,
-valid minute counters and remains a lower bound: expired or corrupted input
-history cannot be recovered. The collection-gap indicator records this missing
-history instead of presenting the repaired total as complete.
+values. Request counts and the first-request timestamp are preserved. Token
+counters retain valid components within the supported numeric range; if valid
+minute counters overflow in aggregate, only their representable prefix is kept.
+An invalid lifetime token counter is rebuilt from retained valid minute counters
+and remains a lower bound: expired, corrupted, or overflowed history cannot be
+recovered. The collection-gap indicator records this missing history instead of
+presenting the repaired total as complete.
 
 ### Client compatibility
 

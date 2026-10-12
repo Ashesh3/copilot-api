@@ -228,6 +228,34 @@ test.each([false, true])(
   },
 )
 
+test("buffered failed Responses usage is not recorded by the Messages route", async () => {
+  fetchMock.mockImplementationOnce(() =>
+    Response.json({
+      ...responsesResult,
+      status: "failed",
+      error: { code: "server_error", message: "fixture failure" },
+    }),
+  )
+  await seedProtocolDatabase()
+  const response = await server.request("/v1/messages", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello" }],
+      max_tokens: 32,
+      stream: false,
+    }),
+  })
+  await response.text()
+  expect(await getUsageResponse()).toMatchObject({
+    lifetime: { total_tokens: 0, total_requests: 0 },
+  })
+})
+
 test("degrades unsigned thinking into Responses text while preserving history", async () => {
   const response = await seedProtocolDatabase().then(() =>
     server.request("/v1/messages", {
