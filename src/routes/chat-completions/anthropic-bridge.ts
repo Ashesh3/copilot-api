@@ -19,6 +19,10 @@ import type { AnthropicStreamChunk } from "~/services/copilot/create-anthropic-m
 import type { Model } from "~/services/copilot/get-models"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
+import {
+  readAnthropicUsage,
+  readAnthropicUsageTokenCount,
+} from "~/lib/anthropic-usage"
 import { inspectHttpError, isAbortError, isHTTPError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
 import { parseRecoverableStreamJson } from "~/lib/recoverable-stream-json"
@@ -602,11 +606,7 @@ export function anthropicResponseToChat(
       }
     })
 
-  const cachedTokens = response.usage.cache_read_input_tokens ?? 0
-  const promptTokens =
-    response.usage.input_tokens
-    + cachedTokens
-    + (response.usage.cache_creation_input_tokens ?? 0)
+  const usage = readAnthropicUsage(response.usage)
 
   return {
     id: response.id,
@@ -626,12 +626,16 @@ export function anthropicResponseToChat(
         finish_reason: mapStopReason(response.stop_reason),
       },
     ],
-    usage: {
-      prompt_tokens: promptTokens,
-      completion_tokens: response.usage.output_tokens,
-      total_tokens: promptTokens + response.usage.output_tokens,
-      prompt_tokens_details: { cached_tokens: cachedTokens },
-    },
+    ...(usage ?
+      {
+        usage: {
+          prompt_tokens: usage.inputTokens,
+          completion_tokens: usage.outputTokens,
+          total_tokens: usage.inputTokens + usage.outputTokens,
+          prompt_tokens_details: { cached_tokens: usage.cachedTokens },
+        },
+      }
+    : {}),
   }
 }
 
@@ -919,11 +923,22 @@ function updateBridgeUsage(
 ): void {
   if (!usage) return
   state.usageObserved ||= hasNativeUsageCounts(usage)
-  state.inputTokens = usage.input_tokens ?? state.inputTokens
-  state.outputTokens = usage.output_tokens ?? state.outputTokens
-  state.cachedTokens = usage.cache_read_input_tokens ?? state.cachedTokens
-  state.cacheWriteTokens =
-    usage.cache_creation_input_tokens ?? state.cacheWriteTokens
+  state.inputTokens = readAnthropicUsageTokenCount(
+    usage.input_tokens,
+    state.inputTokens,
+  )
+  state.outputTokens = readAnthropicUsageTokenCount(
+    usage.output_tokens,
+    state.outputTokens,
+  )
+  state.cachedTokens = readAnthropicUsageTokenCount(
+    usage.cache_read_input_tokens,
+    state.cachedTokens,
+  )
+  state.cacheWriteTokens = readAnthropicUsageTokenCount(
+    usage.cache_creation_input_tokens,
+    state.cacheWriteTokens,
+  )
 }
 
 /** Publish measured usage before a downstream write can block or be cancelled. */

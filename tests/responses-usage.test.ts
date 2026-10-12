@@ -492,6 +492,57 @@ test("WebSocket records only the accepted fallback model's usage", async () => {
   })
 })
 
+test.each([
+  { usage: {}, input: 0, output: 0, requests: 0, gaps: 0 },
+  { usage: { output_tokens: 7 }, input: 0, output: 7, requests: 1, gaps: 0 },
+  {
+    usage: { input_tokens: null, output_tokens: 7 },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    usage: { input_tokens: 3, output_tokens: 7, cache_read_input_tokens: null },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+])(
+  "Messages to Responses preserves absent and invalid usage: %p",
+  async (expected) => {
+    upstream.push(
+      Response.json({
+        id: "msg_partial_usage",
+        type: "message",
+        role: "assistant",
+        model: "usage-messages",
+        content: [{ type: "text", text: "answer" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: expected.usage,
+      }),
+    )
+    const ws = socket()
+    await sendTurn(ws, { model: "usage-messages" })
+    expect(ws.sent.at(-1)?.type).toBe("response.completed")
+    expect((await usageHistory()).lifetime).toMatchObject({
+      inputTokens: expected.input,
+      outputTokens: expected.output,
+      requestCount: expected.requests,
+    })
+    const runtime = getHistoryRuntime()
+    expect(
+      (
+        await runtime.writer.read((pending) =>
+          runtime.repository.collectionStatus({}, pending),
+        )
+      ).unknownGaps,
+    ).toBe(expected.gaps)
+  },
+)
+
 test.each([false, true])(
   "translated Chat WebSocket preserves whether usage was reported: %s",
   async (reported) => {
