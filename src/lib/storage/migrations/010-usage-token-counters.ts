@@ -23,11 +23,13 @@ const combinedOverflow = `(${valid("input_tokens")} AND ${valid("output_tokens")
 // Prefix sums stay exact until the limit. Preserve that known prefix rather
 // than retaining a rounded aggregate or substituting a saturation sentinel.
 const trimOverflow = (column: string) =>
-  `WITH running AS MATERIALIZED (
-    SELECT minute,model,TOTAL(${column}) OVER (ORDER BY minute,model ROWS UNBOUNDED PRECEDING) AS total
-    FROM capi_usage_minutes
-  ) UPDATE capi_usage_minutes SET ${column}=0
-    WHERE (minute,model) IN (SELECT minute,model FROM running WHERE total>=9007199254740991)`
+  `UPDATE capi_usage_minutes SET ${column}=0
+    WHERE (minute,model) IN (
+      SELECT minute,model FROM (
+        SELECT minute,model,TOTAL(${column}) OVER (ORDER BY minute,model ROWS UNBOUNDED PRECEDING) AS total
+        FROM capi_usage_minutes
+      ) WHERE total>=9007199254740991
+    )`
 
 const statements = [
   `INSERT INTO capi_collection_gaps(id,started_at,ended_at,kind,payload_json)
