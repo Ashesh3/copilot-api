@@ -305,19 +305,44 @@ test("a remembered target that loses all providers advances without sending anot
   expect(await owners()).toEqual([ownerId])
 })
 
-test("a fallback served only by another account still preserves the conversation's ownership error", async () => {
+test("a fallback model switch reassigns the conversation to an account that serves it", async () => {
   configureChain([sourceModel, unavailableModel, targetModel])
   installAccount(otherId, [unavailableModel, targetModel])
   tokenPool.rebuildModelIndex()
   state.models = tokenPool.getAllModels()
+  upstreamReply = (body, index) =>
+    messageResponse(
+      String(body.model),
+      index,
+      index > 1 && body.model !== targetModel,
+    )
   const client = await createClient("HTTP JSON")
-  const response = await client.send()
-  expect(response.status).toBe(409)
-  expect(response.body).toContain("conversation_account_unavailable")
-  expect(calls.map((call) => call.body.model)).toEqual([sourceModel])
-  expect(calls[0]?.authorization).toBe("Bearer owner-17-copilot-token")
-  expect(await storedTargets()).toEqual([])
+  expect((await client.send()).response).toMatchObject({ status: "completed" })
   expect(await owners()).toEqual([ownerId])
+  expect(await storedTargets()).toEqual([])
+
+  const response = await client.send()
+  expect(response.status).toBe(200)
+  expect(response.response).toMatchObject({
+    status: "completed",
+    model: sourceModel,
+    output_text: `answer from ${targetModel}`,
+  })
+  expect(response.headers.get("x-copilot-api-fallback-to")).toBe(targetModel)
+  expect(calls.map((call) => call.body.model)).toEqual([
+    sourceModel,
+    sourceModel,
+    unavailableModel,
+    targetModel,
+  ])
+  expect(calls.map((call) => call.authorization)).toEqual([
+    "Bearer owner-17-copilot-token",
+    "Bearer owner-17-copilot-token",
+    "Bearer owner-23-copilot-token",
+    "Bearer owner-23-copilot-token",
+  ])
+  expect(await storedTargets()).toEqual([targetModel])
+  expect(await owners()).toEqual([otherId])
 })
 
 test("an unavailable redirect follows its resolved model's fallback with effort and verbosity intact", async () => {
