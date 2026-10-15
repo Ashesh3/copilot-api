@@ -3,13 +3,9 @@ import type { Context } from "hono"
 import { Hono } from "hono"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
-import { extractRequestCredential } from "~/lib/credential-resolver"
 import { setRequestContext } from "~/lib/request-logger"
-import { getRoutingAffinity } from "~/lib/routing-affinity"
+import { pageUrl } from "~/services/copilot/hosted-web-search"
 import { executeWebSearch } from "~/services/copilot/mcp-web-search"
-import { webScopeKey } from "~/services/web/tool-context"
-
-import { dispatchWebCommands } from "./web-commands"
 
 export const codexSearchRoutes = new Hono()
 
@@ -34,6 +30,25 @@ function invalidRequest(c: Context, message: string): Response {
     },
     400,
   )
+}
+
+function pageTargets(
+  commands: Record<string, unknown>,
+): Array<string> | undefined {
+  const urls = new Set<string>()
+  for (const kind of ["open", "find", "click"]) {
+    const values = commands[kind]
+    if (!Array.isArray(values)) continue
+    for (const command of values) {
+      if (!isRecord(command) || typeof command.ref_id !== "string")
+        return undefined
+      const url = pageUrl(command.ref_id)
+      if (!url) return undefined
+      if (kind === "click") return undefined // Link IDs belong to the upstream browser session, not this gateway.
+      urls.add(url)
+    }
+  }
+  return [...urls]
 }
 
 function collectInputText(value: unknown, output: Array<string>): void {
@@ -83,7 +98,7 @@ function describeSearchSettings(settings: unknown): Array<string> {
   return details
 }
 
-/** Translate Codex's standalone `web.run` command envelope to an MCP query. */
+/** Forward Codex web.run through GitHub search or hosted exact-URL browsing. */
 export function buildCodexSearchQuery(body: CodexSearchRequest): string {
   const commands = isRecord(body.commands) ? body.commands : {}
   const inputText: Array<string> = []
@@ -91,6 +106,7 @@ export function buildCodexSearchQuery(body: CodexSearchRequest): string {
 
   const parts = [
     "Fulfill this Codex web.run request using current web sources.",
+    "For open/find/click, use the supplied exact URL and conversation context to read the page on GitHub. Do not substitute search snippets for a failed page open.",
     `Commands: ${JSON.stringify(commands)}`,
     ...describeSearchSettings(body.settings),
   ]
@@ -124,30 +140,22 @@ codexSearchRoutes.post("/", async (c) => {
   setRequestContext(c, {
     inputLength: query.length,
     model: body.model,
-    provider: "Copilot MCP Web Search",
+    provider: "GitHub Web Search / Browsing",
     requestedModel: body.model,
   })
 
-  const affinity = getRoutingAffinity()
-  const output = await dispatchWebCommands(
-    body.commands,
-    webScopeKey(
-      extractRequestCredential(c.req.raw) ?? "",
-      affinity?.threadKey ?? affinity?.key ?? body.id,
-    ),
-    {
-      signal: c.req.raw.signal,
-      search: async (commands) =>
-        await executeWebSearch(
-          buildCodexSearchQuery({ ...body, commands }),
-          c.req.raw.signal,
-          {
-            modelId: body.model as string,
-            sessionId: body.id as string,
-          },
-        ),
-    },
-  )
+  const pageUrls = pageTargets(body.commands)
+  if (!pageUrls)
+    return c.json({
+      encrypted_output: null,
+      output:
+        "Web search error: Page references and link IDs from another browser session are unavailable. Supply an exact HTTP(S) URL to open or find text in.",
+    })
+  const output = await executeWebSearch(query, c.req.raw.signal, {
+    modelId: body.model,
+    sessionId: body.id,
+    pageUrls,
+  })
   setRequestContext(c, { accountId: getLastUsedAccountId() })
   return c.json({ encrypted_output: null, output })
 })

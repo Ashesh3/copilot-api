@@ -6,33 +6,30 @@ import {
   webToolsContext,
 } from "~/services/web/tool-context"
 
-test("normal inference gets search and fetch even without declared tools", () =>
-  runWithWebTools({}, "test", () => {
+test("normal inference gets one search-and-open tool, never a local fetch tool", () =>
+  runWithWebTools({}, () => {
     const result = prepareManagedWebTools(
       { model: "model", messages: [] },
       "messages",
     )
-    expect([...result.managed.values()].map((t) => t.kind)).toEqual([
-      "search",
-      "fetch",
-    ])
-    expect(result.payload.tools).toHaveLength(2)
+    expect([...result.managed.values()].map((t) => t.kind)).toEqual(["search"])
+    expect(result.payload.tools).toHaveLength(1)
+    expect(JSON.stringify(result.payload.tools)).toContain("URL")
+    expect(JSON.stringify(result.payload.tools)).not.toContain("web_fetch")
   }))
 
 test("does not alter request tools or take ownership of client names", () =>
-  runWithWebTools({}, "test", () => {
+  runWithWebTools({}, () => {
     const caller = {
-      name: "_copilot_web_fetch",
+      name: "_copilot_web_search",
       input_schema: { type: "object" },
     }
     const source = { model: "model", tools: [caller] }
     const result = prepareManagedWebTools(source, "messages")
     expect(source.tools).toEqual([caller])
     expect(result.payload.tools?.[0]).toEqual(caller)
-    expect(result.managed.has("_copilot_web_fetch")).toBe(false)
-    expect([...result.managed.values()].some((t) => t.kind === "fetch")).toBe(
-      true,
-    )
+    expect(result.managed.has("_copilot_web_search")).toBe(false)
+    expect(result.managed.size).toBe(1)
   }))
 
 test.each([
@@ -55,7 +52,7 @@ test.each([
   },
   { toolConfig: { functionCallingConfig: { mode: "NONE" } } },
 ])("honors constrained or non-generative requests %j", (source) =>
-  runWithWebTools(source, "test", () => {
+  runWithWebTools(source, () => {
     expect(
       prepareManagedWebTools({ model: "model" }, "responses").managed.size,
     ).toBe(0)
@@ -70,7 +67,7 @@ test("does not add tools to internal calls outside an inference scope", () => {
 })
 
 test("service reentry retains ownership of injected tools without duplicate declarations", () =>
-  runWithWebTools({}, "test", () => {
+  runWithWebTools({}, () => {
     const first = prepareManagedWebTools(
       { tools: [{ type: "function", function: { name: "web_search" } }] },
       "chat",
@@ -81,16 +78,16 @@ test("service reentry retains ownership of injected tools without duplicate decl
   }))
 
 test("translator-generated tools:null is not a client opt-out", () =>
-  runWithWebTools({ model: "model", messages: [] }, "test", () => {
+  runWithWebTools({ model: "model", messages: [] }, () => {
     expect(
       prepareManagedWebTools(
         { model: "model", input: [], tools: null },
         "responses",
       ).managed.size,
-    ).toBe(2)
+    ).toBe(1)
   }))
 
-test("a translated-away typed fetch retains its forced name and limits", () => {
+test("typed fetch is not rewritten or executed by the gateway", () => {
   const source = {
     tools: [
       {
@@ -102,25 +99,17 @@ test("a translated-away typed fetch retains its forced name and limits", () => {
     ],
     tool_choice: { type: "tool", name: "get_page" },
   }
-  runWithWebTools(source, "test", () => {
-    const result = prepareManagedWebTools(
-      { tools: null, tool_choice: { type: "function", name: "get_page" } },
-      "responses",
-    )
-    expect(result.managed.get("get_page")?.limits.allowedDomains).toEqual([
-      "example.com",
-    ])
-    expect(result.payload.tool_choice).toEqual({
-      type: "function",
-      name: "get_page",
-    })
+  runWithWebTools(source, () => {
+    const result = prepareManagedWebTools(source, "messages")
+    expect(result.managed.has("get_page")).toBe(false)
+    expect(result.payload.tools?.[0]).toEqual(source.tools[0])
   })
 })
 
 test("additional_tools and typed declarations cannot take over client names", () => {
-  const caller = { type: "function", name: "web_fetch", parameters: {} }
+  const caller = { type: "function", name: "web_search", parameters: {} }
   const source = {
-    tools: [caller, { type: "web_fetch", name: "web_fetch" }],
+    tools: [caller, { type: "web_search", name: "web_search" }],
     input: [
       {
         type: "additional_tools",
@@ -130,24 +119,26 @@ test("additional_tools and typed declarations cannot take over client names", ()
       },
     ],
   }
-  runWithWebTools(source, "test", () => {
+  runWithWebTools(source, () => {
     const result = prepareManagedWebTools(source, "responses")
     expect(result.payload.tools?.[0]).toEqual(caller)
-    expect(result.managed.has("web_fetch")).toBe(false)
+    expect(result.managed.has("web_search")).toBe(false)
     expect(result.managed.has("_copilot_web_search")).toBe(false)
     const names = result.payload.tools?.map((t) => t.name)
     expect(new Set(names).size).toBe(names?.length ?? 0)
   })
 })
 
-test("keeps hosted Responses search and translates typed fetch to a custom tool", () =>
-  runWithWebTools({}, "test", () => {
+test("keeps hosted Responses search without adding a separate fetch tool", () =>
+  runWithWebTools({}, () => {
     const result = prepareManagedWebTools(
       { tools: [{ type: "web_search" }, { type: "web_fetch", max_uses: 2 }] },
       "responses",
     )
     expect(result.payload.tools?.[0]).toEqual({ type: "web_search" })
-    expect([...result.managed.values()].map((t) => t.kind)).toEqual(["fetch"])
-    expect([...result.managed.values()][0].maxUses).toBe(2)
-    expect(result.payload.tools?.[1]).not.toHaveProperty("max_uses")
+    expect(result.managed.size).toBe(0)
+    expect(result.payload.tools?.[1]).toEqual({
+      type: "web_fetch",
+      max_uses: 2,
+    })
   }))

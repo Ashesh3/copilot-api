@@ -269,15 +269,44 @@ test.each(["tools", "additional_tools"] as const)(
   },
 )
 
-test("WebSocket clients get a gateway-executed fetch without declaring tools", async () => {
+test("WebSocket clients open pages on GitHub through default web search", async () => {
   const providerFetch = globalThis.fetch
   let pageRequests = 0
   globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
     const target = new URL(url instanceof Request ? url.url : String(url))
-    if (target.hostname === "pages.test") {
+    if (!target.hostname.endsWith("githubcopilot.com"))
+      throw new Error("Proxy must not fetch page origins")
+    const body = JSON.parse(
+      typeof init?.body === "string" ? init.body : "{}",
+    ) as Record<string, unknown>
+    if (body.stream === false) {
       pageRequests++
-      expect(new Headers(init?.headers).has("authorization")).toBe(false)
-      return Promise.resolve(new Response("WEB_SOCKET_PAGE_EVIDENCE"))
+      expect(target.pathname).toBe("/responses")
+      expect(body.tools).toEqual([
+        { type: "web_search", external_web_access: true },
+      ])
+      return Promise.resolve(
+        Response.json({
+          status: "completed",
+          output: [
+            {
+              type: "web_search_call",
+              status: "completed",
+              action: { type: "open_page", url: "https://pages.test/" },
+            },
+            {
+              type: "message",
+              role: "assistant",
+              content: [
+                {
+                  type: "output_text",
+                  text: '{"status":"ok","content":"WEB_SOCKET_PAGE_EVIDENCE"}',
+                },
+              ],
+            },
+          ],
+        }),
+      )
     }
     return providerFetch(url, init)
   }) as typeof fetch
@@ -286,8 +315,8 @@ test("WebSocket clients get a gateway-executed fetch without declaring tools", a
     id: "ws_web_call",
     type: "function_call",
     call_id: "web_call",
-    name: "_copilot_web_fetch",
-    arguments: '{"url":"https://pages.test/"}',
+    name: "_copilot_web_search",
+    arguments: '{"query":"Open https://pages.test/"}',
   }
   const answer = {
     id: "ws_answer",
@@ -345,10 +374,7 @@ test("WebSocket clients get a gateway-executed fetch without declaring tools", a
   expect(JSON.stringify(requests[1].input)).toContain(
     "WEB_SOCKET_PAGE_EVIDENCE",
   )
-  expect(requests[0].tools).toMatchObject([
-    { name: "_copilot_web_search" },
-    { name: "_copilot_web_fetch" },
-  ])
+  expect(requests[0].tools).toMatchObject([{ name: "_copilot_web_search" }])
   expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
   const terminal = ws.sent.filter(
     (frame) => frame.type === "response.completed",
@@ -359,7 +385,7 @@ test("WebSocket clients get a gateway-executed fetch without declaring tools", a
   })
   expect(JSON.stringify(terminal[0])).toContain("Verified WebSocket page")
   expect(JSON.stringify(terminal[0])).not.toContain(
-    '"name":"_copilot_web_fetch"',
+    '"name":"_copilot_web_search"',
   )
 })
 

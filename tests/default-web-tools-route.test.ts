@@ -23,17 +23,41 @@ const fetchMock = mock(
   // eslint-disable-next-line complexity -- Three provider envelopes plus MCP and page transport in one route fixture.
   async (url: string | URL | Request, init?: RequestInit) => {
     const target = new URL(url instanceof Request ? url.url : String(url))
-    if (target.hostname === "pages.test") {
-      pageCalls++
-      expect(new Headers(init?.headers).has("authorization")).toBe(false)
-      return new Response(
-        "<html><head><title>Verified Title</title></head><body><h1>Verified Title</h1><p>Source-only fixture text.</p></body></html>",
-        { headers: { "content-type": "text/html" } },
-      )
-    }
+    if (!target.hostname.endsWith("githubcopilot.com"))
+      throw new Error("Proxy must not fetch page origins")
     const body = JSON.parse(
       typeof init?.body === "string" ? init.body : "{}",
     ) as Record<string, unknown>
+    if (target.pathname === "/responses" && body.model === "browser-fixture") {
+      pageCalls++
+      expect(new Headers(init?.headers).has("authorization")).toBe(true)
+      expect(body.tools).toEqual([
+        { type: "web_search", external_web_access: true },
+      ])
+      return Response.json({
+        status: "completed",
+        output: [
+          {
+            type: "web_search_call",
+            status: "completed",
+            action: { type: "open_page", url: "https://pages.test/" },
+          },
+          {
+            type: "message",
+            role: "assistant",
+            content: [
+              {
+                type: "output_text",
+                text: JSON.stringify({
+                  status: "ok",
+                  content: "Verified Title: Source-only fixture text.",
+                }),
+              },
+            ],
+          },
+        ],
+      })
+    }
     if (target.pathname === "/mcp/readonly") {
       if (body.method === "initialize")
         return Response.json(
@@ -57,16 +81,16 @@ const fetchMock = mock(
     upstream.push(body)
     const toolTurn = upstream.length < (searchFirst ? 3 : 2)
     const searching = searchFirst && upstream.length === 1
-    const toolName = searching ? "_copilot_web_search" : "_copilot_web_fetch"
+    const toolName = "_copilot_web_search"
     const toolInput =
       searching ?
         { query: "Find source-only fixture text" }
-      : { url: "https://pages.test/" }
+      : { query: "Open https://pages.test/ and read the page" }
     const tools = body.tools as Array<Record<string, unknown>>
     const names = tools.map(
       (t) => ((t.function ?? t) as Record<string, unknown>).name,
     )
-    expect(names).toContain("_copilot_web_fetch")
+    expect(names).not.toContain("_copilot_web_fetch")
     expect(names).toContain("_copilot_web_search")
     if (endpoint === "/v1/messages")
       return Response.json({
@@ -221,6 +245,21 @@ for (const [route, targetEndpoint, withSearch] of [
         },
       ],
     }
+    state.models.data.push({
+      id: "browser-fixture",
+      object: "model",
+      name: "Browser",
+      version: "1",
+      vendor: "openai",
+      supported_endpoints: ["/responses"],
+      capabilities: {
+        family: "gpt",
+        object: "model_capabilities",
+        supports: { tool_calls: true, web_search: true },
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    })
     await seedProtocolDatabase()
     const payload =
       route.includes(":") ?
@@ -254,7 +293,7 @@ for (const [route, targetEndpoint, withSearch] of [
     expect(JSON.stringify(upstream.at(-1))).toContain(
       "Source-only fixture text.",
     )
-    expect(text).not.toContain('"_copilot_web_fetch"')
+    expect(text).not.toContain('"name":"_copilot_web_search"')
   })
 }
 

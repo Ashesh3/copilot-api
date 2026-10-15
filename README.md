@@ -115,39 +115,38 @@ Translated signed Anthropic reasoning uses an opaque round-trip representation
 in `reasoning_opaque`; clients should echo it unchanged with the assistant
 message.
 
-### Web search and page fetch
+### GitHub-hosted web search and page reading
 
-Ordinary tool-capable inference requests get both web search and web fetch by
-default, without changing client configuration. This includes Messages, Chat
-Completions, Responses HTTP/WebSocket, Google AI, and custom chat providers.
-The gateway executes its own web tools and returns the answer in the client's
-existing protocol; caller-owned tools remain the client's responsibility.
+Ordinary tool-capable inference requests get one web search tool by default,
+without changing client configuration: Messages, Chat Completions, Responses
+HTTP/WebSocket, Google AI, and custom chat providers. It can search or open a
+specific HTTP(S) URL. **GitHub retrieves webpages; the gateway does not download,
+parse, or cache them, and has no local-fetch fallback.**
 
-- **Search** uses Copilot MCP and returns a generated answer with source URLs.
-- **Fetch** retrieves the actual HTTP(S) page and returns Markdown (including
-  tables and resolved links), or raw HTML when requested. It does not substitute
-  search summaries for failed requests. Codex `web.run` `open`, `find`, and
-  `click` commands operate on the retrieved page.
-- Fetches are limited to 30 seconds, 10 redirects, and 10 MiB per page. Results
-  default to 5,000 characters, up to 20,000; the returned reference and
-  `next_start_index` allow continued reading. References are credential- and
-  conversation-scoped when the client supplies a session/thread identifier
-  (otherwise credential-scoped), in memory for 15 minutes (eight documents per
-  scope, 64 MiB total).
-- Gateway tool use is bounded to eight searches and eight fetches per request.
-  Explicit fetch declarations can lower `max_uses`, set `allowed_domains` or
-  `blocked_domains` (also checked after redirects), and cap `max_content_tokens`.
-- Explicit no-tool choices, structured-output requests, compaction, permission
-  reviews, and known non-tool models do not receive automatic tools. A forced
-  caller tool choice still wins. Existing hosted search declarations remain
-  supported; client functions named `web_search` or `web_fetch` are not hijacked.
+- Plain queries keep the Copilot MCP search path. Include an exact URL in the
+  query to read a page through GitHub's hosted Responses `web_search` tool and
+  its `open_page` capability. Native hosted Responses tools remain unchanged.
+- For translated/custom clients, page reading uses an eligible Responses model
+  from the selected Copilot account's live catalog without changing the parent
+  conversation's model or account. This auxiliary inference uses Copilot quota;
+  observed usage is recorded separately under the helper model.
+- Results contain model-extracted content and source URLs, not raw HTML,
+  guaranteed complete downloads, or character-offset pagination. A matching
+  upstream `open_page` action and successful extraction result are required.
+  Unsupported capabilities and failed retrievals return errors, not search
+  snippets presented as fetched content.
+- Codex `web.run` commands with exact URLs are forwarded to hosted page reading.
+  Page references/line numbers from a separate browser session are not locally
+  cached or resolved; provide the source URL and the information to extract.
+- Explicit no-tool choices, structured output, compaction, permission review,
+  and known non-tool models do not receive automatic tools. Caller-owned
+  functions and mixed tool batches remain intact. Gateway tool use is bounded
+  to eight calls per request, with tighter caller limits honored.
 
-Fetch supports HTML and text-like formats, not browser JavaScript, logged-in
-pages, PDFs, or hosted citation offsets. HTTP errors such as 429 are reported
-as errors. Page content is untrusted input. No gateway credentials, browser
-cookies, or client headers are sent to page origins. As with attachment fetches,
-authenticated clients can reach runtime-accessible HTTP(S) destinations;
-restrict the gateway's network access where internal destinations must be blocked.
+This feature adds no standalone `web_fetch` implementation. Existing caller
+server-tool declarations still pass through subject to upstream support. Page
+text remains untrusted input, and access depends on GitHub's model/account
+capabilities and remote browsing service, not the proxy's access to page origins.
 
 ### Model control
 

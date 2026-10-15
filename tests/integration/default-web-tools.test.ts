@@ -3,11 +3,14 @@ import "./data-dir"
 import { afterEach, beforeEach, expect, test } from "bun:test"
 
 import { state } from "~/lib/state"
+import { executeWebSearch } from "~/services/copilot/mcp-web-search"
 
 import { initializeTestState, postJSON, useIntegrationFixture } from "./setup"
 
 const originalFetch = globalThis.fetch
 const destinations: Array<{ host: string; path: string; status: number }> = []
+const pageOriginAttempts: Array<string> = []
+const openedUrls: Array<string> = []
 let model = ""
 
 beforeEach(async () => {
@@ -28,12 +31,40 @@ beforeEach(async () => {
       "Live default-web-tools verification requires a tool-capable Messages model",
     )
   destinations.length = 0
+  pageOriginAttempts.length = 0
+  openedUrls.length = 0
   globalThis.fetch = (async (
     input: string | URL | Request,
     init?: RequestInit,
   ) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
+    if (
+      url.hostname !== "api.github.com"
+      && !url.hostname.endsWith("githubcopilot.com")
+    ) {
+      pageOriginAttempts.push(url.hostname)
+      throw new Error("Web tool attempted forbidden page-origin egress")
+    }
     const response = await originalFetch(input, init)
+    if (
+      url.pathname === "/responses"
+      && response.ok
+      && response.headers.get("content-type")?.includes("application/json")
+    ) {
+      const value = (await response.clone().json()) as {
+        output?: Array<{
+          type?: string
+          action?: { type?: string; url?: string }
+        }>
+      }
+      for (const item of value.output ?? [])
+        if (
+          item.type === "web_search_call"
+          && item.action?.type === "open_page"
+          && item.action.url
+        )
+          openedUrls.push(item.action.url)
+    }
     destinations.push({
       host: url.hostname,
       path: url.pathname,
@@ -47,7 +78,7 @@ afterEach(() => {
 })
 useIntegrationFixture()
 
-test("live defaults search and fetch without client tools", async () => {
+test("live default web search searches and opens pages entirely on GitHub", async () => {
   const response = await postJSON("/v1/messages", {
     model,
     max_tokens: 2048,
@@ -56,7 +87,7 @@ test("live defaults search and fetch without client tools", async () => {
       {
         role: "user",
         content:
-          "Use the provided web search tool to search for IANA example domains. Then separately use the provided web fetch tool to retrieve https://example.com/ directly. Report its page title and one sentence from the fetched page. Do not answer from memory; actually use both tools. Keep the answer under 80 words.",
+          "Use the provided web search tool twice: first search for IANA example domains with a plain query without URLs. Then use the same web search tool to open https://example.com/ and read its page. Report the title and opening sentence from the opened page. Do not answer from memory. Keep the answer under 80 words.",
       },
     ],
   })
@@ -69,14 +100,16 @@ test("live defaults search and fetch without client tools", async () => {
   ).toBe(true)
   expect(
     destinations.some(
-      (item) => item.host === "example.com" && item.status === 200,
+      (item) => item.path === "/responses" && item.status === 200,
     ),
   ).toBe(true)
   expect(body).toContain("Example Domain")
+  expect(openedUrls).toContain("https://example.com/")
+  expect(pageOriginAttempts).toEqual([])
   expect(body).not.toContain('"name":"_copilot_web_')
 }, 180_000)
 
-test("live native Responses fetch runs without client tools", async () => {
+test("live Responses clients open pages on GitHub without client configuration", async () => {
   const candidates =
     state.models?.data.filter(
       (entry) =>
@@ -92,7 +125,7 @@ test("live native Responses fetch runs without client tools", async () => {
   const response = await postJSON("/v1/responses", {
     model: selected.id,
     input:
-      "Use the provided web fetch function to retrieve https://example.com/ now. Report its page title and opening sentence based on the fetched content. Do not search or answer from memory. Keep your answer under 60 words.",
+      "Use the provided web search function to open https://example.com/ now. Report its title and opening sentence based on the opened page. Do not answer from memory. Keep your answer under 60 words.",
     max_output_tokens: 2048,
     stream: false,
   })
@@ -103,18 +136,15 @@ test("live native Responses fetch runs without client tools", async () => {
       (item) => item.path === "/responses" && item.status === 200,
     ),
   ).toBe(true)
-  expect(
-    destinations.some(
-      (item) => item.host === "example.com" && item.status === 200,
-    ),
-  ).toBe(true)
+  expect(openedUrls).toContain("https://example.com/")
+  expect(pageOriginAttempts).toEqual([])
   expect(body).toContain("Example Domain")
   expect(body).not.toContain(
-    '"type":"function_call","name":"_copilot_web_fetch"',
+    '"type":"function_call","name":"_copilot_web_search"',
   )
 }, 180_000)
 
-test("live streaming fetch synthesizes an answer with one terminal", async () => {
+test("live streaming page reading stays GitHub-only with one terminal", async () => {
   const response = await postJSON("/v1/messages", {
     model,
     max_tokens: 1536,
@@ -123,18 +153,24 @@ test("live streaming fetch synthesizes an answer with one terminal", async () =>
       {
         role: "user",
         content:
-          "Use the provided web fetch tool to retrieve https://example.com/ now. Report the page title and the opening sentence from the fetched content. Do not search or answer from memory.",
+          "Use the provided web search tool to open https://example.com/ now. Report the page title and opening sentence from that page. Do not answer from memory.",
       },
     ],
   })
   const body = await response.text()
   expect(response.status).toBe(200)
-  expect(
-    destinations.some(
-      (item) => item.host === "example.com" && item.status === 200,
-    ),
-  ).toBe(true)
+  expect(openedUrls).toContain("https://example.com/")
+  expect(pageOriginAttempts).toEqual([])
   expect(body).toContain("Example Domain")
   expect(body.match(/event: message_stop/g)).toHaveLength(1)
   expect(body).not.toContain('"name":"_copilot_web_')
+}, 180_000)
+
+test("live page-reading failures have no local fallback or invented content", async () => {
+  const result = await executeWebSearch(
+    "Open https://copilot-fetch-probe-does-not-exist.invalid/page and report the retrieved page text.",
+  )
+  expect(result).toMatch(/^Web search (?:failed|error):/)
+  expect(pageOriginAttempts).toEqual([])
+  expect(destinations.some((item) => item.path === "/responses")).toBe(true)
 }, 180_000)

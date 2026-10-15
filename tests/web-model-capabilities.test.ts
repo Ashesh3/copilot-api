@@ -33,7 +33,7 @@ test("known text-only models do not receive automatic functions", async () => {
     ],
   }
   const payload = { model: "text-only", input: "hello" }
-  await runWithWebTools(payload, "model-test", () =>
+  await runWithWebTools(payload, () =>
     runManagedWebRequest({
       protocol: "responses",
       payload,
@@ -77,7 +77,7 @@ test("selected account tool support wins over merged model metadata", async () =
     await runWithRoutedModelSelection(
       { model: account.modelsData[0], accountPin: { accountId: account.id } },
       () =>
-        runWithWebTools(payload, "model-test", () =>
+        runWithWebTools(payload, () =>
           runManagedWebRequest({
             protocol: "responses",
             payload,
@@ -89,7 +89,7 @@ test("selected account tool support wins over merged model metadata", async () =
         ),
     )
     await withActiveAccount(account, () =>
-      runWithWebTools(payload, "model-test", () =>
+      runWithWebTools(payload, () =>
         runManagedWebRequest({
           protocol: "responses",
           payload,

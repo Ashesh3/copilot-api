@@ -97,7 +97,7 @@ import {
   finalizeNativeResponsesRequest,
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
-import { runWithWebTools, webScopeKey } from "~/services/web/tool-context"
+import { runWithWebTools } from "~/services/web/tool-context"
 
 import { createResponsesAttachmentCache } from "./attachment-cache"
 import {
@@ -403,10 +403,6 @@ async function handleResponsesWebSocketMessage(
                 ...payload,
                 ...(reviewModel ? { model: "codex-auto-review" } : {}),
               },
-              webScopeKey(
-                ws.data.fallbackCredentialScope ?? "",
-                affinity?.threadKey ?? affinity?.key ?? "websocket",
-              ),
               execute,
             ),
         )

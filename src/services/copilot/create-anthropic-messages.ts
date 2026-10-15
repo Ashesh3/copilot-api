@@ -20,7 +20,6 @@ import {
   createRetryBudget,
   PRE_HEADER_MAX_DELAY_SECONDS,
 } from "~/services/copilot/transport-retry"
-import { managedFetchBeta } from "~/services/web/tool-context"
 import { runManagedWebRequest } from "~/services/web/tool-loop"
 
 import { fitAnthropicCompactionPayload } from "./compaction-payload"
@@ -183,17 +182,10 @@ export const createAnthropicMessages = async (
     disabled: options?.compaction,
     accountId: operationOptions.routedAccountPin.accountId,
     signal: options?.signal,
-    send: async (body, managed) =>
+    send: async (body) =>
       await dispatchAnthropicMessages({
         ...dispatchOptions,
         preparedBody: body,
-        preparedHeaders: {
-          ...dispatchOptions.preparedHeaders,
-          anthropicBeta: managedFetchBeta(
-            dispatchOptions.preparedHeaders.anthropicBeta,
-            managed,
-          ),
-        },
       }),
   })) as CreateAnthropicMessagesReturn
 }

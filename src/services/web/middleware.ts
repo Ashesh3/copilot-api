@@ -1,13 +1,6 @@
 import type { MiddlewareHandler } from "hono"
 
-import { extractRequestCredential } from "~/lib/credential-resolver"
-import {
-  getRoutingAffinity,
-  resolveClaudeRoutingAffinity,
-  resolveResponsesRequestRoutingAffinity,
-} from "~/lib/routing-affinity"
-
-import { isRecord, runWithWebTools, webScopeKey } from "./tool-context"
+import { isRecord, runWithWebTools } from "./tool-context"
 
 export const webToolsMiddleware: MiddlewareHandler = async (c, next) => {
   const path = new URL(c.req.url).pathname
@@ -28,16 +21,5 @@ export const webToolsMiddleware: MiddlewareHandler = async (c, next) => {
     await next()
     return
   }
-  const headerAffinity = getRoutingAffinity()
-  const affinity =
-    resolveResponsesRequestRoutingAffinity(
-      payload.client_metadata,
-      headerAffinity,
-    ) ?? resolveClaudeRoutingAffinity(payload.metadata)
-  const thread = affinity?.threadKey ?? affinity?.key ?? "http"
-  await runWithWebTools(
-    payload,
-    webScopeKey(extractRequestCredential(c.req.raw) ?? "", thread),
-    next,
-  )
+  await runWithWebTools(payload, next)
 }

@@ -151,7 +151,7 @@ beforeEach(async () => {
   await seedProtocolDatabase()
 })
 
-test("adapts basic web fetch while preserving other native server tools and the caller", async () => {
+test("preserves caller server tools without implementing local web fetch", async () => {
   const tools = [
     {
       type: "web_fetch_20250910",
@@ -212,11 +212,7 @@ test("adapts basic web fetch while preserving other native server tools and the 
 
   expect(response.status).toBe(200)
   const preparedTools = nativeBodies[0]?.tools as Array<Record<string, unknown>>
-  expect(preparedTools[0]).toMatchObject({
-    name: "web_fetch",
-    input_schema: { type: "object" },
-  })
-  expect(preparedTools[0]).not.toHaveProperty("type")
+  expect(preparedTools[0]).toEqual(tools[0])
   expect(preparedTools.slice(1, 3)).toEqual(tools.slice(1))
   expect(payload).toEqual(snapshot)
 })

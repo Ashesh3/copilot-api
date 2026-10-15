@@ -138,6 +138,30 @@ test("serves Codex Desktop standalone web search through Copilot MCP", async () 
   expect(params.arguments?.query).toContain("Find current releases.")
 })
 
+test("Codex ordinary search ignores unrelated URLs in prior conversation context", async () => {
+  const response = await server.request("/v1/alpha/search", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer protocol-fixture-gateway-key",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      id: "search-now",
+      model: "any-model",
+      input: [
+        {
+          role: "assistant",
+          content: "Earlier we opened https://old.test/closed",
+        },
+      ],
+      commands: { search_query: [{ q: "latest Bun release" }] },
+    }),
+  })
+  expect(response.status).toBe(200)
+  expect(await response.text()).toContain("https://example.com/current")
+  expect(mcpRequests).toHaveLength(2)
+})
+
 test("rejects malformed Codex search requests before calling MCP", async () => {
   const response = await server.request("/v1/alpha/search", {
     method: "POST",
@@ -153,6 +177,89 @@ test("rejects malformed Codex search requests before calling MCP", async () => {
     error: { message: "id is required", type: "invalid_request_error" },
   })
   expect(fetchMock).not.toHaveBeenCalled()
+})
+
+test("Codex open forwards to GitHub hosted browsing without page-origin access", async () => {
+  const previous = globalThis.fetch
+  const requests: Array<{ url: URL; body: Record<string, unknown> }> = []
+  const account = tokenPool.getFirstHealthyAccount()
+  if (!account) throw new Error("Missing fixture account")
+  account.models.add("hosted-browser")
+  account.modelsData = [
+    {
+      id: "hosted-browser",
+      object: "model",
+      name: "Browser",
+      version: "1",
+      vendor: "openai",
+      supported_endpoints: ["/responses"],
+      capabilities: {
+        family: "gpt",
+        object: "model_capabilities",
+        supports: { web_search: true },
+        tokenizer: "cl100k_base",
+        type: "chat",
+      },
+    },
+  ]
+  tokenPool.rebuildModelIndex()
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    if (!url.hostname.endsWith("githubcopilot.com"))
+      throw new Error("Forbidden page origin")
+    requests.push({
+      url,
+      body: JSON.parse(
+        typeof init?.body === "string" ? init.body : "{}",
+      ) as Record<string, unknown>,
+    })
+    return Promise.resolve(
+      Response.json({
+        status: "completed",
+        output: [
+          {
+            type: "web_search_call",
+            status: "completed",
+            action: { type: "open_page", url: "https://pages.test/" },
+          },
+          {
+            type: "message",
+            role: "assistant",
+            content: [
+              {
+                type: "output_text",
+                text: '{"status":"ok","content":"HOSTED_PAGE"}',
+              },
+            ],
+          },
+        ],
+      }),
+    )
+  }) as typeof fetch
+  try {
+    const response = await server.request("/v1/alpha/search", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer protocol-fixture-gateway-key",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        id: "open-call",
+        model: "hosted-browser",
+        commands: { open: [{ ref_id: "https://pages.test/" }] },
+      }),
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ encrypted_output: null })
+    expect(requests).toHaveLength(1)
+    expect(requests[0].url.pathname).toBe("/responses")
+    expect(requests[0].body).toMatchObject({
+      tools: [{ type: "web_search", external_web_access: true }],
+    })
+  } finally {
+    // eslint-disable-next-line require-atomic-updates -- This fixture restores its own serially installed fetch wrapper.
+    globalThis.fetch = previous
+  }
 })
 
 test("selects the Codex model account for standalone multi-token search", async () => {

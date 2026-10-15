@@ -25,10 +25,10 @@ async function collect(result: WebResponse) {
   return output
 }
 
-test("Messages streams fetch continuations with one terminal and preserved signed thinking", async () => {
+test("Messages streams page-reading continuations with one terminal and preserved signed thinking", async () => {
   let sends = 0
   const payload = { model: "fixture", messages: [], stream: true }
-  const output = await runWithWebTools(payload, "scope", async () =>
+  const output = await runWithWebTools(payload, async () =>
     collect(
       await runManagedWebRequest({
         protocol: "messages",
@@ -68,7 +68,7 @@ test("Messages streams fetch continuations with one terminal and preserved signe
                 content_block: {
                   type: "tool_use",
                   id: "t1",
-                  name: "_copilot_web_fetch",
+                  name: "_copilot_web_search",
                   input: {},
                 },
               },
@@ -77,7 +77,7 @@ test("Messages streams fetch continuations with one terminal and preserved signe
                 index: 1,
                 delta: {
                   type: "input_json_delta",
-                  partial_json: '{"url":"https://example.com"}',
+                  partial_json: '{"query":"Open https://example.com"}',
                 },
               },
               { type: "content_block_stop", index: 1 },
@@ -96,7 +96,7 @@ test("Messages streams fetch continuations with one terminal and preserved signe
                 {
                   type: "tool_use",
                   id: "t1",
-                  input: { url: "https://example.com" },
+                  input: { query: "Open https://example.com" },
                 },
               ],
             },
@@ -165,14 +165,14 @@ test("Messages streams fetch continuations with one terminal and preserved signe
   ).toBe(true)
 })
 
-test("Chat waits for fragmented tool names and returns a client call beside fetch evidence", async () => {
+test("Chat waits for fragmented tool names and returns a client call beside page evidence", async () => {
   const payload = {
     model: "fixture",
     messages: [],
     stream: true,
     tools: [{ type: "function", function: { name: "read_file" } }],
   }
-  const output = await runWithWebTools(payload, "scope", async () =>
+  const output = await runWithWebTools(payload, async () =>
     collect(
       await runManagedWebRequest({
         protocol: "chat",
@@ -209,8 +209,8 @@ test("Chat waits for fragmented tool names and returns a client call beside fetc
                       {
                         index: 0,
                         function: {
-                          name: "fetch",
-                          arguments: '{"url":"https://example.com"}',
+                          name: "search",
+                          arguments: '{"query":"Open https://example.com"}',
                         },
                       },
                     ],
@@ -287,7 +287,7 @@ test("Chat does not replay a client call already streamed before the managed cal
     stream: true,
     tools: [{ type: "function", function: { name: "read_file" } }],
   }
-  const output = await runWithWebTools(payload, "scope", async () =>
+  const output = await runWithWebTools(payload, async () =>
     collect(
       await runManagedWebRequest({
         protocol: "chat",
@@ -305,8 +305,8 @@ test("Chat does not replay a client call already streamed before the managed cal
               id: "fetch",
               type: "function",
               function: {
-                name: "_copilot_web_fetch",
-                arguments: '{"url":"https://example.com"}',
+                name: "_copilot_web_search",
+                arguments: '{"query":"Open https://example.com"}',
               },
             }),
             chunk({ index: 0, function: { arguments: '"README"}' } }),
@@ -340,12 +340,12 @@ test("Chat does not replay a client call already streamed before the managed cal
   expect(calls.every((c) => c.index === 0)).toBe(true)
 })
 
-test("Messages keeps mixed client blocks in index order after holding a fetch", async () => {
+test("Messages keeps mixed client blocks in index order after holding a page read", async () => {
   const payload = {
     stream: true,
     tools: [{ name: "read_file", input_schema: {} }],
   }
-  const output = await runWithWebTools(payload, "scope", async () =>
+  const output = await runWithWebTools(payload, async () =>
     collect(
       await runManagedWebRequest({
         protocol: "messages",
@@ -359,8 +359,8 @@ test("Messages keeps mixed client blocks in index order after holding a fetch", 
               content_block: {
                 type: "tool_use",
                 id: "web",
-                name: "_copilot_web_fetch",
-                input: { url: "https://example.com" },
+                name: "_copilot_web_search",
+                input: { query: "Open https://example.com" },
               },
             },
             { type: "content_block_stop", index: 0 },
@@ -403,10 +403,10 @@ test("Messages keeps mixed client blocks in index order after holding a fetch", 
   ).toMatchObject({ delta: { partial_json: '{"path":"README"}' } })
 })
 
-test("Responses retains terminal output and reindexes continued text after a fetch", async () => {
+test("Responses retains terminal output and reindexes continued text after a page read", async () => {
   let sends = 0
-  const payload = { model: "fixture", input: "fetch", stream: true }
-  const output = await runWithWebTools(payload, "scope", async () =>
+  const payload = { model: "fixture", input: "open page", stream: true }
+  const output = await runWithWebTools(payload, async () =>
     collect(
       await runManagedWebRequest({
         protocol: "responses",
@@ -418,8 +418,8 @@ test("Responses retains terminal output and reindexes continued text after a fet
               id: "f1",
               type: "function_call",
               call_id: "tool1",
-              name: "_copilot_web_fetch",
-              arguments: '{"url":"https://example.com"}',
+              name: "_copilot_web_search",
+              arguments: '{"query":"Open https://example.com"}',
             }
             return events([
               { type: "response.created", response: { id: "r1" } },
@@ -507,11 +507,11 @@ test("Responses retains terminal output and reindexes continued text after a fet
 })
 
 test.each(["response.incomplete", "response.failed"])(
-  "Responses %s after fetch preserves the root id, aggregate usage, and prior output",
+  "Responses %s after page reading preserves the root id, aggregate usage, and prior output",
   async (terminal) => {
     let sends = 0
-    const payload = { stream: true, input: "fetch" }
-    const output = await runWithWebTools(payload, "scope", async () =>
+    const payload = { stream: true, input: "open page" }
+    const output = await runWithWebTools(payload, async () =>
       collect(
         await runManagedWebRequest({
           protocol: "responses",
@@ -523,8 +523,8 @@ test.each(["response.incomplete", "response.failed"])(
               id: "f",
               type: "function_call",
               call_id: "call",
-              name: "_copilot_web_fetch",
-              arguments: '{"url":"https://example.com"}',
+              name: "_copilot_web_search",
+              arguments: '{"query":"Open https://example.com"}',
             }
             return Promise.resolve(
               events([
@@ -584,10 +584,10 @@ test.each(["response.incomplete", "response.failed"])(
   },
 )
 
-test("unterminated streams do not execute a fetch or announce success", async () => {
+test("unterminated streams do not execute page reading or announce success", async () => {
   let executed = false
   const payload = { stream: true }
-  const result = await runWithWebTools(payload, "scope", async () =>
+  const result = await runWithWebTools(payload, async () =>
     collect(
       await runManagedWebRequest({
         protocol: "messages",
@@ -601,7 +601,7 @@ test("unterminated streams do not execute a fetch or announce success", async ()
               content_block: {
                 type: "tool_use",
                 id: "incomplete",
-                name: "_copilot_web_fetch",
+                name: "_copilot_web_search",
                 input: {},
               },
             },

@@ -21,7 +21,7 @@ test("executes owned tools and replays all thinking before final synthesis", asy
     messages: [{ role: "user", content: "fetch example" }],
   }
   const requests: Array<Record<string, unknown>> = []
-  const result = await runWithWebTools(source, "scope", () =>
+  const result = await runWithWebTools(source, () =>
     runManagedWebRequest({
       protocol: "messages",
       payload: source,
@@ -33,8 +33,8 @@ test("executes owned tools and replays all thinking before final synthesis", asy
             {
               type: "tool_use",
               id: "fetch-1",
-              name: "_copilot_web_fetch",
-              input: { url: "https://example.com" },
+              name: "_copilot_web_search",
+              input: { query: "Open https://example.com" },
             },
           ])
         return {
@@ -75,7 +75,7 @@ test("mixed calls preserve the client call and expose completed web evidence", a
     tools: [{ name: "read_file", input_schema: { type: "object" } }],
   }
   let sends = 0
-  const result = await runWithWebTools(source, "scope", () =>
+  const result = await runWithWebTools(source, () =>
     runManagedWebRequest({
       protocol: "messages",
       payload: source,
@@ -86,8 +86,8 @@ test("mixed calls preserve the client call and expose completed web evidence", a
           {
             type: "tool_use",
             id: "fetch-1",
-            name: "_copilot_web_fetch",
-            input: { url: "https://example.com" },
+            name: "_copilot_web_search",
+            input: { query: "Open https://example.com" },
           },
           {
             type: "tool_use",
@@ -132,15 +132,15 @@ test.each([
     id: "fn1",
     call_id: "client",
     namespace: "client",
-    name: "_copilot_web_fetch",
+    name: "_copilot_web_search",
     arguments: "{}",
   },
 ])(
   "Responses returns mixed client calls without an unfulfilled continuation: %j",
   async (clientCall) => {
     let sends = 0
-    const payload = { input: "fetch" }
-    const result = await runWithWebTools(payload, "scope", () =>
+    const payload = { input: "open page" }
+    const result = await runWithWebTools(payload, () =>
       runManagedWebRequest({
         protocol: "responses",
         payload,
@@ -152,8 +152,8 @@ test.each([
               {
                 type: "function_call",
                 call_id: "web",
-                name: "_copilot_web_fetch",
-                arguments: '{"url":"https://example.com"}',
+                name: "_copilot_web_search",
+                arguments: '{"query":"Open https://example.com"}',
               },
               clientCall,
             ],
@@ -169,8 +169,8 @@ test.each([
 
 test("Responses retains reasoning and does not return owned function calls to clients", async () => {
   let sends = 0
-  const source = { model: "fixture", input: "fetch", stream: false }
-  const result = await runWithWebTools(source, "scope", () =>
+  const source = { model: "fixture", input: "open page", stream: false }
+  const result = await runWithWebTools(source, () =>
     runManagedWebRequest({
       protocol: "responses",
       payload: source,
@@ -185,13 +185,13 @@ test("Responses retains reasoning and does not return owned function calls to cl
               {
                 type: "function_call",
                 call_id: "f1",
-                name: "_copilot_web_fetch",
-                arguments: '{"url":"https://example.com"}',
+                name: "_copilot_web_search",
+                arguments: '{"query":"Open https://example.com"}',
               },
             ],
           }
         expect(payload.input).toMatchObject([
-          { role: "user", content: "fetch" },
+          { role: "user", content: "open page" },
           { type: "reasoning", encrypted_content: "signed" },
           { type: "function_call", call_id: "f1" },
           { type: "function_call_output", call_id: "f1", output: "page" },

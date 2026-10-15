@@ -30,6 +30,8 @@ import { copilotBaseUrl } from "~/services/copilot/copilot-client"
 import { createCopilotTransportInit } from "~/services/copilot/transport-options"
 import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
 
+import { executeHostedPageRead, requestedWebPages } from "./hosted-web-search"
+
 // --- MCP Session State ---
 
 interface McpSessionState {
@@ -71,6 +73,7 @@ const MCP_WEB_SEARCH_TOOL = "web_search"
 const MCP_SESSION_RETRY_STATUSES = new Set([401, 403, 404])
 
 interface McpCredentials {
+  account?: Account
   baseUrl: string
   cacheKey: string
   githubToken: string
@@ -85,6 +88,8 @@ interface McpFetchOptions {
 export interface WebSearchExecutionOptions {
   modelId?: string
   sessionId?: string
+  /** Explicit command targets; [] keeps prior-context URLs from changing search routing. */
+  pageUrls?: ReadonlyArray<string>
 }
 
 export interface WebSearchToolOptions {
@@ -176,6 +181,7 @@ const getMcpCredentials = async (
   }
 
   return {
+    account,
     githubToken,
     baseUrl: account ? tokenPool.getBaseUrl(account) : copilotBaseUrl(),
     cacheKey: account ? mcpCredentialCacheKey(account) : "default",
@@ -384,6 +390,13 @@ const executeWebSearchTurn = async (
   try {
     signal?.throwIfAborted()
     const credentials = await getMcpCredentials(options)
+    const urls = options.pageUrls ?? requestedWebPages(query)
+    if (urls.length > 0)
+      return await executeHostedPageRead(query, urls, {
+        account: credentials.account,
+        modelId: options.modelId,
+        signal,
+      })
     // Capture session ID locally so concurrent calls don't interfere
     const sessionId = await ensureSession(credentials)
 
@@ -567,7 +580,7 @@ const describeWebSearch = (options: WebSearchToolOptions): string => {
   }
 
   return [
-    "Search the web for current information. Always include the source URLs as markdown hyperlinks in the answer.",
+    "Search the web for current information, or open/read a specific HTTP(S) URL by including its full URL and the information to extract in query. Page reading runs on GitHub, not this gateway, and returns extracted content rather than raw HTML. Always include the source URLs as markdown hyperlinks in the answer.",
     ...constraints,
   ].join(" ")
 }
@@ -578,7 +591,8 @@ const createWebSearchParameters = (
   const properties: Record<string, unknown> = {
     query: {
       type: "string",
-      description: "A clear, standalone natural-language search request",
+      description:
+        "A standalone search request, or an exact HTTP(S) URL with instructions for reading that page",
     },
   }
 
@@ -688,6 +702,8 @@ export const buildWebSearchQuery = (
     if (typeof args.query === "string" && args.query.length > 0) {
       query = args.query
     }
+    if (typeof args.url === "string" && args.url.trim())
+      query = `Open this exact URL: ${JSON.stringify(args.url)}\n${query}`
     argumentOptions = getWebSearchToolOptions(args)
   } catch {
     // Some providers return the query as a bare string. Keep it verbatim.
