@@ -20,6 +20,7 @@ import { selectResponsesUpstreamEndpoint } from "~/routes/responses/handler"
 import { readResponsesRequestJson } from "~/routes/responses/request-json"
 import { server } from "~/server"
 
+import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
   PROTOCOL_GATEWAY_KEY,
   seedProtocolDatabase,
@@ -643,7 +644,7 @@ test("preserves future native Responses data without fallback tool rewrites", as
 
   expect(response.status).toBe(200)
   expect(lastUpstreamPath).toBe("/responses")
-  expect(lastUpstreamPayload).toMatchObject({
+  expect(clientToolsPayload(lastUpstreamPayload ?? {})).toMatchObject({
     future_top_level: { retained: [1, 2] },
     background: { future: true },
     previous_response_id: "resp_previous",
@@ -685,7 +686,7 @@ test("preserves future native Responses data on the streaming first wire", async
   await response.text()
 
   expect(lastUpstreamPath).toBe("/responses")
-  expect(lastUpstreamPayload).toMatchObject({
+  expect(clientToolsPayload(lastUpstreamPayload ?? {})).toMatchObject({
     stream: true,
     future_top_level: { retained: true },
     previous_response_id: "resp_stream_previous",
@@ -705,7 +706,7 @@ test("strips native HTTP warmup control before the Responses wire", async () => 
 
   expect(response.status).toBe(200)
   expect(lastUpstreamPath).toBe("/responses")
-  expect(lastUpstreamPayload).toMatchObject({
+  expect(clientToolsPayload(lastUpstreamPayload ?? {})).toMatchObject({
     input: "warmup",
     future_top_level: { retained: true },
     store: false,
@@ -723,7 +724,7 @@ test("omits future tools on the best-effort fallback boundary", async () => {
 
   expect(response.status).toBe(200)
   expect(lastUpstreamPath).toBe("/chat/completions")
-  expect(lastUpstreamPayload?.tools).toBeUndefined()
+  expect(clientToolsPayload(lastUpstreamPayload ?? {}).tools).toBeUndefined()
 })
 
 test("normalizes Responses controls before Messages fallback conversion", async () => {

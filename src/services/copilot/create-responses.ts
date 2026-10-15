@@ -17,6 +17,7 @@ import {
   createRetryBudget,
   PRE_HEADER_MAX_DELAY_SECONDS,
 } from "~/services/copilot/transport-retry"
+import { runManagedWebRequest } from "~/services/web/tool-loop"
 
 import {
   fitResponsesCompactionPayload,
@@ -529,8 +530,30 @@ function shouldFitResponsesCompactionPayload(
 }
 
 // Compatibility preparation adds one guarded branch to the existing request pipeline.
-// eslint-disable-next-line complexity
+
 export const createResponses = async (
+  payload: ResponsesPayload,
+  options: ResponsesRequestOptions,
+): Promise<CreateResponsesReturn> => {
+  const pinnedOptions = {
+    ...options,
+    routedAccountPin: options.routedAccountPin ?? {},
+  }
+  return (await runManagedWebRequest({
+    protocol: "responses",
+    payload,
+    disabled: options.compaction || isResponsesCompactionRequest(payload),
+    accountId: pinnedOptions.routedAccountPin.accountId,
+    signal: options.signal,
+    send: async (body) =>
+      (await createResponsesCore(body as ResponsesPayload, pinnedOptions)) as
+        | Record<string, unknown>
+        | AsyncIterable<import("~/services/web/tool-loop").WebEvent>,
+  })) as CreateResponsesReturn
+}
+
+// eslint-disable-next-line complexity -- Provider request preparation and compatibility retries remain together.
+const createResponsesCore = async (
   payload: ResponsesPayload,
   options: ResponsesRequestOptions,
 ): Promise<CreateResponsesReturn> => {

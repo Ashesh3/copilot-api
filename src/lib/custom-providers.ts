@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- Existing provider lifecycle plus shared web-tool dispatch. */
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
@@ -63,6 +64,7 @@ import {
 } from "~/lib/storage/request-snapshot"
 import { getStorageRuntime } from "~/lib/storage/runtime"
 import { isAbortLikeError } from "~/services/copilot/transport-retry"
+import { runManagedWebRequest } from "~/services/web/tool-loop"
 
 export type CustomProviderModelKind = "chat" | "embedding"
 
@@ -620,6 +622,26 @@ function buildChatPayload(
 }
 
 export async function createCustomProviderChatCompletions(
+  reference: CustomProviderModelReference,
+  payload: ChatCompletionsPayload,
+  options?: CustomProviderRequestOptions,
+) {
+  return (await runManagedWebRequest({
+    protocol: "chat",
+    payload: payload as unknown as Record<string, unknown>,
+    signal: options?.signal,
+    send: async (body) =>
+      (await createCustomProviderChatCompletionsCore(
+        reference,
+        body as unknown as ChatCompletionsPayload,
+        options,
+      )) as
+        | Record<string, unknown>
+        | AsyncIterable<{ data?: string; event?: string }>,
+  })) as Awaited<ReturnType<typeof createCustomProviderChatCompletionsCore>>
+}
+
+async function createCustomProviderChatCompletionsCore(
   reference: CustomProviderModelReference,
   payload: ChatCompletionsPayload,
   options?: CustomProviderRequestOptions,

@@ -22,6 +22,7 @@ import {
 } from "~/routes/responses/websocket"
 import { server } from "~/server"
 
+import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
   PROTOCOL_GATEWAY_KEY,
   seedProtocolDatabase,
@@ -1402,7 +1403,7 @@ describe("custom-provider models over the Responses WebSocket", () => {
     const dispatched = providerRequests()
     expect(dispatched).toHaveLength(1)
     expect(dispatched[0].body.model).toBe(CUSTOM_MODEL)
-    expect(toolNames(dispatched[0].body)).toEqual([
+    expect(toolNames(clientToolsPayload(dispatched[0].body))).toEqual([
       "collaboration__spawn_agent",
       "exec",
       "mcp__cua_repl__js",

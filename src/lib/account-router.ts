@@ -172,6 +172,11 @@ export function runWithRoutedModelSelection<T>(
   return selectedRoutedAccountStorage.run(selection.accountPin, callback)
 }
 
+/** The admitted account is authoritative before the first transport send. */
+export function getSelectedRoutedAccountId(): number | undefined {
+  return selectedRoutedAccountStorage.getStore()?.accountId
+}
+
 interface AccountFetchOptions {
   account: Account
   enforceEndpointAuthority?: boolean

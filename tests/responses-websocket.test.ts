@@ -1,5 +1,4 @@
 import * as Sentry from "@sentry/bun"
-/* eslint-disable max-lines, max-lines-per-function */
 import {
   afterAll,
   afterEach,
@@ -11,6 +10,7 @@ import {
   spyOn,
   test,
 } from "bun:test"
+/* eslint-disable max-lines, max-lines-per-function */
 import consola from "consola"
 
 import { createAccountDistributionRepository } from "~/lib/storage/account-distribution-repository"
@@ -69,6 +69,7 @@ import {
   RESPONSES_RECOVERY_MARGIN_BYTES,
 } from "../src/services/copilot/responses-payload-recovery"
 import { sanitizeResponsesStreamEvent } from "../src/services/copilot/responses-terminal-sanitizer"
+import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
   useProtocolDatabase,
   seedProtocolDatabase,
@@ -1968,7 +1969,7 @@ describe("responses websocket message handling", () => {
             "Bearer ws-model-switch-token-1",
           ],
       )
-      expect(lastRequestBody).toMatchObject({
+      expect(clientToolsPayload(lastRequestBody ?? {})).toMatchObject({
         model: nextModel,
         client_metadata: { session_id: thread, thread_id: thread },
       })
@@ -2421,7 +2422,7 @@ describe("responses websocket message handling", () => {
       key: firstAffinity,
       source: "codex_metadata",
     })
-    expect(lastRequestBody).toMatchObject({
+    expect(clientToolsPayload(lastRequestBody ?? {})).toMatchObject({
       model: modelA,
       client_metadata: { session_id: firstAffinity },
     })
@@ -2505,7 +2506,7 @@ describe("responses websocket message handling", () => {
       source: "codex_metadata",
       threadKey: "original-thread",
     })
-    expect(lastRequestBody).toMatchObject({
+    expect(clientToolsPayload(lastRequestBody ?? {})).toMatchObject({
       model,
       client_metadata: {
         session_id: firstAffinity,
@@ -2944,7 +2945,7 @@ describe("responses websocket message handling", () => {
     expect(ws.sent.some((frame) => frame.includes("Hello from Messages"))).toBe(
       true,
     )
-    expect(lastRequestBody).toMatchObject({
+    expect(clientToolsPayload(lastRequestBody ?? {})).toMatchObject({
       model: "gpt-5.4",
       max_tokens: 4096,
       messages: [{ role: "user", content: "Hello" }],
@@ -3288,7 +3289,7 @@ describe("responses websocket message handling", () => {
     )
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(lastRequestBody).toMatchObject({
+    expect(clientToolsPayload(lastRequestBody ?? {})).toMatchObject({
       store: false,
       tools: [{ type: "code_interpreter", future: { retained: true } }],
       context_management: [{ type: "future_unknown" }],
@@ -3338,7 +3339,7 @@ describe("responses websocket message handling", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(ws.data.closed).toBe(false)
     expect(ws.data.activeTurns.size).toBe(0)
-    expect(lastRequestBody).toEqual({
+    expect(clientToolsPayload(lastRequestBody ?? {})).toEqual({
       model: "gpt-5.4",
       messages: [
         { role: "assistant", content: "visible summary" },
@@ -3384,7 +3385,7 @@ describe("responses websocket message handling", () => {
 
     expect(searches).toHaveLength(2)
     expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(lastRequestBody).toMatchObject({
+    expect(clientToolsPayload(lastRequestBody ?? {})).toMatchObject({
       stream: false,
       tool_choice: "auto",
     })
@@ -5075,7 +5076,7 @@ describe("responses websocket continuation handling", () => {
       )
 
       expect(fetchMock).toHaveBeenCalledTimes(2)
-      expect(lastRequestBody).toMatchObject({
+      expect(clientToolsPayload(lastRequestBody ?? {})).toMatchObject({
         input: expectedInput,
         instructions: "Keep the stable instructions.",
         metadata: { nested: { source: "first-turn" } },

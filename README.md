@@ -115,6 +115,40 @@ Translated signed Anthropic reasoning uses an opaque round-trip representation
 in `reasoning_opaque`; clients should echo it unchanged with the assistant
 message.
 
+### Web search and page fetch
+
+Ordinary tool-capable inference requests get both web search and web fetch by
+default, without changing client configuration. This includes Messages, Chat
+Completions, Responses HTTP/WebSocket, Google AI, and custom chat providers.
+The gateway executes its own web tools and returns the answer in the client's
+existing protocol; caller-owned tools remain the client's responsibility.
+
+- **Search** uses Copilot MCP and returns a generated answer with source URLs.
+- **Fetch** retrieves the actual HTTP(S) page and returns Markdown (including
+  tables and resolved links), or raw HTML when requested. It does not substitute
+  search summaries for failed requests. Codex `web.run` `open`, `find`, and
+  `click` commands operate on the retrieved page.
+- Fetches are limited to 30 seconds, 10 redirects, and 10 MiB per page. Results
+  default to 5,000 characters, up to 20,000; the returned reference and
+  `next_start_index` allow continued reading. References are credential- and
+  conversation-scoped when the client supplies a session/thread identifier
+  (otherwise credential-scoped), in memory for 15 minutes (eight documents per
+  scope, 64 MiB total).
+- Gateway tool use is bounded to eight searches and eight fetches per request.
+  Explicit fetch declarations can lower `max_uses`, set `allowed_domains` or
+  `blocked_domains` (also checked after redirects), and cap `max_content_tokens`.
+- Explicit no-tool choices, structured-output requests, compaction, permission
+  reviews, and known non-tool models do not receive automatic tools. A forced
+  caller tool choice still wins. Existing hosted search declarations remain
+  supported; client functions named `web_search` or `web_fetch` are not hijacked.
+
+Fetch supports HTML and text-like formats, not browser JavaScript, logged-in
+pages, PDFs, or hosted citation offsets. HTTP errors such as 429 are reported
+as errors. Page content is untrusted input. No gateway credentials, browser
+cookies, or client headers are sent to page origins. As with attachment fetches,
+authenticated clients can reach runtime-accessible HTTP(S) destinations;
+restrict the gateway's network access where internal destinations must be blocked.
+
 ### Model control
 
 - Builds discovery results from the live models available to the authenticated

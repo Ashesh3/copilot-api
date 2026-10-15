@@ -3,8 +3,13 @@ import type { Context } from "hono"
 import { Hono } from "hono"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
+import { extractRequestCredential } from "~/lib/credential-resolver"
 import { setRequestContext } from "~/lib/request-logger"
+import { getRoutingAffinity } from "~/lib/routing-affinity"
 import { executeWebSearch } from "~/services/copilot/mcp-web-search"
+import { webScopeKey } from "~/services/web/tool-context"
+
+import { dispatchWebCommands } from "./web-commands"
 
 export const codexSearchRoutes = new Hono()
 
@@ -123,10 +128,26 @@ codexSearchRoutes.post("/", async (c) => {
     requestedModel: body.model,
   })
 
-  const output = await executeWebSearch(query, c.req.raw.signal, {
-    modelId: body.model,
-    sessionId: body.id,
-  })
+  const affinity = getRoutingAffinity()
+  const output = await dispatchWebCommands(
+    body.commands,
+    webScopeKey(
+      extractRequestCredential(c.req.raw) ?? "",
+      affinity?.threadKey ?? affinity?.key ?? body.id,
+    ),
+    {
+      signal: c.req.raw.signal,
+      search: async (commands) =>
+        await executeWebSearch(
+          buildCodexSearchQuery({ ...body, commands }),
+          c.req.raw.signal,
+          {
+            modelId: body.model as string,
+            sessionId: body.id as string,
+          },
+        ),
+    },
+  )
   setRequestContext(c, { accountId: getLastUsedAccountId() })
   return c.json({ encrypted_output: null, output })
 })

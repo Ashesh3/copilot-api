@@ -22,6 +22,7 @@ import { state } from "../src/lib/state"
 import { getHistoryRuntime } from "../src/lib/telemetry-writer"
 import { getUsageResponse } from "../src/lib/usage-tracker"
 import { server } from "../src/server"
+import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
   PROTOCOL_GATEWAY_KEY,
   seedProtocolDatabase,
@@ -738,7 +739,7 @@ test("preserves tool controls when a chat fallback request has tools", async () 
   )
 
   expect(response.status).toBe(200)
-  const tools = lastUpstreamPayload?.tools as
+  const tools = clientToolsPayload(lastUpstreamPayload ?? {}).tools as
     | Array<Record<string, unknown>>
     | undefined
   expect(tools).toHaveLength(1)
@@ -779,7 +780,7 @@ test("normalizes deprecated Chat controls before Responses fallback translation"
 
   expect(response.status).toBe(200)
   expect(lastUpstreamPath).toBe("/responses")
-  expect(lastUpstreamPayload?.tools).toEqual([
+  expect(clientToolsPayload(lastUpstreamPayload ?? {}).tools).toEqual([
     {
       type: "function",
       name: "legacy_lookup",
@@ -1304,20 +1305,8 @@ test("commits a keepalive while the buffered web-search fallback is pending", as
         messages: [{ role: "user", content: "Search current news." }],
         tools: [
           {
-            type: "function",
-            function: {
-              name: "web_search",
-              parameters: {
-                type: "object",
-                properties: {
-                  blocked_domains: {
-                    type: "array",
-                    items: { type: "string" },
-                    default: ["example.com"],
-                  },
-                },
-              },
-            },
+            type: "web_search",
+            blocked_domains: ["example.com"],
           },
         ],
         stream: true,

@@ -69,6 +69,9 @@ test("application source contains no local traffic or resource limits", () => {
       path.join("src", "lib", "storage", "local-sqlite.ts"),
       path.join("src", "lib", "storage", "types.ts"),
       path.join("src", "lib", "storage", "transfer-records.ts"),
+      // Web content retrieval bounds a separate external I/O tool, as attachments do.
+      path.join("src", "services", "web", "fetch-page.ts"),
+      path.join("src", "services", "web", "types.ts"),
     ]),
   )
   expect(inferenceTimeoutSource).not.toContain("timeoutMs")

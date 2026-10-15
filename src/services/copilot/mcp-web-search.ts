@@ -28,6 +28,7 @@ import { peekStorageRuntime } from "~/lib/storage/runtime"
 import { tokenPool } from "~/lib/token-pool"
 import { copilotBaseUrl } from "~/services/copilot/copilot-client"
 import { createCopilotTransportInit } from "~/services/copilot/transport-options"
+import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
 
 // --- MCP Session State ---
 
@@ -664,13 +665,15 @@ export const createWebSearchAnthropicTool = (tool?: unknown) => {
 }
 
 export const isChatWebSearchFunctionTool = (tool: unknown): boolean =>
-  isRecord(tool)
+  !isCallerOwnedWebSearch("web_search")
+  && isRecord(tool)
   && tool.type === "function"
   && isRecord(tool.function)
   && tool.function.name === MCP_WEB_SEARCH_TOOL
 
 export const isResponsesWebSearchFunctionTool = (tool: unknown): boolean =>
-  isRecord(tool)
+  !isCallerOwnedWebSearch("web_search")
+  && isRecord(tool)
   && tool.type === "function"
   && tool.name === MCP_WEB_SEARCH_TOOL
 

@@ -10,12 +10,15 @@ import {
   buildWebSearchQuery,
   executeWebSearch,
 } from "~/services/copilot/mcp-web-search"
+import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
+import { mixedWebSearchResponse } from "~/services/web/tool-output"
 
 export const MAX_GOOGLE_RESPONSES_WEB_SEARCH_USES = 8
 
 function searchCalls(
   result: ResponsesResult,
 ): Array<ResponseOutputFunctionCall> {
+  if (isCallerOwnedWebSearch("web_search")) return []
   return result.output.filter(
     (item): item is ResponseOutputFunctionCall =>
       item.type === "function_call" && item.name === "web_search",
@@ -62,17 +65,19 @@ export async function resolvePreparedGoogleResponsesWebSearch(options: {
         ),
       })),
     )
-    const completedCalls: Array<ResponseInputItem> = calls.map((call) => ({
-      type: "function_call",
-      call_id: call.call_id,
-      name: call.name,
-      arguments: call.arguments,
-      status: "completed",
-    }))
+    const mixed = mixedWebSearchResponse(
+      current as unknown as Record<string, unknown>,
+      "responses",
+      results.map((r) => ({ id: r.callId, text: r.output })),
+    )
+    if (mixed) return mixed as unknown as ResponsesResult
+    const completedCalls = current.output as Array<ResponseInputItem>
     currentPayload = {
       ...currentPayload,
       input: [
-        ...(Array.isArray(currentPayload.input) ? currentPayload.input : []),
+        ...(typeof currentPayload.input === "string" ?
+          [{ role: "user" as const, content: currentPayload.input }]
+        : (currentPayload.input ?? [])),
         ...completedCalls,
         ...results.map((result) => ({
           type: "function_call_output" as const,

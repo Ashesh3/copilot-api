@@ -20,6 +20,8 @@ import {
   createRetryBudget,
   PRE_HEADER_MAX_DELAY_SECONDS,
 } from "~/services/copilot/transport-retry"
+import { managedFetchBeta } from "~/services/web/tool-context"
+import { runManagedWebRequest } from "~/services/web/tool-loop"
 
 import { fitAnthropicCompactionPayload } from "./compaction-payload"
 import {
@@ -93,6 +95,7 @@ function getPositiveModelOutputLimit(modelId: string): number | undefined {
   return Number.isInteger(limit) && Number(limit) > 0 ? limit : undefined
 }
 
+// eslint-disable-next-line complexity -- Existing request normalization plus managed tool dispatch.
 export const createAnthropicMessages = async (
   payload: AnthropicMessagesPayload,
   options?: {
@@ -162,7 +165,7 @@ export const createAnthropicMessages = async (
     retryBudget: options?.retryBudget ?? createRetryBudget(),
   }
 
-  return await dispatchAnthropicMessages({
+  const dispatchOptions: AnthropicDispatchOptions = {
     initiator,
     options: operationOptions,
     modelId: snapshot.model,
@@ -173,7 +176,26 @@ export const createAnthropicMessages = async (
     preparedHeaders: prepared.headers,
     stream: Boolean(snapshot.stream),
     vision,
-  })
+  }
+  return (await runManagedWebRequest({
+    protocol: "messages",
+    payload: dispatchOptions.preparedBody,
+    disabled: options?.compaction,
+    accountId: operationOptions.routedAccountPin.accountId,
+    signal: options?.signal,
+    send: async (body, managed) =>
+      await dispatchAnthropicMessages({
+        ...dispatchOptions,
+        preparedBody: body,
+        preparedHeaders: {
+          ...dispatchOptions.preparedHeaders,
+          anthropicBeta: managedFetchBeta(
+            dispatchOptions.preparedHeaders.anthropicBeta,
+            managed,
+          ),
+        },
+      }),
+  })) as CreateAnthropicMessagesReturn
 }
 
 function ensureTransportMaxTokens(

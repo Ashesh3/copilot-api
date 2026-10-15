@@ -36,6 +36,7 @@ import {
   sanitizeResponsesStreamEvent,
   type ResponsesPayload,
 } from "../src/services/copilot/create-responses"
+import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
   useProtocolDatabase,
   seedProtocolDatabase,
@@ -1836,7 +1837,7 @@ test("preserves native Responses state, context, future fields, and tools", asyn
 
   expect(response.status).toBe(200)
   expect(requestBodies).toHaveLength(1)
-  expect(requestBodies[0]).toEqual({
+  expect(clientToolsPayload(requestBodies[0])).toEqual({
     model: "gpt-4o",
     input: payload.input,
     future_top_level: payload.future_top_level,
