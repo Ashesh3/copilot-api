@@ -276,14 +276,19 @@ export function prepareManagedWebTools(
   // eslint-disable-next-line complexity -- Ownership distinguishes typed, translated, client and reentered declarations.
   payload.tools = tools.map((tool) => {
     const name = toolName(tool)
+    const type = typeof tool.type === "string" ? tool.type : ""
+    const hostedSearch = /^web_search(?:_[a-z\d]+)*$/.test(type)
+    // Native hosted tools are selected by type, not the function-name space.
+    if (protocol === "responses" && hostedSearch) {
+      kinds.add("search")
+      return tool
+    }
     const injected = name ? active.injected.get(name) : undefined
     if (name && injected && !active.callerNames.has(name)) {
       managed.set(name, injected)
       kinds.add(injected.kind)
       return customTool(name, protocol)
     }
-    const type = typeof tool.type === "string" ? tool.type : ""
-    const hostedSearch = /^web_search(?:_[a-z\d]+)*$/.test(type)
     if (
       (hostedSearch && !active.callerNames.has(name ?? "web_search"))
       || (name === "web_search" && !active.callerNames.has(name))

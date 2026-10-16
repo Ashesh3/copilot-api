@@ -294,9 +294,37 @@ test.each(["additional_tools", "tool_search_output"])(
       expect(result.payload.tools?.[0]).toEqual(caller)
       expect(result.managed.has("web_search")).toBe(false)
       expect(result.managed.has("_copilot_web_search")).toBe(false)
-      const names = result.payload.tools?.map((t) => t.name)
-      expect(new Set(names).size).toBe(names?.length ?? 0)
+      expect(result.payload.tools).toEqual(source.tools)
+      expect(result.managed.size).toBe(0)
     })
+  },
+)
+
+test.each(["web_search", "web_search_preview"])(
+  "forced native %s remains hosted beside a caller web_search function",
+  (type) => {
+    const caller = { type: "function", name: "web_search", parameters: {} }
+    const hosted = {
+      type,
+      filters: { allowed_domains: ["example.com"] },
+      external_web_access: false,
+    }
+    const source = {
+      tools: [caller, hosted],
+      tool_choice: { type },
+      input: "search",
+    }
+    const original = structuredClone(source)
+    runWithWebTools(source, () => {
+      const result = prepareManagedWebTools(source, "responses")
+      expect(result.payload).toEqual(source)
+      expect(result.managed.size).toBe(0)
+      expect(isCallerOwnedWebSearch("web_search")).toBe(true)
+      expect(
+        prepareManagedWebTools(result.payload, "responses").payload,
+      ).toEqual(source)
+    })
+    expect(source).toEqual(original)
   },
 )
 
