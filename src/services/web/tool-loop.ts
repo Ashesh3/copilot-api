@@ -14,7 +14,7 @@ import { prepareManagedWebTools, webToolError } from "./tool-context"
 import { executeManagedWebCall } from "./tool-executor"
 import {
   continuationPayload,
-  isUnsuccessfulResponses,
+  isUnsuccessfulWebResponse,
   responseCalls,
   sumUsage,
   withoutManagedCalls,
@@ -39,6 +39,7 @@ export interface ManagedWebRequest {
   send: (
     payload: Record<string, unknown>,
     managed: ReadonlyMap<string, ManagedWebTool>,
+    reportProcessedPayload: (payload: Record<string, unknown>) => void,
   ) => Promise<WebResponse>
   execute?: (
     call: WebToolCall,
@@ -50,11 +51,35 @@ export const isWebStream = (
   value: WebResponse,
 ): value is AsyncIterable<WebEvent> => Symbol.asyncIterator in value
 
+export interface ManagedWebDispatch {
+  send: (payload: Record<string, unknown>) => Promise<WebResponse>
+  processedPayload: () => Record<string, unknown>
+}
+
+/** Retain the successful transport body, including compatibility recovery. */
+function createManagedDispatch(
+  options: ManagedWebRequest,
+  managed: ReadonlyMap<string, ManagedWebTool>,
+): ManagedWebDispatch {
+  let processedPayload = options.payload
+  return {
+    async send(payload) {
+      processedPayload = payload
+      return await options.send(payload, managed, (body) => {
+        processedPayload = structuredClone(body)
+      })
+    },
+    processedPayload: () => processedPayload,
+  }
+}
+
 export async function completeWebCalls(
   options: ManagedWebRequest,
   prepared: PreparedManagedWebTools,
   response: Record<string, unknown>,
 ): Promise<{ completed: Array<CompletedWebCall>; mixed: boolean }> {
+  if (isUnsuccessfulWebResponse(response, options.protocol))
+    return { completed: [], mixed: false }
   const calls = responseCalls(response, options.protocol)
   const owned = calls.filter(
     (call) => !call.clientOwned && prepared.managed.has(call.name),
@@ -75,6 +100,27 @@ export async function completeWebCalls(
   return { completed, mixed: calls.length > owned.length }
 }
 
+function transparentBufferedRound(
+  response: Record<string, unknown>,
+  protocol: WebProtocol,
+  state: { round: number; intercepted: boolean },
+): boolean {
+  return (
+    state.round === 0
+    && !state.intercepted
+    && !isUnsuccessfulWebResponse(response, protocol)
+  )
+}
+
+function chargeableUsage(
+  response: Record<string, unknown>,
+  protocol: WebProtocol,
+): unknown {
+  return protocol === "responses" && response.status === "failed" ?
+      undefined
+    : response.usage
+}
+
 export async function runManagedWebRequest(
   options: ManagedWebRequest,
 ): Promise<WebResponse> {
@@ -85,38 +131,46 @@ export async function runManagedWebRequest(
       || !modelAllowsWebTools(options.payload.model, options.accountId),
   )
   if (prepared.managed.size === 0)
-    return await options.send(options.payload, prepared.managed)
+    return await options.send(options.payload, prepared.managed, () => {})
+  const dispatch = createManagedDispatch(options, prepared.managed)
   const observedUsage = new ManagedWebUsage(
     options.protocol,
     captureRequestUsageObserver(),
   )
-  let payload = prepared.payload
-  let response = await options.send(payload, prepared.managed)
+  let response = await dispatch.send(prepared.payload)
   if (isWebStream(response))
     return streamManagedWebRequest(options, prepared, {
       first: response,
       observedUsage,
+      dispatch,
     })
   let usage: Record<string, unknown> | undefined
   for (let round = 0; round < 18; round++) {
     const intercepted = responseCalls(response, options.protocol).some(
       (call) => !call.clientOwned && prepared.managed.has(call.name),
     )
+    // Like streaming, do not rewrite a native result when no managed round ran.
+    if (
+      transparentBufferedRound(response, options.protocol, {
+        round,
+        intercepted,
+      })
+    ) {
+      options.signal?.throwIfAborted()
+      return response
+    }
     observedUsage.observe(
-      options.protocol === "responses" && response.status === "failed" ?
-        undefined
-      : response.usage,
+      chargeableUsage(response, options.protocol),
       intercepted,
     )
     options.signal?.throwIfAborted()
     usage = sumUsage(usage, response.usage)
-    if (isUnsuccessfulResponses(response, options.protocol))
+    if (isUnsuccessfulWebResponse(response, options.protocol))
       return {
-        ...withoutUnexecutedManagedCalls(
-          response,
-          prepared.managed,
-          options.protocol,
-        ),
+        ...withoutUnexecutedManagedCalls(response, prepared.managed, {
+          protocol: options.protocol,
+          callerNames: prepared.context?.callerNames,
+        }),
         ...(usage ? { usage } : {}),
       }
     const { completed, mixed } = await completeWebCalls(
@@ -131,12 +185,12 @@ export async function runManagedWebRequest(
         ...withoutManagedCalls(response, completed, options.protocol),
         ...(usage ? { usage } : {}),
       }
-    payload = continuationPayload(payload, response, {
+    const payload = continuationPayload(dispatch.processedPayload(), response, {
       completed,
       protocol: options.protocol,
     })
     observedUsage.nextRound()
-    const next = await options.send(payload, prepared.managed)
+    const next = await dispatch.send(payload)
     if (isWebStream(next))
       throw webToolError(
         "web_tool_protocol_error",

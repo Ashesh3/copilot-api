@@ -3,6 +3,8 @@ import type { ManagedToolResult, WebToolCall } from "./tool-executor"
 
 import { isRecord } from "./tool-context"
 
+export { sumUsage } from "./tool-usage-output"
+
 export interface CompletedWebCall {
   call: WebToolCall
   result: ManagedToolResult
@@ -49,6 +51,8 @@ export function responseCalls(
         (b) =>
           b.type === "function_call"
           || b.type === "custom_tool_call"
+          || b.type === "computer_call"
+          || b.type === "apply_patch_call"
           || (b.type === "tool_search_call" && b.execution === "client"),
       )
       .map((b) => ({
@@ -78,9 +82,37 @@ export function responseCalls(
 export function withoutUnexecutedManagedCalls(
   response: Record<string, unknown>,
   managed: ReadonlyMap<string, unknown>,
-  protocol: WebProtocol,
+  options: { protocol: WebProtocol; callerNames?: ReadonlySet<string> },
 ): Record<string, unknown> {
-  if (protocol !== "responses") return response
+  const { protocol, callerNames } = options
+  if (protocol === "messages")
+    return {
+      ...response,
+      content: records(response.content).filter(
+        (block) =>
+          block.type !== "tool_use" || !managed.has(String(block.name)),
+      ),
+    }
+  if (protocol === "chat")
+    return {
+      ...response,
+      choices: records(response.choices).map((choice) => {
+        if (
+          !isRecord(choice.message)
+          || !Array.isArray(choice.message.tool_calls)
+        )
+          return choice
+        return {
+          ...choice,
+          message: {
+            ...choice.message,
+            tool_calls: records(choice.message.tool_calls).filter(
+              (call) => !isManagedChatCall(call, managed, callerNames),
+            ),
+          },
+        }
+      }),
+    }
   const output = records(response.output).filter(
     (item) =>
       item.type !== "function_call"
@@ -96,14 +128,34 @@ export function withoutUnexecutedManagedCalls(
   }
 }
 
-export function isUnsuccessfulResponses(
+/** A length-limited name can end before the gateway function name is complete. */
+export function isManagedChatCall(
+  call: Record<string, unknown>,
+  managed: ReadonlyMap<string, unknown>,
+  truncatedCallerNames?: ReadonlySet<string>,
+): boolean {
+  if (
+    call.type === "custom"
+    || isRecord(call.custom)
+    || !isRecord(call.function)
+  )
+    return false
+  const name = typeof call.function.name === "string" ? call.function.name : ""
+  if (managed.has(name)) return true
+  if (!truncatedCallerNames || truncatedCallerNames.has(name)) return false
+  return [...managed.keys()].some((candidate) => candidate.startsWith(name))
+}
+
+export function isUnsuccessfulWebResponse(
   response: Record<string, unknown>,
   protocol: WebProtocol,
 ): boolean {
-  return (
-    protocol === "responses"
-    && (response.status === "failed" || response.status === "incomplete")
-  )
+  if (protocol === "messages") return response.stop_reason === "max_tokens"
+  if (protocol === "chat")
+    return records(response.choices).some(
+      (choice) => choice.finish_reason === "length",
+    )
+  return response.status === "failed" || response.status === "incomplete"
 }
 
 export function continuationPayload(
@@ -265,19 +317,4 @@ export function responseOutputText(
       : [],
     )
     .join("")
-}
-
-export function sumUsage(
-  first: unknown,
-  next: unknown,
-): Record<string, unknown> | undefined {
-  if (!isRecord(next)) return isRecord(first) ? first : undefined
-  const merged = isRecord(first) ? { ...first } : {}
-  for (const [key, value] of Object.entries(next)) {
-    if (typeof value === "number")
-      merged[key] = (typeof merged[key] === "number" ? merged[key] : 0) + value
-    else if (isRecord(value)) merged[key] = sumUsage(merged[key], value)
-    else merged[key] = value
-  }
-  return merged
 }

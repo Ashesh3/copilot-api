@@ -182,11 +182,11 @@ export const createAnthropicMessages = async (
     disabled: options?.compaction,
     accountId: operationOptions.routedAccountPin.accountId,
     signal: options?.signal,
-    send: async (body) =>
-      await dispatchAnthropicMessages({
-        ...dispatchOptions,
-        preparedBody: body,
-      }),
+    send: async (body, _managed, reportProcessedPayload) =>
+      await dispatchAnthropicMessages(
+        { ...dispatchOptions, preparedBody: body },
+        reportProcessedPayload,
+      ),
   })) as CreateAnthropicMessagesReturn
 }
 
@@ -316,6 +316,7 @@ function omitLearnedDisabledThinking(
 
 async function dispatchAnthropicMessages(
   options: AnthropicDispatchOptions,
+  reportProcessedPayload: (payload: Record<string, unknown>) => void,
 ): Promise<CreateAnthropicMessagesReturn> {
   const { preparedBody, stream } = options
 
@@ -355,6 +356,9 @@ async function dispatchAnthropicMessages(
     )
   }
 
+  // Serialization normalizes an owned clone. Keep the continuation aligned
+  // with that accepted request, including compatibility removals.
+  reportProcessedPayload(normalizeAnthropicMessagesRequest(activeBody))
   if (stream) {
     return events(response) as AsyncIterable<AnthropicStreamChunk>
   }

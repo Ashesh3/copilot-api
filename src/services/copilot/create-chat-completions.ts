@@ -590,12 +590,15 @@ async function createChatCompletionsCore(
     disabled: options?.compaction,
     accountId: pinnedOptions.routedAccountPin.accountId,
     signal: options?.signal,
-    send: async (body) => {
+    send: async (body, _managed, reportProcessedPayload) => {
       const result = await dispatchChatCompletionsCore(
         body as unknown as ChatCompletionsPayload,
         pinnedOptions,
       )
       processedPayload = result.processedPayload
+      reportProcessedPayload(
+        result.processedPayload as unknown as Record<string, unknown>,
+      )
       return result.response as
         | Record<string, unknown>
         | AsyncIterable<StreamEvent>

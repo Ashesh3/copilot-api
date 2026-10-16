@@ -1,16 +1,22 @@
 import type { PreparedManagedWebTools, WebProtocol } from "./tool-context"
-import type { ManagedWebRequest, WebEvent } from "./tool-loop"
+import type {
+  ManagedWebDispatch,
+  ManagedWebRequest,
+  WebEvent,
+} from "./tool-loop"
 import type { ManagedWebUsage } from "./tool-usage"
 
 import { isRecord, webToolError } from "./tool-context"
 import { completeWebCalls, isWebStream } from "./tool-loop"
 import {
   continuationPayload,
+  isManagedChatCall,
   records,
   responseOutputText,
   sumUsage,
   withoutManagedCalls,
   withoutUnexecutedManagedCalls,
+  type CompletedWebCall,
 } from "./tool-output"
 
 // Implemented protocol adapters retain ordinary text streaming and hold tool-call
@@ -18,10 +24,13 @@ import {
 export async function* streamManagedWebRequest(
   options: ManagedWebRequest,
   prepared: PreparedManagedWebTools,
-  input: { first: AsyncIterable<WebEvent>; observedUsage: ManagedWebUsage },
+  input: {
+    first: AsyncIterable<WebEvent>
+    observedUsage: ManagedWebUsage
+    dispatch: ManagedWebDispatch
+  },
 ): AsyncGenerator<WebEvent> {
-  const { first, observedUsage } = input
-  let payload = prepared.payload
+  const { first, observedUsage, dispatch } = input
   let source = first
   const position: StreamPosition = {
     protocol: options.protocol,
@@ -33,7 +42,11 @@ export async function* streamManagedWebRequest(
   for (let round = 0; round < 18; round++) {
     position.usage = usage
     position.output = allOutput
-    const state = new RoundState(options.protocol, prepared.managed)
+    const state = new RoundState(
+      options.protocol,
+      prepared.managed,
+      prepared.context?.callerNames,
+    )
     yield* consumeRound(options, state, {
       source,
       round,
@@ -48,16 +61,17 @@ export async function* streamManagedWebRequest(
       prepared,
       response,
     )
-    const visible =
-      completed.length > 0 ?
-        withoutManagedCalls(response, completed, options.protocol)
-      : response
+    const visible = state.visibleResponse(response, completed)
     const visibleOutput =
       options.protocol === "responses" ? records(visible.output) : []
     allOutput.push(...visibleOutput)
     // Client tool calls and local execution evidence were withheld as complete
     // blocks, so they can now be emitted without leaking gateway-only functions.
-    for (const event of state.pendingEvents(visible, completed.length > 0)) {
+    for (const event of state.pendingEvents(
+      visible,
+      completed.length > 0,
+      state.truncated,
+    )) {
       const parsed = JSON.parse(event.data ?? "{}") as Record<string, unknown>
       yield remap(event, parsed, position)
     }
@@ -73,12 +87,12 @@ export async function* streamManagedWebRequest(
       }
       return
     }
-    payload = continuationPayload(payload, response, {
+    const payload = continuationPayload(dispatch.processedPayload(), response, {
       completed,
       protocol: options.protocol,
     })
     observedUsage.nextRound()
-    const next = await options.send(payload, prepared.managed)
+    const next = await dispatch.send(payload)
     if (!isWebStream(next))
       throw webToolError(
         "web_tool_protocol_error",
@@ -185,7 +199,7 @@ function* failedRoundEvents(
     const visible = withoutUnexecutedManagedCalls(
       response,
       state.managedTools,
-      position.protocol,
+      { protocol: position.protocol },
     )
     for (const pending of state.pendingEvents(visible, false, true)) {
       yield remap(
@@ -253,11 +267,35 @@ class RoundState {
   get done(): boolean {
     return this.terminal
   }
+  get truncated(): boolean {
+    return this.protocol === "messages" ?
+        this.response.stop_reason === "max_tokens"
+      : this.protocol === "chat" && this.finishReason === "length"
+  }
   private readonly protocol: WebProtocol
   private readonly managed: ReadonlyMap<string, unknown>
-  constructor(protocol: WebProtocol, managed: ReadonlyMap<string, unknown>) {
+  private readonly callerNames: ReadonlySet<string>
+  constructor(
+    protocol: WebProtocol,
+    managed: ReadonlyMap<string, unknown>,
+    callerNames: ReadonlySet<string> = new Set(),
+  ) {
     this.protocol = protocol
     this.managed = managed
+    this.callerNames = callerNames
+  }
+  visibleResponse(
+    response: Record<string, unknown>,
+    completed: ReadonlyArray<CompletedWebCall>,
+  ): Record<string, unknown> {
+    if (this.truncated)
+      return withoutUnexecutedManagedCalls(response, this.managed, {
+        protocol: this.protocol,
+        callerNames: this.callerNames,
+      })
+    return completed.length > 0 ?
+        withoutManagedCalls(response, completed, this.protocol)
+      : response
   }
   get managedTools(): ReadonlyMap<string, unknown> {
     return this.managed
@@ -492,16 +530,20 @@ class RoundState {
         "Upstream stream ended without a terminal event.",
       )
     if (this.protocol === "messages") {
-      for (const [index, json] of this.toolJson) {
-        const block = this.blocks.get(index)
-        if (!block) throw new TypeError("Tool delta has no matching block")
-        try {
-          block.input = JSON.parse(json) as unknown
-        } catch {
-          throw webToolError(
-            "web_tool_protocol_error",
-            "Malformed tool arguments.",
-          )
+      // Truncation can cut off either an owned or client call. Retained client
+      // deltas are replayed verbatim rather than parsing their partial JSON.
+      if (!this.truncated) {
+        for (const [index, json] of this.toolJson) {
+          const block = this.blocks.get(index)
+          if (!block) throw new TypeError("Tool delta has no matching block")
+          try {
+            block.input = JSON.parse(json) as unknown
+          } catch {
+            throw webToolError(
+              "web_tool_protocol_error",
+              "Malformed tool arguments.",
+            )
+          }
         }
       }
       return {
@@ -543,19 +585,7 @@ class RoundState {
     failed = false,
   ): Generator<WebEvent> {
     if (this.protocol === "messages") {
-      const content = records(visible.content)
-      for (const event of this.heldMessageEvents) {
-        const index = Number(event.index)
-        if (!this.toolIndices.has(index)) {
-          yield eventFor(String(event.type), event)
-        } else if (event.type === "content_block_start") {
-          const block = content.at(index)
-          if (!block) continue
-          yield eventFor("content_block_start", { index, content_block: block })
-        } else if (event.type === "content_block_stop") {
-          yield eventFor("content_block_stop", { index })
-        }
-      }
+      yield* this.pendingMessages(visible, failed)
     } else if (this.protocol === "responses") {
       yield* this.pendingResponses(visible, failed)
     } else {
@@ -565,8 +595,11 @@ class RoundState {
         .filter(
           ([index, call]) =>
             !this.forwardedTools.has(index)
-            && (!isRecord(call.function)
-              || !this.managed.has(String(call.function.name))),
+            && !isManagedChatCall(
+              call,
+              this.managed,
+              this.truncated ? this.callerNames : undefined,
+            ),
         )
         .map(([, call]) => call)
       const firstIndex = Math.max(-1, ...this.forwardedTools) + 1
@@ -598,6 +631,30 @@ class RoundState {
             ],
           }),
         }
+    }
+  }
+  private *pendingMessages(
+    visible: Record<string, unknown>,
+    failed: boolean,
+  ): Generator<WebEvent> {
+    const content = records(visible.content)
+    for (const event of this.heldMessageEvents) {
+      const index = Number(event.index)
+      if (!this.toolIndices.has(index)) {
+        const removed =
+          failed ?
+            [...this.toolIndices].filter((owned) => owned < index).length
+          : 0
+        yield eventFor(String(event.type), { ...event, index: index - removed })
+      } else if (failed) {
+        continue
+      } else if (event.type === "content_block_start") {
+        const block = content.at(index)
+        if (block)
+          yield eventFor("content_block_start", { index, content_block: block })
+      } else if (event.type === "content_block_stop") {
+        yield eventFor("content_block_stop", { index })
+      }
     }
   }
   private responseEventIndex(

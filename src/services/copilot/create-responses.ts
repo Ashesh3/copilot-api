@@ -484,6 +484,15 @@ interface ResponsesRequestOptions {
   retryBudget?: RetryBudget
 }
 
+interface ResponsesCoreResult {
+  response: CreateResponsesReturn
+  processedPayload: Record<string, unknown>
+}
+
+interface ResponsesOperationState {
+  collaboration?: ResponsesCollaboration
+}
+
 const logOrdinaryRecovery = (
   recovered: ResponsesPayloadRecoveryResult<Record<string, unknown>>,
 ): void => {
@@ -539,16 +548,24 @@ export const createResponses = async (
     ...options,
     routedAccountPin: options.routedAccountPin ?? {},
   }
+  const operation: ResponsesOperationState = {}
   return (await runManagedWebRequest({
     protocol: "responses",
     payload,
     disabled: options.compaction || isResponsesCompactionRequest(payload),
     accountId: pinnedOptions.routedAccountPin.accountId,
     signal: options.signal,
-    send: async (body) =>
-      (await createResponsesCore(body as ResponsesPayload, pinnedOptions)) as
+    send: async (body, _managed, reportProcessedPayload) => {
+      const result = await createResponsesCore(
+        body as ResponsesPayload,
+        pinnedOptions,
+        operation,
+      )
+      reportProcessedPayload(result.processedPayload)
+      return result.response as
         | Record<string, unknown>
-        | AsyncIterable<import("~/services/web/tool-loop").WebEvent>,
+        | AsyncIterable<import("~/services/web/tool-loop").WebEvent>
+    },
   })) as CreateResponsesReturn
 }
 
@@ -556,7 +573,8 @@ export const createResponses = async (
 const createResponsesCore = async (
   payload: ResponsesPayload,
   options: ResponsesRequestOptions,
-): Promise<CreateResponsesReturn> => {
+  operation: ResponsesOperationState,
+): Promise<ResponsesCoreResult> => {
   const { initiator, signal } = options
   signal?.throwIfAborted()
   const prepared =
@@ -574,7 +592,11 @@ const createResponsesCore = async (
   // Zero-data retention enforcement
   body.store = false
   delete body.service_tier
-  const collaboration = prepareResponsesCollaboration(body)
+  // Managed continuations reuse the wire body, whose namespace is already
+  // adapted. Retain its restoration context for responses from later rounds.
+  const collaboration =
+    prepareResponsesCollaboration(body) ?? operation.collaboration
+  operation.collaboration = collaboration
 
   // Completed evaluated candidates have already performed semantic attachment
   // adaptation; unprepared sources still need the transport normalizer here.
@@ -651,10 +673,13 @@ const createResponsesCore = async (
   }
 
   if (body.stream) {
-    return sanitizeResponsesStream(response, collaboration)
+    return {
+      response: sanitizeResponsesStream(response, collaboration),
+      processedPayload: activePayload,
+    }
   }
 
   const result = (await response.json()) as ResponsesResult
   restoreResponsesCollaboration(result, collaboration)
-  return result
+  return { response: result, processedPayload: activePayload }
 }
