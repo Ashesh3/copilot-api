@@ -1,4 +1,5 @@
 import type { RequestBehavior } from "~/lib/request-logger"
+import type { SystemPromptOverride } from "~/lib/system-prompt-overrides"
 import type {
   AnthropicCustomMessage,
   AnthropicMessagesPayload,
@@ -16,6 +17,12 @@ import { normalizeModelName } from "~/lib/model-resolver"
 import { getModelSettings } from "~/lib/model-settings"
 import { parseModelSuffix } from "~/lib/model-suffix"
 import { isClaudePermissionReviewRequest } from "~/lib/permission-review"
+import {
+  applyChatPromptOverrides,
+  applyCompactionPromptOverrides,
+  applyMessagesPromptOverrides,
+  applyResponsesPromptOverrides,
+} from "~/lib/system-prompt-override-engine"
 
 /** A model's forced system prompt, found from the model a client requested. */
 export interface ForcedSystemPrompt {
@@ -25,12 +32,15 @@ export interface ForcedSystemPrompt {
   /** Remove the client's own system and developer prompts. */
   clearOtherSystemPrompts: boolean
   forceAppendSystemPrompt: boolean
+  /** Ordered rules supersede the legacy single-prompt fields when present. */
+  overrides?: Array<SystemPromptOverride>
 }
 
 interface ForcedSystemPromptOutcome {
   forced: ForcedSystemPrompt
   /** Client system or developer prompts removed from the request. */
   removed: number
+  replacements?: number
 }
 
 const isInstructionRole = (role: unknown): boolean =>
@@ -65,6 +75,15 @@ export function resolveForcedSystemPrompt(
     normalizeModelName(baseModel),
   ])) {
     const settings = getModelSettings(model)
+    if (settings?.systemPromptOverrides?.length) {
+      return {
+        model,
+        prompt: "",
+        clearOtherSystemPrompts: false,
+        forceAppendSystemPrompt: false,
+        overrides: settings.systemPromptOverrides,
+      }
+    }
     if (settings?.forcedSystemPrompt) {
       return {
         model,
@@ -146,6 +165,9 @@ function applyForcedSystemPromptToChat(
   payload: { messages: Array<Message> },
   forced: ForcedSystemPrompt,
 ): ForcedSystemPromptOutcome {
+  if (forced.overrides) {
+    return { forced, ...applyChatPromptOverrides(payload, forced.overrides) }
+  }
   let removed = 0
   if (forced.clearOtherSystemPrompts) {
     removed = payload.messages.filter(
@@ -240,6 +262,12 @@ function applyForcedSystemPromptToMessages(
   payload: AnthropicMessagesPayload,
   forced: ForcedSystemPrompt,
 ): ForcedSystemPromptOutcome {
+  if (forced.overrides) {
+    return {
+      forced,
+      ...applyMessagesPromptOverrides(payload, forced.overrides),
+    }
+  }
   if (!forced.clearOtherSystemPrompts) {
     if (
       forced.forceAppendSystemPrompt
@@ -302,6 +330,12 @@ export function applyForcedSystemPromptToResponses(
   payload: ResponsesPayload,
   forced: ForcedSystemPrompt,
 ): ForcedSystemPromptOutcome {
+  if (forced.overrides) {
+    return {
+      forced,
+      ...applyResponsesPromptOverrides(payload, forced.overrides),
+    }
+  }
   const instructions =
     typeof payload.instructions === "string" ? payload.instructions : ""
   if (forced.clearOtherSystemPrompts) {
@@ -330,6 +364,18 @@ export function forcedSystemPromptBehavior(
   outcome: ForcedSystemPromptOutcome,
 ): RequestBehavior {
   const { forced, removed } = outcome
+  if (forced.overrides) {
+    return {
+      kind: "forced_system_prompt",
+      message: `Applied ${forced.overrides.length} system prompt override rules for ${forced.model} in order`,
+      data: {
+        model: forced.model,
+        modes: forced.overrides.map((rule) => rule.mode).join(", "),
+        removedSystemPrompts: removed,
+        replacements: outcome.replacements ?? 0,
+      },
+    }
+  }
   const plural = removed === 1 ? "" : "s"
   let message = `Sent the forced system prompt from the ${forced.model} model setting before the client's system prompts`
   if (forced.clearOtherSystemPrompts) {
@@ -403,6 +449,20 @@ export function forceCompactionSystemPrompt(options: {
   const forced = resolveForcedSystemPrompt(options.requestedModel)
   if (!forced) {
     return { input: options.input, instructions: options.instructions }
+  }
+  if (forced.overrides) {
+    const output = applyCompactionPromptOverrides(
+      options.input,
+      forced.overrides,
+    )
+    return {
+      behavior: forcedSystemPromptBehavior({ forced, ...output.result }),
+      input: output.input,
+      instructions:
+        output.prompt ?
+          `${output.prompt}\n\n${options.instructions}`
+        : options.instructions,
+    }
   }
   const input =
     forced.clearOtherSystemPrompts ?

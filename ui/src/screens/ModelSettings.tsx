@@ -4,14 +4,12 @@ import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
 import { Card } from "@astryxdesign/core/Card"
-import { CheckboxInput } from "@astryxdesign/core/CheckboxInput"
 import { FormLayout } from "@astryxdesign/core/FormLayout"
 import { Selector } from "@astryxdesign/core/Selector"
 import { Skeleton } from "@astryxdesign/core/Skeleton"
 import { HStack, VStack } from "@astryxdesign/core/Stack"
 import { pixel, proportional } from "@astryxdesign/core/Table"
 import { Heading, Text } from "@astryxdesign/core/Text"
-import { TextArea } from "@astryxdesign/core/TextArea"
 import { TextInput } from "@astryxdesign/core/TextInput"
 import {
   ToggleButton,
@@ -19,12 +17,14 @@ import {
 } from "@astryxdesign/core/ToggleButton"
 import { useState } from "react"
 
+import type { SystemPromptOverrideRow } from "../lib/system-prompt-override-form"
 import type {
   ModelRequestParameter,
   ModelSetting,
   ReasoningEffort,
 } from "../lib/types"
 
+import { getSystemPromptOverrides } from "../../../src/lib/system-prompt-overrides"
 import {
   ConfirmButton,
   DataTable,
@@ -34,8 +34,15 @@ import {
   RowActions,
 } from "../components/common"
 import { Page } from "../components/Page"
+import { SystemPromptOverrides } from "../components/SystemPromptOverrides"
 import { PencilIcon, Trash2Icon } from "../icons"
 import { del, get, post } from "../lib/api"
+import {
+  SYSTEM_PROMPT_OVERRIDE_LABELS,
+  toSystemPromptOverrideRows,
+  toSystemPromptOverrides,
+  validateSystemPromptOverrideRows,
+} from "../lib/system-prompt-override-form"
 import { useToast } from "../lib/toast"
 import { useAsyncData } from "../lib/usePolling"
 
@@ -63,8 +70,6 @@ const OMIT_PARAM_OPTIONS: Array<ModelRequestParameter> = [
   "top_p",
 ]
 
-const PROMPT_PREVIEW_LENGTH = 240
-
 function effortLabel(effort: string): string {
   return effort === "xhigh" ? "XHigh" : (
       effort.charAt(0).toUpperCase() + effort.slice(1)
@@ -83,13 +88,6 @@ function fromTriState(value: TriState): boolean | null {
   return null
 }
 
-function promptPreview(prompt: string): string {
-  const text = prompt.replaceAll(/\s+/g, " ").trim()
-  return text.length > PROMPT_PREVIEW_LENGTH ?
-      `${text.slice(0, PROMPT_PREVIEW_LENGTH)}…`
-    : text
-}
-
 interface SettingFormState {
   model: string
   sentryModelName: string
@@ -100,9 +98,7 @@ interface SettingFormState {
   exposeVirtualReasoningModels: TriState
   supportsAssistantPrefill: TriState
   unsupportedRequestParameters: Array<ModelRequestParameter>
-  forcedSystemPrompt: string
-  clearOtherSystemPrompts: boolean
-  forceAppendSystemPrompt: boolean
+  systemPromptOverrides: Array<SystemPromptOverrideRow>
 }
 
 const EMPTY_SETTING_FORM: SettingFormState = {
@@ -115,13 +111,10 @@ const EMPTY_SETTING_FORM: SettingFormState = {
   exposeVirtualReasoningModels: "unset",
   supportsAssistantPrefill: "unset",
   unsupportedRequestParameters: [],
-  forcedSystemPrompt: "",
-  clearOtherSystemPrompts: false,
-  forceAppendSystemPrompt: false,
+  systemPromptOverrides: [],
 }
 
 function toSettingBody(form: SettingFormState) {
-  const forcedSystemPrompt = form.forcedSystemPrompt.trim()
   return {
     model: form.model.trim(),
     sentryModelName: form.sentryModelName.trim() || null,
@@ -134,11 +127,7 @@ function toSettingBody(form: SettingFormState) {
     ),
     supportsAssistantPrefill: fromTriState(form.supportsAssistantPrefill),
     unsupportedRequestParameters: form.unsupportedRequestParameters,
-    forcedSystemPrompt: forcedSystemPrompt || null,
-    clearOtherSystemPrompts:
-      forcedSystemPrompt ? form.clearOtherSystemPrompts : null,
-    forceAppendSystemPrompt:
-      forcedSystemPrompt ? form.forceAppendSystemPrompt : null,
+    systemPromptOverrides: toSystemPromptOverrides(form.systemPromptOverrides),
   }
 }
 
@@ -200,11 +189,13 @@ export default function ModelSettingsScreen() {
   const [editingModel, setEditingModel] = useState<string | null>(null)
   const [form, setForm] = useState<SettingFormState>(EMPTY_SETTING_FORM)
   const [isSaving, setIsSaving] = useState(false)
+  const [validationAttempt, setValidationAttempt] = useState(0)
 
   const settings = data ?? []
 
   function startEdit(row: ModelSetting) {
     setEditingModel(row.model)
+    setValidationAttempt(0)
     setForm({
       model: row.model,
       sentryModelName: row.sentryModelName ?? "",
@@ -217,20 +208,26 @@ export default function ModelSettingsScreen() {
       ),
       supportsAssistantPrefill: toTriState(row.supportsAssistantPrefill),
       unsupportedRequestParameters: row.unsupportedRequestParameters ?? [],
-      forcedSystemPrompt: row.forcedSystemPrompt ?? "",
-      clearOtherSystemPrompts: row.clearOtherSystemPrompts === true,
-      forceAppendSystemPrompt: row.forceAppendSystemPrompt === true,
+      systemPromptOverrides: toSystemPromptOverrideRows(row),
     })
   }
 
   function cancelEdit() {
     setEditingModel(null)
     setForm(EMPTY_SETTING_FORM)
+    setValidationAttempt(0)
   }
 
   async function saveSetting() {
     if (!form.model.trim()) {
       toast.error("Model ID is required")
+      return
+    }
+    const overrideError = validateSystemPromptOverrideRows(
+      form.systemPromptOverrides,
+    )
+    if (overrideError) {
+      setValidationAttempt((attempt) => attempt + 1)
       return
     }
     setIsSaving(true)
@@ -367,32 +364,32 @@ export default function ModelSettingsScreen() {
       ),
     },
     {
-      key: "forcedSystemPrompt",
-      header: "System prompt",
+      key: "systemPromptOverrides",
+      header: "System prompt overrides",
       width: proportional(2),
       renderCell: (item) => {
-        if (!item.forcedSystemPrompt) {
+        const overrides = getSystemPromptOverrides(item)
+        if (overrides.length === 0) {
           return <Text color="secondary">—</Text>
         }
-        const addedLabel =
-          item.forceAppendSystemPrompt ? "Force append" : "Added first"
         return (
           <VStack gap={1}>
-            <HStack gap={1}>
-              <Badge
-                variant={item.clearOtherSystemPrompts ? "warning" : "info"}
-                label={
-                  item.clearOtherSystemPrompts ? "Replaces others" : addedLabel
-                }
-              />
-            </HStack>
+            <Badge
+              variant="info"
+              label={`${overrides.length} ${overrides.length === 1 ? "configuration" : "configurations"}`}
+            />
             <Text
               type="supporting"
               color="secondary"
               maxLines={1}
               hasTruncateTooltip
             >
-              {promptPreview(item.forcedSystemPrompt)}
+              {overrides
+                .map(
+                  (rule, index) =>
+                    `${index + 1}. ${SYSTEM_PROMPT_OVERRIDE_LABELS[rule.mode]}`,
+                )
+                .join(" → ")}
             </Text>
           </VStack>
         )
@@ -425,8 +422,6 @@ export default function ModelSettingsScreen() {
       ),
     },
   ]
-
-  const hasForcedSystemPrompt = form.forcedSystemPrompt.trim().length > 0
 
   return (
     <Page
@@ -593,65 +588,14 @@ export default function ModelSettingsScreen() {
                     ))}
                   </ToggleButtonGroup>
                 </VStack>
-                <Card variant="muted">
-                  <VStack gap={3}>
-                    <VStack gap={1}>
-                      <Heading level={4}>Forced system prompt</Heading>
-                      <Text color="secondary">
-                        Sent before the client's system instructions on every
-                        request for this model ID.
-                      </Text>
-                    </VStack>
-                    <TextArea
-                      label="Forced system prompt"
-                      isLabelHidden
-                      value={form.forcedSystemPrompt}
-                      onChange={(value) =>
-                        setForm((f) => ({ ...f, forcedSystemPrompt: value }))
-                      }
-                      placeholder="Not set"
-                      rows={8}
-                      hasSpellCheck={false}
-                      width="100%"
-                    />
-                    <CheckboxInput
-                      label="Force append"
-                      description="Add this text to the top of the existing system prompt. Creates a system prompt if none exists."
-                      value={
-                        hasForcedSystemPrompt && form.forceAppendSystemPrompt
-                      }
-                      onChange={(checked) =>
-                        setForm((f) => ({
-                          ...f,
-                          forceAppendSystemPrompt: checked,
-                          clearOtherSystemPrompts:
-                            checked ? false : f.clearOtherSystemPrompts,
-                        }))
-                      }
-                      isDisabled={!hasForcedSystemPrompt}
-                      disabledMessage="Enter a forced system prompt first."
-                      width="100%"
-                    />
-                    <CheckboxInput
-                      label="Clear other system prompts"
-                      description="Remove the system and developer prompts sent by the client, so this is the only system prompt the model receives."
-                      value={
-                        hasForcedSystemPrompt && form.clearOtherSystemPrompts
-                      }
-                      onChange={(checked) =>
-                        setForm((f) => ({
-                          ...f,
-                          clearOtherSystemPrompts: checked,
-                          forceAppendSystemPrompt:
-                            checked ? false : f.forceAppendSystemPrompt,
-                        }))
-                      }
-                      isDisabled={!hasForcedSystemPrompt}
-                      disabledMessage="Enter a forced system prompt first."
-                      width="100%"
-                    />
-                  </VStack>
-                </Card>
+                <SystemPromptOverrides
+                  value={form.systemPromptOverrides}
+                  onChange={(systemPromptOverrides) =>
+                    setForm((f) => ({ ...f, systemPromptOverrides }))
+                  }
+                  validationAttempt={validationAttempt}
+                  isDisabled={isSaving}
+                />
               </FormLayout>
               <HStack gap={2} hAlign="end">
                 {editingModel ?
