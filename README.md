@@ -139,9 +139,16 @@ parse, or cache them, and has no local-fetch fallback.**
   Page references/line numbers from a separate browser session are not locally
   cached or resolved; provide the source URL and the information to extract.
 - Explicit no-tool choices, structured output, compaction, permission review,
-  and known non-tool models do not receive automatic tools. Caller-owned
-  functions and mixed tool batches remain intact. Gateway tool use is bounded
-  to eight calls per request, with tighter caller limits honored.
+  and known non-tool models do not receive automatic tools. Required caller
+  tool choices (`required` / `any` / Google `ANY`) also keep their original
+  tool set, so a gateway web call cannot replace a required client call.
+  Caller-owned functions, custom/discovered tools, and mixed batches remain
+  intact. Gateway tool use is bounded to eight calls per request, with tighter
+  caller limits honored.
+- Observed model usage is retained across managed rounds, including cancelled
+  HTTP streams and WebSocket turns. Failed Responses usage is excluded, while
+  completed rounds remain counted; invalid counts retain known subtotals and
+  mark an accounting gap instead of becoming measured zero usage.
 
 This feature adds no standalone `web_fetch` implementation. Existing caller
 server-tool declarations still pass through subject to upstream support. Page

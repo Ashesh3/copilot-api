@@ -35,14 +35,32 @@ export function pageUrl(value: string): string | undefined {
   }
 }
 
+function unquotePageUrl(
+  value: string,
+  before: string | undefined,
+  after: string | undefined,
+): string | undefined {
+  if ((before === '"' && after === '"') || (before === "<" && after === ">"))
+    return value
+  if (before !== "'" && before !== "`") return undefined
+  const closing = value.lastIndexOf(before)
+  if (closing === -1 || !/^[.,;!?\])}]*$/u.test(value.slice(closing + 1)))
+    return undefined
+  return value.slice(0, closing)
+}
+
 /** A URL in a web tool query is a request for hosted page reading, never local I/O. */
 export function requestedWebPages(query: string): Array<string> {
   const urls = new Set<string>()
   for (const match of query.matchAll(/https?:\/\/[^\s<>"\\]+/giu)) {
     let value = match[0]
-    const quoted =
-      query[match.index - 1] === '"' || query[match.index - 1] === "<"
-    if (!quoted) {
+    const quoted = unquotePageUrl(
+      value,
+      query[match.index - 1],
+      query[match.index + value.length],
+    )
+    if (quoted !== undefined) value = quoted
+    else {
       value = value.replace(/[.,;]+$/u, "")
       for (const [open, close] of [
         ["(", ")"],
@@ -199,9 +217,15 @@ export async function executeHostedPageRead(
     }
     const value: unknown = await response.json()
     if (isRecord(value) && value.status !== "failed" && isRecord(value.usage)) {
-      const input = normalizeUsageTokenCount(value.usage.input_tokens)
-      const output = normalizeUsageTokenCount(value.usage.output_tokens)
-      if (input !== null || output !== null)
+      const input =
+        "input_tokens" in value.usage ?
+          (normalizeUsageTokenCount(value.usage.input_tokens) ?? Number.NaN)
+        : undefined
+      const output =
+        "output_tokens" in value.usage ?
+          (normalizeUsageTokenCount(value.usage.output_tokens) ?? Number.NaN)
+        : undefined
+      if (input !== undefined || output !== undefined)
         recordUsage(input ?? 0, output ?? 0, model.id)
     }
     return parseHostedResult(value, urls)

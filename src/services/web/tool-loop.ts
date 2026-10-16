@@ -1,3 +1,5 @@
+import { captureRequestUsageObserver } from "~/lib/request-usage"
+
 import type {
   ManagedWebTool,
   PreparedManagedWebTools,
@@ -12,11 +14,14 @@ import { prepareManagedWebTools, webToolError } from "./tool-context"
 import { executeManagedWebCall } from "./tool-executor"
 import {
   continuationPayload,
+  isUnsuccessfulResponses,
   responseCalls,
   sumUsage,
   withoutManagedCalls,
+  withoutUnexecutedManagedCalls,
 } from "./tool-output"
 import { streamManagedWebRequest } from "./tool-stream"
+import { ManagedWebUsage } from "./tool-usage"
 
 export interface WebEvent {
   event?: string
@@ -81,14 +86,39 @@ export async function runManagedWebRequest(
   )
   if (prepared.managed.size === 0)
     return await options.send(options.payload, prepared.managed)
+  const observedUsage = new ManagedWebUsage(
+    options.protocol,
+    captureRequestUsageObserver(),
+  )
   let payload = prepared.payload
   let response = await options.send(payload, prepared.managed)
   if (isWebStream(response))
-    return streamManagedWebRequest(options, prepared, response)
+    return streamManagedWebRequest(options, prepared, {
+      first: response,
+      observedUsage,
+    })
   let usage: Record<string, unknown> | undefined
   for (let round = 0; round < 18; round++) {
+    const intercepted = responseCalls(response, options.protocol).some(
+      (call) => !call.clientOwned && prepared.managed.has(call.name),
+    )
+    observedUsage.observe(
+      options.protocol === "responses" && response.status === "failed" ?
+        undefined
+      : response.usage,
+      intercepted,
+    )
     options.signal?.throwIfAborted()
     usage = sumUsage(usage, response.usage)
+    if (isUnsuccessfulResponses(response, options.protocol))
+      return {
+        ...withoutUnexecutedManagedCalls(
+          response,
+          prepared.managed,
+          options.protocol,
+        ),
+        ...(usage ? { usage } : {}),
+      }
     const { completed, mixed } = await completeWebCalls(
       options,
       prepared,
@@ -105,6 +135,7 @@ export async function runManagedWebRequest(
       completed,
       protocol: options.protocol,
     })
+    observedUsage.nextRound()
     const next = await options.send(payload, prepared.managed)
     if (isWebStream(next))
       throw webToolError(

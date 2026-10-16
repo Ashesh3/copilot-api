@@ -6,6 +6,7 @@ import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 import { server } from "../src/server"
 import { resetWebSearchSessionsForTest } from "../src/services/copilot/mcp-web-search"
+import { isGithubOrigin } from "./helpers/github-origin"
 import {
   useProtocolDatabase,
   seedProtocolDatabase,
@@ -205,8 +206,7 @@ test("Codex open forwards to GitHub hosted browsing without page-origin access",
   tokenPool.rebuildModelIndex()
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
-    if (!url.hostname.endsWith("githubcopilot.com"))
-      throw new Error("Forbidden page origin")
+    if (!isGithubOrigin(url)) throw new Error("Forbidden page origin")
     requests.push({
       url,
       body: JSON.parse(

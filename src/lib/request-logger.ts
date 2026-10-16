@@ -4,6 +4,7 @@ import * as Sentry from "@sentry/bun"
 
 import type { HttpErrorInspection } from "./error"
 import type { RoutingTelemetryRequestState } from "./request-session"
+import type { ObservedRequestUsage } from "./request-usage"
 
 import { isHTTPError, snapshotHttpErrorMetadata } from "./error"
 import { isProxyObject } from "./plain-data-snapshot"
@@ -15,7 +16,11 @@ import {
   getRoutingTelemetryRequestState,
   suppressRequestModelDiagnostics,
 } from "./request-session"
-import { diagnosticInputTokens, observeRequestUsage } from "./request-usage"
+import {
+  diagnosticInputTokens,
+  observeRequestUsage,
+  runWithRequestUsageObserver,
+} from "./request-usage"
 import { recordRoutingRequest } from "./routing-telemetry"
 import { applySentryRequestDiagnostics, getSentryModelName } from "./sentry"
 import { state } from "./state"
@@ -878,7 +883,10 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
     inputLength: contentLength ? Number(contentLength) : undefined,
   } as RequestContext)
 
-  await next()
+  let observedUsage: ObservedRequestUsage | undefined
+  await runWithRequestUsageObserver((usage) => {
+    observedUsage = usage
+  }, next)
 
   // Skip logging for noisy telemetry endpoints
   if (path.startsWith("/api/event_logging/")) return
@@ -921,10 +929,10 @@ export async function requestLogger(c: Context, next: Next): Promise<void> {
   lines.push(`  ${colors.dim}${getTimeString()}${colors.reset}`)
 
   // Stream usage arrives after the response headers and replaces estimates.
-  c.res = observeRequestUsage(
-    c.res,
-    () => c.get(REQUEST_CONTEXT_KEY) as RequestContext | undefined,
-  )
+  c.res = observeRequestUsage(c.res, () => ({
+    ...(c.get(REQUEST_CONTEXT_KEY) as RequestContext | undefined),
+    ...observedUsage,
+  }))
 
   // Print all lines to terminal
   console.log(lines.join("\n"))

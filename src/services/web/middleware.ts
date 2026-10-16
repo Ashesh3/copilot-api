@@ -1,5 +1,7 @@
 import type { MiddlewareHandler } from "hono"
 
+import { readResponsesRequestJson } from "~/routes/responses/request-json"
+
 import { isRecord, runWithWebTools } from "./tool-context"
 
 export const webToolsMiddleware: MiddlewareHandler = async (c, next) => {
@@ -13,10 +15,12 @@ export const webToolsMiddleware: MiddlewareHandler = async (c, next) => {
     await next()
     return
   }
-  const payload: unknown = await c.req.raw
-    .clone()
-    .json()
-    .catch(() => undefined)
+  const request = c.req.raw.clone() as Request
+  // Decode the same bytes as the route; leave body and parse errors to its handler.
+  const payload: unknown = await (
+    /^\/(?:v1\/)?responses\/?$/.test(path) ?
+      readResponsesRequestJson(request)
+    : request.json()).catch(() => undefined)
   if (!isRecord(payload)) {
     await next()
     return

@@ -7,6 +7,7 @@ import { state } from "~/lib/state"
 import { server } from "~/server"
 import { resetWebSearchSessionsForTest } from "~/services/copilot/mcp-web-search"
 
+import { isGithubOrigin } from "./helpers/github-origin"
 import {
   seedProtocolDatabase,
   useProtocolDatabase,
@@ -23,7 +24,7 @@ const fetchMock = mock(
   // eslint-disable-next-line complexity -- Three provider envelopes plus MCP and page transport in one route fixture.
   async (url: string | URL | Request, init?: RequestInit) => {
     const target = new URL(url instanceof Request ? url.url : String(url))
-    if (!target.hostname.endsWith("githubcopilot.com"))
+    if (!isGithubOrigin(target))
       throw new Error("Proxy must not fetch page origins")
     const body = JSON.parse(
       typeof init?.body === "string" ? init.body : "{}",

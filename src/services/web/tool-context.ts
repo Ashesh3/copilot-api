@@ -24,7 +24,9 @@ export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
 function toolName(tool: Record<string, unknown>): string | undefined {
-  const definition = isRecord(tool.function) ? tool.function : tool
+  let definition = tool
+  if (isRecord(tool.function)) definition = tool.function
+  else if (isRecord(tool.custom)) definition = tool.custom
   return typeof definition.name === "string" ? definition.name : undefined
 }
 function toolDeclarations(
@@ -50,7 +52,11 @@ function toolDeclarations(
     )
   if (Array.isArray(source.input))
     for (const item of source.input)
-      if (isRecord(item) && item.type === "additional_tools")
+      if (
+        isRecord(item)
+        && (item.type === "additional_tools"
+          || item.type === "tool_search_output")
+      )
         declarations.push(...toolDeclarations(item))
   return declarations
 }
@@ -73,6 +79,29 @@ function allowsDefaults(
     : undefined
   const config =
     isRecord(source.generationConfig) ? source.generationConfig : undefined
+  const required =
+    choice === "required"
+    || (isRecord(choice)
+      && (choice.type === "any"
+        || (choice.type === "allowed_tools" && choice.mode === "required")))
+    || (isRecord(google)
+      && typeof google.mode === "string"
+      && google.mode.toUpperCase() === "ANY")
+  // A required client call must not be satisfied by an injected server tool.
+  const active = external ? undefined : context.getStore()
+  if (
+    required
+    && toolDeclarations(source).some((tool) => {
+      const name = toolName(tool)
+      const type = typeof tool.type === "string" ? tool.type.trim() : ""
+      if (/^web_search(?:_[a-z\d]+)*$/.test(type)) return false
+      // Native tool classes, including client tool_search, need no name.
+      if (!name) return type.length > 0
+      if (active?.callerNames.has(name)) return true
+      return !active?.injected.has(name) && !active?.requested.has(name)
+    })
+  )
+    return false
   if (
     choice === "none"
     || (external && source.tools === null)

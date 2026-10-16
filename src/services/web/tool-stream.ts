@@ -1,5 +1,6 @@
-import type { PreparedManagedWebTools } from "./tool-context"
+import type { PreparedManagedWebTools, WebProtocol } from "./tool-context"
 import type { ManagedWebRequest, WebEvent } from "./tool-loop"
+import type { ManagedWebUsage } from "./tool-usage"
 
 import { isRecord, webToolError } from "./tool-context"
 import { completeWebCalls, isWebStream } from "./tool-loop"
@@ -9,6 +10,7 @@ import {
   responseOutputText,
   sumUsage,
   withoutManagedCalls,
+  withoutUnexecutedManagedCalls,
 } from "./tool-output"
 
 // Implemented protocol adapters retain ordinary text streaming and hold tool-call
@@ -16,16 +18,9 @@ import {
 export async function* streamManagedWebRequest(
   options: ManagedWebRequest,
   prepared: PreparedManagedWebTools,
-  first: AsyncIterable<WebEvent>,
+  input: { first: AsyncIterable<WebEvent>; observedUsage: ManagedWebUsage },
 ): AsyncGenerator<WebEvent> {
-  yield* streamRounds(options, prepared, first)
-}
-
-async function* streamRounds(
-  options: ManagedWebRequest,
-  prepared: PreparedManagedWebTools,
-  first: AsyncIterable<WebEvent>,
-): AsyncGenerator<WebEvent> {
+  const { first, observedUsage } = input
   let payload = prepared.payload
   let source = first
   const position: StreamPosition = {
@@ -39,7 +34,12 @@ async function* streamRounds(
     position.usage = usage
     position.output = allOutput
     const state = new RoundState(options.protocol, prepared.managed)
-    yield* consumeRound(options, state, { source, round, position })
+    yield* consumeRound(options, state, {
+      source,
+      round,
+      position,
+      observedUsage,
+    })
     if (state.failed || (!state.intercepted && round === 0)) return
     const response = state.finish()
     usage = sumUsage(usage, response.usage)
@@ -77,6 +77,7 @@ async function* streamRounds(
       completed,
       protocol: options.protocol,
     })
+    observedUsage.nextRound()
     const next = await options.send(payload, prepared.managed)
     if (!isWebStream(next))
       throw webToolError(
@@ -92,7 +93,7 @@ async function* streamRounds(
 }
 
 interface StreamPosition {
-  protocol: string
+  protocol: WebProtocol
   offset: number
   sequence: number
   id?: unknown
@@ -128,6 +129,7 @@ async function* consumeRound(
     source: AsyncIterable<WebEvent>
     round: number
     position: StreamPosition
+    observedUsage: ManagedWebUsage
   },
 ): AsyncGenerator<WebEvent> {
   const { source, round, position } = input
@@ -139,23 +141,15 @@ async function* consumeRound(
       continue
     }
     const parsed = state.accept(event)
+    input.observedUsage.observe(state.observedUsage, state.intercepted)
     if (!parsed) {
       if (state.done) break
       if (event.data && event.data !== "[DONE]") yield event
       continue
     }
     if (state.failed) {
-      if (state.intercepted || round > 0) {
-        const response = isRecord(parsed.response) ? parsed.response : undefined
-        if (response) {
-          parsed.response = {
-            ...response,
-            output: [...(position.output ?? []), ...records(response.output)],
-            usage: sumUsage(position.usage, response.usage),
-          }
-        }
-        yield remap(event, parsed, position)
-      } else yield event
+      if (!state.intercepted && round === 0) yield event
+      else yield* failedRoundEvents(state, { event, parsed, position })
       return
     }
     if (repeatedStart(parsed, round, position)) continue
@@ -175,6 +169,40 @@ async function* consumeRound(
     // iterator until [DONE] or EOF; other dialects carry usage on their terminal.
     if (state.done && options.protocol !== "chat") break
   }
+}
+
+function* failedRoundEvents(
+  state: RoundState,
+  input: {
+    event: WebEvent
+    parsed: Record<string, unknown>
+    position: StreamPosition
+  },
+): Generator<WebEvent> {
+  const { event, parsed, position } = input
+  const response = isRecord(parsed.response) ? parsed.response : undefined
+  if (response) {
+    const visible = withoutUnexecutedManagedCalls(
+      response,
+      state.managedTools,
+      position.protocol,
+    )
+    for (const pending of state.pendingEvents(visible, false, true)) {
+      yield remap(
+        pending,
+        JSON.parse(pending.data ?? "{}") as Record<string, unknown>,
+        position,
+      )
+    }
+    const output = [...(position.output ?? []), ...records(visible.output)]
+    parsed.response = {
+      ...visible,
+      output,
+      output_text: responseOutputText(output),
+      usage: sumUsage(position.usage, response.usage),
+    }
+  }
+  yield remap(event, parsed, position)
 }
 
 function remap(
@@ -206,13 +234,15 @@ class RoundState {
   private readonly blocks = new Map<number, Record<string, unknown>>()
   private readonly toolJson = new Map<number, string>()
   private readonly toolIndices = new Set<number>()
-  private readonly outputIds = new Set<string>()
+  private readonly outputIndices = new Map<string, number>()
   private readonly tools = new Map<number, Record<string, unknown>>()
   private readonly forwardedTools = new Set<number>()
   private readonly heldMessageEvents: Array<Record<string, unknown>> = []
+  private readonly heldResponseEvents: Array<Record<string, unknown>> = []
   private content = ""
   private reasoning = ""
   private signature: unknown
+  private encryptedContent: unknown
   private terminal = false
   private finishReason: unknown
   private usage: unknown
@@ -223,11 +253,24 @@ class RoundState {
   get done(): boolean {
     return this.terminal
   }
-  private readonly protocol: string
+  private readonly protocol: WebProtocol
   private readonly managed: ReadonlyMap<string, unknown>
-  constructor(protocol: string, managed: ReadonlyMap<string, unknown>) {
+  constructor(protocol: WebProtocol, managed: ReadonlyMap<string, unknown>) {
     this.protocol = protocol
     this.managed = managed
+  }
+  get managedTools(): ReadonlyMap<string, unknown> {
+    return this.managed
+  }
+  get observedUsage(): unknown {
+    if (this.protocol === "chat") return this.usage
+    if (
+      this.protocol === "responses"
+      && (this.response.status === "failed"
+        || this.terminalEnvelope.type === "response.failed")
+    )
+      return undefined
+    return this.response.usage
   }
 
   accept(event: WebEvent): Record<string, unknown> | undefined {
@@ -310,18 +353,37 @@ class RoundState {
     if (
       value.type === "response.output_item.added"
       && isRecord(value.item)
+      && typeof value.item.id === "string"
+    )
+      this.outputIndices.set(value.item.id, Number(value.output_index))
+    if (
+      value.type === "response.output_item.added"
+      && isRecord(value.item)
       && value.item.type === "function_call"
       && !value.item.namespace
       && this.managed.has(String(value.item.name))
     ) {
       this.toolIndices.add(Number(value.output_index))
       this.intercepted = true
-      if (typeof value.item.id === "string") this.outputIds.add(value.item.id)
     }
-    if (value.type === "response.completed" && isRecord(value.response)) {
+    if (
+      ["response.completed", "response.failed", "response.incomplete"].includes(
+        String(value.type),
+      )
+      && isRecord(value.response)
+    ) {
       this.terminalEnvelope = value
       this.response = value.response
       this.terminal = true
+      this.failed ||= ["failed", "incomplete"].includes(
+        String(this.response.status),
+      )
+      this.intercepted ||= records(this.response.output).some(
+        (item) =>
+          item.type === "function_call"
+          && !item.namespace
+          && this.managed.has(String(item.name)),
+      )
     }
   }
   private acceptChat(value: Record<string, unknown>): void {
@@ -350,28 +412,29 @@ class RoundState {
       if (typeof delta.reasoning_text === "string")
         this.reasoning += delta.reasoning_text
       if (delta.reasoning_opaque) this.signature = delta.reasoning_opaque
+      if (typeof delta.encrypted_content === "string")
+        this.encryptedContent = delta.encrypted_content
       this.acceptChatTools(records(delta.tool_calls))
     }
   }
   private acceptChatTools(calls: Array<Record<string, unknown>>): void {
     for (const tool of calls) {
       const index = Number(tool.index)
-      const current = this.tools.get(index) ?? {
-        id: "",
-        type: "function",
-        function: { name: "", arguments: "" },
-      }
+      const custom = tool.type === "custom" || isRecord(tool.custom)
+      const current =
+        this.tools.get(index)
+        ?? (custom ?
+          { id: "", type: "custom", custom: { name: "", input: "" } }
+        : { id: "", type: "function", function: { name: "", arguments: "" } })
       if (tool.id) current.id = tool.id
       if (isRecord(tool.function) && isRecord(current.function)) {
-        if (typeof tool.function.name === "string")
-          current.function.name =
-            textValue(current.function.name) + tool.function.name
-        if (typeof tool.function.arguments === "string")
-          current.function.arguments =
-            textValue(current.function.arguments) + tool.function.arguments
+        appendToolFields(current.function, tool.function, ["name", "arguments"])
+      }
+      if (isRecord(tool.custom) && isRecord(current.custom)) {
+        appendToolFields(current.custom, tool.custom, ["name", "input"])
       }
       this.tools.set(index, current)
-      if (isRecord(current.function)) {
+      if (current.type === "function" && isRecord(current.function)) {
         const name = textValue(current.function.name)
         if (
           [...this.managed.keys()].some((candidate) =>
@@ -393,14 +456,14 @@ class RoundState {
       }
       return value.type === "message_delta" || value.type === "message_stop"
     }
-    if (this.protocol === "responses")
-      return (
-        value.type === "response.completed"
-        || (typeof value.output_index === "number"
-          && this.toolIndices.has(value.output_index))
-        || (typeof value.item_id === "string"
-          && this.outputIds.has(value.item_id))
-      )
+    if (this.protocol === "responses") {
+      const index = this.responseEventIndex(value)
+      if (index !== undefined && index >= Math.min(...this.toolIndices)) {
+        this.heldResponseEvents.push(value)
+        return true
+      }
+      return value.type === "response.completed"
+    }
     // Preserve text/opaque reasoning even on a chunk carrying a tool delta.
     if (this.trailingChat) return true
     const choices = records(value.choices)
@@ -462,6 +525,9 @@ class RoundState {
             content: this.content || null,
             ...(this.reasoning ? { reasoning_text: this.reasoning } : {}),
             ...(this.signature ? { reasoning_opaque: this.signature } : {}),
+            ...(this.encryptedContent === undefined ?
+              {}
+            : { encrypted_content: this.encryptedContent }),
             ...(this.tools.size > 0 ?
               { tool_calls: [...this.tools.values()] }
             : {}),
@@ -470,10 +536,11 @@ class RoundState {
       ],
     }
   }
-  // eslint-disable-next-line complexity -- Each protocol emits a distinct tool-result evidence envelope.
+
   *pendingEvents(
     visible: Record<string, unknown>,
     completed: boolean,
+    failed = false,
   ): Generator<WebEvent> {
     if (this.protocol === "messages") {
       const content = records(visible.content)
@@ -490,39 +557,7 @@ class RoundState {
         }
       }
     } else if (this.protocol === "responses") {
-      const output = records(visible.output)
-      for (const index of this.toolIndices) {
-        const item = output.at(index)
-        if (!item) continue
-        yield eventFor("response.output_item.added", {
-          output_index: index,
-          item: { ...item, status: "in_progress", content: [] },
-        })
-        for (const [contentIndex, part] of records(item.content).entries()) {
-          const address = {
-            output_index: index,
-            item_id: item.id,
-            content_index: contentIndex,
-          }
-          yield eventFor("response.content_part.added", {
-            ...address,
-            part: { ...part, text: "" },
-          })
-          yield eventFor("response.output_text.delta", {
-            ...address,
-            delta: part.text,
-          })
-          yield eventFor("response.output_text.done", {
-            ...address,
-            text: part.text,
-          })
-          yield eventFor("response.content_part.done", { ...address, part })
-        }
-        yield eventFor("response.output_item.done", {
-          output_index: index,
-          item,
-        })
-      }
+      yield* this.pendingResponses(visible, failed)
     } else {
       const choice = records(visible.choices).at(0)
       const message = isRecord(choice?.message) ? choice.message : {}
@@ -563,6 +598,41 @@ class RoundState {
             ],
           }),
         }
+    }
+  }
+  private responseEventIndex(
+    event: Record<string, unknown>,
+  ): number | undefined {
+    if (typeof event.output_index === "number") return event.output_index
+    return typeof event.item_id === "string" ?
+        this.outputIndices.get(event.item_id)
+      : undefined
+  }
+  private *pendingResponses(
+    visible: Record<string, unknown>,
+    failed: boolean,
+  ): Generator<WebEvent> {
+    const output = records(visible.output)
+    for (const event of this.heldResponseEvents) {
+      const index = this.responseEventIndex(event)
+      if (index === undefined) continue
+      if (this.toolIndices.has(index)) {
+        if (!failed && event.type === "response.output_item.added") {
+          const item = output.at(index)
+          if (item) yield* replacementMessageEvents(item, index)
+        }
+        continue
+      }
+      const removed =
+        failed ?
+          [...this.toolIndices].filter((owned) => owned < index).length
+        : 0
+      yield eventFor(String(event.type), {
+        ...event,
+        ...(typeof event.output_index === "number" ?
+          { output_index: index - removed }
+        : {}),
+      })
     }
   }
   visibleSize(visible: Record<string, unknown>): number {
@@ -621,4 +691,42 @@ class RoundState {
       yield { data: "[DONE]" }
     }
   }
+}
+
+function appendToolFields(
+  current: Record<string, unknown>,
+  delta: Record<string, unknown>,
+  fields: ReadonlyArray<string>,
+): void {
+  for (const field of fields)
+    if (typeof delta[field] === "string")
+      current[field] = textValue(current[field]) + delta[field]
+}
+
+function* replacementMessageEvents(
+  item: Record<string, unknown>,
+  index: number,
+): Generator<WebEvent> {
+  yield eventFor("response.output_item.added", {
+    output_index: index,
+    item: { ...item, status: "in_progress", content: [] },
+  })
+  for (const [contentIndex, part] of records(item.content).entries()) {
+    const address = {
+      output_index: index,
+      item_id: item.id,
+      content_index: contentIndex,
+    }
+    yield eventFor("response.content_part.added", {
+      ...address,
+      part: { ...part, text: "" },
+    })
+    yield eventFor("response.output_text.delta", {
+      ...address,
+      delta: part.text,
+    })
+    yield eventFor("response.output_text.done", { ...address, text: part.text })
+    yield eventFor("response.content_part.done", { ...address, part })
+  }
+  yield eventFor("response.output_item.done", { output_index: index, item })
 }

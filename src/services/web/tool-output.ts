@@ -60,9 +60,50 @@ export function responseCalls(
   const choice = records(response.choices).at(0)
   const message = choice && isRecord(choice.message) ? choice.message : {}
   return records(message.tool_calls).map((call) => {
+    if (call.type === "custom" || isRecord(call.custom)) {
+      const custom = isRecord(call.custom) ? call.custom : {}
+      return {
+        id: String(call.id),
+        name: String(custom.name),
+        input: custom.input,
+        clientOwned: true,
+      }
+    }
     const fn = isRecord(call.function) ? call.function : {}
     return { id: String(call.id), name: String(fn.name), input: fn.arguments }
   })
+}
+
+/** Terminal failures can contain unfinished tool arguments; never run or expose owned calls. */
+export function withoutUnexecutedManagedCalls(
+  response: Record<string, unknown>,
+  managed: ReadonlyMap<string, unknown>,
+  protocol: WebProtocol,
+): Record<string, unknown> {
+  if (protocol !== "responses") return response
+  const output = records(response.output).filter(
+    (item) =>
+      item.type !== "function_call"
+      || Boolean(item.namespace)
+      || !managed.has(String(item.name)),
+  )
+  return {
+    ...response,
+    output,
+    ...(response.output_text === undefined ?
+      {}
+    : { output_text: responseOutputText(output) }),
+  }
+}
+
+export function isUnsuccessfulResponses(
+  response: Record<string, unknown>,
+  protocol: WebProtocol,
+): boolean {
+  return (
+    protocol === "responses"
+    && (response.status === "failed" || response.status === "incomplete")
+  )
 }
 
 export function continuationPayload(
@@ -76,7 +117,22 @@ export function continuationPayload(
   const { completed, protocol } = options
   const next = {
     ...payload,
-    tool_choice: protocol === "messages" ? { type: "auto" } : "auto",
+    tool_choice:
+      protocol === "messages" ?
+        {
+          type: "auto",
+          ...((
+            isRecord(payload.tool_choice)
+            && typeof payload.tool_choice.disable_parallel_tool_use
+              === "boolean"
+          ) ?
+            {
+              disable_parallel_tool_use:
+                payload.tool_choice.disable_parallel_tool_use,
+            }
+          : {}),
+        }
+      : "auto",
   }
   if (protocol === "messages")
     return {

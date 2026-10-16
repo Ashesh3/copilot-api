@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import { state } from "~/lib/state"
 import { executeWebSearch } from "~/services/copilot/mcp-web-search"
 
+import { isGithubOrigin } from "../helpers/github-origin"
 import { initializeTestState, postJSON, useIntegrationFixture } from "./setup"
 
 const originalFetch = globalThis.fetch
@@ -38,10 +39,7 @@ beforeEach(async () => {
     init?: RequestInit,
   ) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
-    if (
-      url.hostname !== "api.github.com"
-      && !url.hostname.endsWith("githubcopilot.com")
-    ) {
+    if (!isGithubOrigin(url, { allowGithubApi: true })) {
       pageOriginAttempts.push(url.hostname)
       throw new Error("Web tool attempted forbidden page-origin egress")
     }

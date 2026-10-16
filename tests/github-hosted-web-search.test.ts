@@ -22,6 +22,7 @@ import { state } from "~/lib/state"
 import { createAccountDistributionRepository } from "~/lib/storage/account-distribution-repository"
 import { withRequestSnapshot } from "~/lib/storage/request-snapshot"
 import { getStorageRuntime } from "~/lib/storage/runtime"
+import { getHistoryRuntime } from "~/lib/telemetry-writer"
 import { tokenPool } from "~/lib/token-pool"
 import { requestedWebPages } from "~/services/copilot/hosted-web-search"
 import {
@@ -29,6 +30,7 @@ import {
   resetWebSearchSessionsForTest,
 } from "~/services/copilot/mcp-web-search"
 
+import { isGithubOrigin } from "./helpers/github-origin"
 import {
   seedProtocolDatabase,
   useProtocolDatabase,
@@ -98,8 +100,7 @@ beforeEach(async () => {
   }
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
-    if (!url.hostname.endsWith("githubcopilot.com"))
-      throw new Error("Forbidden page-origin request")
+    if (!isGithubOrigin(url)) throw new Error("Forbidden page-origin request")
     const body = JSON.parse(
       typeof init?.body === "string" ? init.body : "{}",
     ) as Record<string, unknown>
@@ -141,6 +142,51 @@ test("page URLs preserve balanced parentheses and a quoted URL's literal punctua
     "https://pages.test/guide",
   ])
 })
+
+test.each([
+  ["Open 'https://pages.test/guide'", "https://pages.test/guide"],
+  ["Open `https://pages.test/guide`", "https://pages.test/guide"],
+  ["Read 'https://pages.test/guide', please", "https://pages.test/guide"],
+  ["Read `https://pages.test/guide`.", "https://pages.test/guide"],
+  [
+    "Read 'https://pages.test/guide?value=end.,;'",
+    "https://pages.test/guide?value=end.,;",
+  ],
+  [
+    "Read `https://pages.test/Bun_(software)?value=end.,;`",
+    "https://pages.test/Bun_(software)?value=end.,;",
+  ],
+  [
+    'Read "https://pages.test/guide?value=end.,;"',
+    "https://pages.test/guide?value=end.,;",
+  ],
+  [
+    "Read <https://pages.test/guide?value=end.,;>",
+    "https://pages.test/guide?value=end.,;",
+  ],
+  ["Read 'https://pages.test/o'clock'", "https://pages.test/o'clock"],
+  ["Read https://pages.test/o'clock", "https://pages.test/o'clock"],
+  ["Read https://pages.test/guide'", "https://pages.test/guide'"],
+  ["Read https://pages.test/guide`", "https://pages.test/guide%60"],
+  ["Read 'https://pages.test/o'clock", "https://pages.test/o'clock"],
+  ["Read `https://pages.test/guide", "https://pages.test/guide"],
+])("page URL extraction removes only paired enclosures: %s", (query, url) => {
+  expect(requestedWebPages(query)).toEqual([url])
+})
+
+test.each(["'", "`"])(
+  "a page request enclosed in %s reaches the exact hosted open target",
+  async (quote) => {
+    const text = await executeWebSearch(
+      `Open ${quote}https://pages.test/guide${quote}.`,
+    )
+    expect(text).toContain("REMOTE_PAGE_EVIDENCE")
+    expect(requests).toHaveLength(1)
+    expect(requests[0].body.input).toStartWith(
+      "Requested exact URLs:\nhttps://pages.test/guide\n",
+    )
+  },
+)
 
 test("ordinary search keeps the existing MCP route", async () => {
   expect(await executeWebSearch("latest releases")).toBe("MCP_SEARCH_ONLY")
@@ -231,6 +277,139 @@ test("a hosted tool rejection is reported, not hidden behind another retrieval b
     /^Web search failed:/,
   )
   expect(requests).toHaveLength(1)
+})
+
+test.each([
+  {
+    usage: { input_tokens: 11, output_tokens: 7 },
+    input: 11,
+    output: 7,
+    requests: 1,
+    gaps: 0,
+  },
+  {
+    usage: { input_tokens: 0, output_tokens: 0 },
+    input: 0,
+    output: 0,
+    requests: 1,
+    gaps: 0,
+  },
+  {
+    usage: { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 7 },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    usage: { input_tokens: 11, output_tokens: 0.5 },
+    input: 11,
+    output: 0,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    usage: { input_tokens: "11", output_tokens: 7 },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    usage: { input_tokens: null, output_tokens: 7 },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    usage: { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: -1 },
+    input: 0,
+    output: 0,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    usage: { input_tokens: Number.MAX_SAFE_INTEGER },
+    input: 0,
+    output: 0,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    usage: { output_tokens: null },
+    input: 0,
+    output: 0,
+    requests: 1,
+    gaps: 1,
+  },
+  {
+    usage: { input_tokens: 11 },
+    input: 11,
+    output: 0,
+    requests: 1,
+    gaps: 0,
+  },
+  {
+    usage: { output_tokens: 7 },
+    input: 0,
+    output: 7,
+    requests: 1,
+    gaps: 0,
+  },
+  { usage: undefined, input: 0, output: 0, requests: 0, gaps: 0 },
+  { usage: null, input: 0, output: 0, requests: 0, gaps: 0 },
+  { usage: {}, input: 0, output: 0, requests: 0, gaps: 0 },
+  {
+    usage: { total_tokens: 18 },
+    input: 0,
+    output: 0,
+    requests: 0,
+    gaps: 0,
+  },
+])(
+  "hosted helper preserves valid usage and explicit invalid counts: %p",
+  async (expected) => {
+    result.usage = expected.usage
+    await executeWebSearch("Open https://pages.test/guide")
+    const runtime = getHistoryRuntime()
+    await runtime.writer.flush()
+    expect(
+      (await runtime.repository.readUsageTotals(0)).lifetime,
+    ).toMatchObject({
+      inputTokens: expected.input,
+      outputTokens: expected.output,
+      requestCount: expected.requests,
+    })
+    expect((await runtime.repository.collectionStatus()).unknownGaps).toBe(
+      expected.gaps,
+    )
+    const gaps = await runtime.storage.read((session) =>
+      session.query({
+        sql: "SELECT payload_json FROM capi_collection_gaps",
+        args: [],
+      }),
+    )
+    expect(gaps).toHaveLength(expected.gaps)
+    for (const gap of gaps)
+      expect(JSON.parse(String(gap.payload_json))).toMatchObject({
+        historyKind: "usage",
+        unknown: true,
+        reason: "invalid-token-count",
+      })
+  },
+)
+
+test("failed hosted responses do not charge helper usage", async () => {
+  result.status = "failed"
+  result.usage = { input_tokens: 11, output_tokens: 7 }
+  await executeWebSearch("Open https://pages.test/guide")
+  const runtime = getHistoryRuntime()
+  await runtime.writer.flush()
+  expect(
+    (await runtime.repository.readUsageTotals(0)).lifetime.requestCount,
+  ).toBe(0)
+  expect((await runtime.repository.collectionStatus()).unknownGaps).toBe(0)
 })
 
 test("page-reading helper preserves the parent account and durable model assignment", async () => {

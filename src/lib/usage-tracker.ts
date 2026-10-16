@@ -238,10 +238,13 @@ export function flushUsage(): Promise<void> {
   return getTelemetryWriter()?.flush() ?? Promise.resolve()
 }
 
+// Keep the logical request count separate from incomplete aggregate token totals.
+// eslint-disable-next-line max-params
 export function recordUsage(
   inputTokens: number,
   outputTokens: number,
   model?: string,
+  unknownTokenCount = false,
 ): void {
   try {
     const input = normalizeUsageTokenCount(inputTokens),
@@ -271,7 +274,7 @@ export function recordUsage(
       recordedAt: now,
       payload: { ...bucket, firstRequestAt: now },
     })
-    if (input === null || output === null) {
+    if (unknownTokenCount || input === null || output === null) {
       writer?.enqueue({
         id: randomUUID(),
         kind: "collection-gap",

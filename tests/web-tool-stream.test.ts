@@ -575,6 +575,9 @@ test.each(["response.incomplete", "response.failed"])(
         incomplete_details: { reason: "max_output_tokens" },
       },
     })
+    expect((final?.response as Record<string, unknown>).output_text).toContain(
+      "PAGE",
+    )
     const sequences = values.map((v) => Number(v.sequence_number))
     expect(
       sequences.every(

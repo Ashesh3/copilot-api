@@ -16,6 +16,7 @@ import {
 import { server } from "~/server"
 
 import { clientToolsPayload } from "./helpers/client-tools-payload"
+import { isGithubOrigin } from "./helpers/github-origin"
 import {
   PROTOCOL_GATEWAY_KEY,
   seedProtocolDatabase,
@@ -274,7 +275,7 @@ test("WebSocket clients open pages on GitHub through default web search", async 
   let pageRequests = 0
   globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
     const target = new URL(url instanceof Request ? url.url : String(url))
-    if (!target.hostname.endsWith("githubcopilot.com"))
+    if (!isGithubOrigin(target))
       throw new Error("Proxy must not fetch page origins")
     const body = JSON.parse(
       typeof init?.body === "string" ? init.body : "{}",
