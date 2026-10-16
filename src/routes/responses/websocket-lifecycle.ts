@@ -1,5 +1,6 @@
 import type { HttpErrorInspection } from "~/lib/error"
 import type { ForcedSystemPrompt } from "~/lib/forced-system-prompt"
+import type { ObservedRequestUsage } from "~/lib/request-usage"
 import type { RoutingAffinity } from "~/lib/routing-affinity"
 import type {
   StreamTerminalFailure,
@@ -30,6 +31,7 @@ import {
   type RoutingTelemetryRequestState,
   routingTelemetryStorage,
 } from "~/lib/request-session"
+import { runWithRequestUsageObserver } from "~/lib/request-usage"
 import { runWithRoutingAffinity } from "~/lib/routing-affinity"
 import { createStreamTerminalLifecycle } from "~/lib/stream-terminal-lifecycle"
 import { recordUsage } from "~/lib/usage-tracker"
@@ -44,6 +46,8 @@ export interface ResponsesWebSocketTurn {
   failureWriters: WeakMap<StreamTerminalFailure, () => Promise<void>>
   outputStarted: boolean
   syntheticResponse?: boolean
+  managedUsage?: ObservedRequestUsage
+  terminalUsage?: ObservedRequestUsage
   terminal: StreamTerminalLifecycle<ResponsesWebSocketTerminalSuccess>
   inputLength: number
   lifecycle?: LogicalRequestLifecycle
@@ -133,15 +137,10 @@ export function createResponsesWebSocketTurn(
         && (success.usage.input_tokens !== undefined
           || success.usage.output_tokens !== undefined)
       ) {
-        recordUsage(
-          success.usage.input_tokens === undefined ?
-            0
-          : success.usage.input_tokens,
-          success.usage.output_tokens === undefined ?
-            0
-          : success.usage.output_tokens,
-          turn.model,
-        )
+        turn.terminalUsage = {
+          inputTokens: success.usage.input_tokens,
+          outputTokens: success.usage.output_tokens,
+        }
       }
       finalizeResponsesWebSocketTurn(data, turn, {
         status: success.status,
@@ -149,15 +148,18 @@ export function createResponsesWebSocketTurn(
       })
     },
     onFailure: async (failure) => {
-      await turn.failureWriters.get(failure)?.()
-      const terminal = await classifyWebSocketTerminal(
-        failure.kind === "thrown" ? failure.error : undefined,
-        turn,
-      )
-      finalizeResponsesWebSocketTurn(data, turn, {
-        error: failure.kind === "thrown" ? failure.error : undefined,
-        ...terminal,
-      })
+      try {
+        await turn.failureWriters.get(failure)?.()
+      } finally {
+        const terminal = await classifyWebSocketTerminal(
+          failure.kind === "thrown" ? failure.error : undefined,
+          turn,
+        )
+        finalizeResponsesWebSocketTurn(data, turn, {
+          error: failure.kind === "thrown" ? failure.error : undefined,
+          ...terminal,
+        })
+      }
     },
   })
   data.activeTurns.set(sequence, turn)
@@ -201,13 +203,27 @@ export function finalizeResponsesWebSocketTurn(
   },
 ): void {
   const lifecycle = ensureResponsesWebSocketLifecycle(turn)
-  lifecycle.finalize({
+  const finalized = lifecycle.finalize({
     accountId: turn.routingState.lastUsedAccountId,
     error: options.error,
     errorInspection: options.errorInspection,
     status: options.status,
     terminalStatus: options.terminalStatus,
   })
+  const usage = turn.managedUsage ?? turn.terminalUsage
+  if (
+    finalized
+    && !turn.syntheticResponse
+    && usage
+    && (usage.inputTokens !== undefined || usage.outputTokens !== undefined)
+  ) {
+    recordUsage(
+      usage.inputTokens === undefined ? 0 : usage.inputTokens,
+      usage.outputTokens === undefined ? 0 : usage.outputTokens,
+      turn.model,
+      usage.unknownTokenCount,
+    )
+  }
   data.activeTurns.delete(turn.sequence)
 }
 
@@ -252,7 +268,13 @@ export async function runWithWebSocketRequestContext<T>(
   const runTelemetryScope = async (): Promise<T> =>
     await routingTelemetryStorage.run(
       turn.telemetryState,
-      async () => await runWithCopilotContractObservabilityScope(callback),
+      async () =>
+        await runWithRequestUsageObserver(
+          (usage) => {
+            if (!turn.lifecycle?.isFinalized()) turn.managedUsage = usage
+          },
+          async () => await runWithCopilotContractObservabilityScope(callback),
+        ),
     )
   return await requestIdStorage.run(
     turn.turnId,

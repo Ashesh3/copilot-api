@@ -9,6 +9,8 @@ import {
   buildWebSearchQuery,
   executeWebSearch,
 } from "~/services/copilot/mcp-web-search"
+import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
+import { mixedWebSearchResponse } from "~/services/web/tool-output"
 
 export const MAX_RESPONSES_WEB_SEARCH_USES = 8
 
@@ -34,6 +36,7 @@ export type ResponsesChatCompletionFactory = (
 ) => Promise<PreparedResponsesChatCompletion>
 
 function webSearchCalls(response: ChatCompletionResponse): Array<ToolCall> {
+  if (isCallerOwnedWebSearch("web_search")) return []
   return (response.choices[0]?.message.tool_calls ?? []).filter(
     (call) => call.function.name === "web_search",
   )
@@ -82,15 +85,17 @@ export async function resolvePreparedResponsesWebSearchCalls(options: {
         ),
       })),
     )
+    const mixed = mixedWebSearchResponse(
+      current as unknown as Record<string, unknown>,
+      "chat",
+      results.map((r) => ({ id: r.callId, text: r.result })),
+    )
+    if (mixed) return mixed as unknown as ChatCompletionResponse
     const nextPayload: ChatCompletionsPayload = {
       ...currentPayload,
       messages: [
         ...currentPayload.messages,
-        {
-          role: "assistant",
-          content: current.choices[0]?.message.content ?? null,
-          tool_calls: calls,
-        },
+        current.choices[0].message,
         ...results.map((result) => ({
           role: "tool" as const,
           content: result.result,

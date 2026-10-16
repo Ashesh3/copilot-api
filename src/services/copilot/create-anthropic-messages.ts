@@ -20,6 +20,7 @@ import {
   createRetryBudget,
   PRE_HEADER_MAX_DELAY_SECONDS,
 } from "~/services/copilot/transport-retry"
+import { runManagedWebRequest } from "~/services/web/tool-loop"
 
 import { fitAnthropicCompactionPayload } from "./compaction-payload"
 import {
@@ -93,6 +94,7 @@ function getPositiveModelOutputLimit(modelId: string): number | undefined {
   return Number.isInteger(limit) && Number(limit) > 0 ? limit : undefined
 }
 
+// eslint-disable-next-line complexity -- Existing request normalization plus managed tool dispatch.
 export const createAnthropicMessages = async (
   payload: AnthropicMessagesPayload,
   options?: {
@@ -162,7 +164,7 @@ export const createAnthropicMessages = async (
     retryBudget: options?.retryBudget ?? createRetryBudget(),
   }
 
-  return await dispatchAnthropicMessages({
+  const dispatchOptions: AnthropicDispatchOptions = {
     initiator,
     options: operationOptions,
     modelId: snapshot.model,
@@ -173,7 +175,19 @@ export const createAnthropicMessages = async (
     preparedHeaders: prepared.headers,
     stream: Boolean(snapshot.stream),
     vision,
-  })
+  }
+  return (await runManagedWebRequest({
+    protocol: "messages",
+    payload: dispatchOptions.preparedBody,
+    disabled: options?.compaction,
+    accountId: operationOptions.routedAccountPin.accountId,
+    signal: options?.signal,
+    send: async (body, _managed, reportProcessedPayload) =>
+      await dispatchAnthropicMessages(
+        { ...dispatchOptions, preparedBody: body },
+        reportProcessedPayload,
+      ),
+  })) as CreateAnthropicMessagesReturn
 }
 
 function ensureTransportMaxTokens(
@@ -302,6 +316,7 @@ function omitLearnedDisabledThinking(
 
 async function dispatchAnthropicMessages(
   options: AnthropicDispatchOptions,
+  reportProcessedPayload: (payload: Record<string, unknown>) => void,
 ): Promise<CreateAnthropicMessagesReturn> {
   const { preparedBody, stream } = options
 
@@ -341,6 +356,9 @@ async function dispatchAnthropicMessages(
     )
   }
 
+  // Serialization normalizes an owned clone. Keep the continuation aligned
+  // with that accepted request, including compatibility removals.
+  reportProcessedPayload(normalizeAnthropicMessagesRequest(activeBody))
   if (stream) {
     return events(response) as AsyncIterable<AnthropicStreamChunk>
   }

@@ -151,7 +151,7 @@ beforeEach(async () => {
   await seedProtocolDatabase()
 })
 
-test("forwards native server tools without schemas and preserves the caller", async () => {
+test("preserves caller server tools without implementing local web fetch", async () => {
   const tools = [
     {
       type: "web_fetch_20250910",
@@ -211,7 +211,9 @@ test("forwards native server tools without schemas and preserves the caller", as
   )
 
   expect(response.status).toBe(200)
-  expect(nativeBodies[0]?.tools).toEqual(tools)
+  const preparedTools = nativeBodies[0]?.tools as Array<Record<string, unknown>>
+  expect(preparedTools[0]).toEqual(tools[0])
+  expect(preparedTools.slice(1, 3)).toEqual(tools.slice(1))
   expect(payload).toEqual(snapshot)
 })
 

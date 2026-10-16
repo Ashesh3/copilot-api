@@ -177,6 +177,7 @@ beforeAll(() => {
       )
     }
     for (const tool of body.tools ?? []) {
+      if (tool.name.startsWith("_copilot_web_")) continue
       const problem = physicalSchemaProblem(tool.input_schema)
       if (problem)
         return Promise.resolve(

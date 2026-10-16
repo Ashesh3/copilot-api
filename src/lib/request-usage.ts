@@ -1,11 +1,35 @@
+import { AsyncLocalStorage } from "node:async_hooks"
+
 import { normalizeUsageTokenCount } from "~/lib/storage/usage-counters"
 import { recordUsage } from "~/lib/usage-tracker"
 
-interface RequestUsage {
-  estimatedInputTokens?: number
+export interface ObservedRequestUsage {
   inputTokens?: number
   outputTokens?: number
+  unknownTokenCount?: boolean
+}
+
+interface RequestUsage extends ObservedRequestUsage {
+  estimatedInputTokens?: number
   model?: string
+}
+
+export type RequestUsageObserver = (usage: ObservedRequestUsage) => void
+const usageObserver = new AsyncLocalStorage<RequestUsageObserver>()
+
+/** Keep authoritative managed-round usage separate from transport estimates. */
+export function runWithRequestUsageObserver<T>(
+  observer: RequestUsageObserver,
+  work: () => T,
+): T {
+  return usageObserver.run(observer, work)
+}
+
+/** Capture before returning lazy streams that may run outside their scope. */
+export function captureRequestUsageObserver():
+  | RequestUsageObserver
+  | undefined {
+  return usageObserver.getStore()
 }
 
 /** Estimates describe the request; only upstream usage contributes to totals. */
@@ -36,6 +60,7 @@ export function observeRequestUsage(
       usage.inputTokens === undefined ? 0 : usage.inputTokens,
       usage.outputTokens === undefined ? 0 : usage.outputTokens,
       usage.model,
+      usage.unknownTokenCount,
     )
   }
   const contentType = response.headers.get("content-type")

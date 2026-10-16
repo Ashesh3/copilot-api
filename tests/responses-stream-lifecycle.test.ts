@@ -118,7 +118,7 @@ test.each([
   },
 )
 
-test("buffers an explicitly emulated function web_search before iteration", async () => {
+test("streams normally when web_search is a caller-owned function", async () => {
   installModel("/responses")
   const response = await postResponses({
     input: "search",
@@ -127,7 +127,7 @@ test("buffers an explicitly emulated function web_search before iteration", asyn
       {
         type: "function",
         name: "web_search",
-        description: "Search",
+        description: "Client search",
         parameters: { type: "object", properties: {} },
         strict: false,
       },
@@ -157,9 +157,9 @@ test("buffers an explicitly emulated function web_search before iteration", asyn
 
   const first = await firstRead
   const rest = await readRemaining(reader)
-  expect(early).toBe("timeout")
+  expect(early).toBe("data")
   const body = new TextDecoder().decode(first.value) + rest
-  expect(body).not.toContain("buffered-delta")
+  expect(body).toContain("buffered-delta")
   expect(events(body).at(-1)).toBe("response.completed")
 })
 

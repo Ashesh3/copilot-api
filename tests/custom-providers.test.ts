@@ -7,9 +7,9 @@ import {
   spyOn,
   test,
 } from "bun:test"
-/* eslint-disable max-lines -- hotfix extends an existing integration matrix */
 import consola from "consola"
 
+/* eslint-disable max-lines -- hotfix extends an existing integration matrix */
 import type { LlmDebugLogEntry } from "../src/lib/llm-debug-log"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
@@ -43,6 +43,7 @@ import {
   resetTestAdminSession,
   TEST_GATEWAY_KEY,
 } from "./helpers/admin-session"
+import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
   useProtocolDatabase,
   seedProtocolDatabase,
@@ -514,7 +515,7 @@ function expectChatDispatch(
   expect(requests).toHaveLength(requestCount)
   const dispatched = requests.at(-1)
   expect(dispatched?.url).toBe(url)
-  bodyCheck(dispatched?.body ?? {})
+  bodyCheck(clientToolsPayload(dispatched?.body ?? {}))
 }
 
 test("custom models appear in /v1/models with aliases and metadata", async () => {
@@ -871,7 +872,7 @@ test.each([
     expect(body.model ?? body.modelVersion).toBe(expectedModel)
     expect(requests).toHaveLength(1)
     expect(requests[0]?.url).toBe("https://custom.example/v1/chat/completions")
-    expect(requests[0]?.body).toMatchObject({
+    expect(clientToolsPayload(requests[0]?.body ?? {})).toMatchObject({
       model: "custom-chat-model",
       temperature: 0.2,
     })
@@ -1149,14 +1150,7 @@ test("custom provider web-search continuations never switch to Copilot", async (
       input: "search",
       tools: [
         {
-          type: "function",
-          name: "web_search",
-          description: "search",
-          parameters: {
-            type: "object",
-            properties: { query: { type: "string" } },
-            required: ["query"],
-          },
+          type: "web_search",
           max_uses: 1,
         },
       ],
@@ -1426,7 +1420,7 @@ test("custom Chat receives the tolerant native candidate without Copilot caching
       content: [{ type: "future-private-part", payload: true }],
     },
   ])
-  expect(requests[0]?.body.tools).toEqual([
+  expect(clientToolsPayload(requests[0]?.body ?? {}).tools).toEqual([
     { type: "future-private-tool", payload: true },
   ])
   expect(requests[0]?.body.snippy).toEqual({ enabled: true })
@@ -1554,7 +1548,7 @@ test.each([
     expect(response.status).toBe(200)
     expect(requests).toHaveLength(1)
     expect(requests[0]?.body).not.toHaveProperty("snippy")
-    expect(requests[0]?.body).toMatchObject({
+    expect(clientToolsPayload(requests[0]?.body ?? {})).toMatchObject({
       model: "custom-chat-model",
       stream: true,
       tools: [{ type: "function", function: { name: "lookup" } }],

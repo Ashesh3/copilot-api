@@ -28,6 +28,8 @@ import {
   buildWebSearchQuery,
   executeWebSearch,
 } from "~/services/copilot/mcp-web-search"
+import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
+import { mixedWebSearchResponse } from "~/services/web/tool-output"
 
 import {
   type AnthropicResponse,
@@ -89,6 +91,7 @@ const readResponsesWebSearchMaxUses = (
 export const extractWebSearchCalls = (
   response: ChatCompletionResponse,
 ): Array<ToolCall> => {
+  if (isCallerOwnedWebSearch("web_search")) return []
   const toolCalls = response.choices[0]?.message.tool_calls
   if (!toolCalls) return []
   return toolCalls.filter((tc) => tc.function.name === "web_search")
@@ -143,11 +146,13 @@ export const resolveWebSearchCalls = async (
       }),
     )
 
-    const assistantMessage: Message = {
-      role: "assistant",
-      content: current.choices[0]?.message.content ?? null,
-      tool_calls: webSearchCalls,
-    }
+    const mixed = mixedWebSearchResponse(
+      current as unknown as Record<string, unknown>,
+      "chat",
+      results.map((r) => ({ id: r.callId, text: r.result })),
+    )
+    if (mixed) return mixed as unknown as ChatCompletionResponse
+    const assistantMessage: Message = current.choices[0].message
 
     const toolMessages: Array<Message> = results.map((r) => ({
       role: "tool" as const,
@@ -207,6 +212,7 @@ export const resolveResponsesWebSearchCalls = async (
     createResponse?: (payload: ResponsesPayload) => Promise<ResponsesResult>
   },
 ): Promise<ResponsesResult> => {
+  if (isCallerOwnedWebSearch("web_search")) return result
   let current = result
   let currentPayload = payload
   let iteration = 0
@@ -242,25 +248,18 @@ export const resolveResponsesWebSearchCalls = async (
       }),
     )
 
-    const resolvedOutputItems: Array<ResponseInputItem> = []
-    for (const item of current.output) {
-      if (item.type === "function_call") {
-        if (item.name === "web_search") {
-          resolvedOutputItems.push({
-            type: "function_call",
-            call_id: item.call_id,
-            name: item.name,
-            arguments: item.arguments,
-            status: "completed",
-          })
-        }
-        continue
-      }
-      resolvedOutputItems.push(item as ResponseInputItem)
-    }
+    const mixed = mixedWebSearchResponse(
+      current as unknown as Record<string, unknown>,
+      "responses",
+      searchResults.map((r) => ({ id: r.callId, text: r.result })),
+    )
+    if (mixed) return mixed as unknown as ResponsesResult
+    const resolvedOutputItems = current.output as Array<ResponseInputItem>
 
     const newInput: Array<ResponseInputItem> = [
-      ...(Array.isArray(currentPayload.input) ? currentPayload.input : []),
+      ...(typeof currentPayload.input === "string" ?
+        [{ role: "user" as const, content: currentPayload.input }]
+      : (currentPayload.input ?? [])),
       ...resolvedOutputItems,
       ...searchResults.map((r) => ({
         type: "function_call_output" as const,

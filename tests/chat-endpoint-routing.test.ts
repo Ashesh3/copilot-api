@@ -18,6 +18,7 @@ import { state } from "~/lib/state"
 import { selectChatUpstreamEndpoint } from "~/routes/chat-completions/handler"
 import { server } from "~/server"
 
+import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
   PROTOCOL_GATEWAY_KEY,
   seedProtocolDatabase,
@@ -443,7 +444,7 @@ test("preserves custom tools on a Chat-only model", async () => {
   const response = await postChatRoute({ customGrammar: true })
 
   expect(response.status).toBe(200)
-  expect(lastUpstreamPayload?.tools).toEqual([
+  expect(clientToolsPayload(lastUpstreamPayload ?? {}).tools).toEqual([
     {
       type: "custom",
       format: { type: "grammar", syntax: "lark" },

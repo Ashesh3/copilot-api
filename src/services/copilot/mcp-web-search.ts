@@ -28,6 +28,16 @@ import { peekStorageRuntime } from "~/lib/storage/runtime"
 import { tokenPool } from "~/lib/token-pool"
 import { copilotBaseUrl } from "~/services/copilot/copilot-client"
 import { createCopilotTransportInit } from "~/services/copilot/transport-options"
+import {
+  isCallerOwnedWebSearch,
+  webToolError,
+} from "~/services/web/tool-context"
+
+import {
+  executeHostedPageRead,
+  pageUrl,
+  requestedWebPages,
+} from "./hosted-web-search"
 
 // --- MCP Session State ---
 
@@ -70,6 +80,7 @@ const MCP_WEB_SEARCH_TOOL = "web_search"
 const MCP_SESSION_RETRY_STATUSES = new Set([401, 403, 404])
 
 interface McpCredentials {
+  account?: Account
   baseUrl: string
   cacheKey: string
   githubToken: string
@@ -84,6 +95,8 @@ interface McpFetchOptions {
 export interface WebSearchExecutionOptions {
   modelId?: string
   sessionId?: string
+  /** Explicit command targets; [] keeps prior-context URLs from changing search routing. */
+  pageUrls?: ReadonlyArray<string>
 }
 
 export interface WebSearchToolOptions {
@@ -175,6 +188,7 @@ const getMcpCredentials = async (
   }
 
   return {
+    account,
     githubToken,
     baseUrl: account ? tokenPool.getBaseUrl(account) : copilotBaseUrl(),
     cacheKey: account ? mcpCredentialCacheKey(account) : "default",
@@ -383,6 +397,13 @@ const executeWebSearchTurn = async (
   try {
     signal?.throwIfAborted()
     const credentials = await getMcpCredentials(options)
+    const urls = options.pageUrls ?? requestedWebPages(query)
+    if (urls.length > 0)
+      return await executeHostedPageRead(query, urls, {
+        account: credentials.account,
+        modelId: options.modelId,
+        signal,
+      })
     // Capture session ID locally so concurrent calls don't interfere
     const sessionId = await ensureSession(credentials)
 
@@ -566,7 +587,7 @@ const describeWebSearch = (options: WebSearchToolOptions): string => {
   }
 
   return [
-    "Search the web for current information. Always include the source URLs as markdown hyperlinks in the answer.",
+    "Search the web for current information, or open/read a specific HTTP(S) URL by including its full URL and the information to extract in query. Page reading runs on GitHub, not this gateway, and returns extracted content rather than raw HTML. Always include the source URLs as markdown hyperlinks in the answer.",
     ...constraints,
   ].join(" ")
 }
@@ -577,7 +598,8 @@ const createWebSearchParameters = (
   const properties: Record<string, unknown> = {
     query: {
       type: "string",
-      description: "A clear, standalone natural-language search request",
+      description:
+        "A standalone search request, or an exact HTTP(S) URL with instructions for reading that page",
     },
   }
 
@@ -664,13 +686,15 @@ export const createWebSearchAnthropicTool = (tool?: unknown) => {
 }
 
 export const isChatWebSearchFunctionTool = (tool: unknown): boolean =>
-  isRecord(tool)
+  !isCallerOwnedWebSearch("web_search")
+  && isRecord(tool)
   && tool.type === "function"
   && isRecord(tool.function)
   && tool.function.name === MCP_WEB_SEARCH_TOOL
 
 export const isResponsesWebSearchFunctionTool = (tool: unknown): boolean =>
-  isRecord(tool)
+  !isCallerOwnedWebSearch("web_search")
+  && isRecord(tool)
   && tool.type === "function"
   && tool.name === MCP_WEB_SEARCH_TOOL
 
@@ -680,14 +704,33 @@ export const buildWebSearchQuery = (
 ): string => {
   let query = rawArguments
   let argumentOptions: WebSearchToolOptions = {}
+  let args: unknown
   try {
-    const args = JSON.parse(rawArguments) as Record<string, unknown>
+    args = JSON.parse(rawArguments) as unknown
+  } catch {
+    // Some providers return the query as a bare string. Keep it verbatim.
+  }
+  if (isRecord(args)) {
     if (typeof args.query === "string" && args.query.length > 0) {
       query = args.query
     }
+    if (typeof args.url === "string" && args.url.trim()) {
+      const url = pageUrl(args.url)
+      if (!url)
+        throw webToolError(
+          "invalid_web_url",
+          "Page URL must be an absolute HTTP(S) URL without credentials.",
+        )
+      // A query backslash survives URL normalization but delimits extracted URLs.
+      const normalizedUrl = url.replaceAll("\\", "%5C")
+      const instructions =
+        typeof args.query === "string" ?
+          args.query.replaceAll(args.url, () => normalizedUrl)
+        : ""
+      const quotedUrl = JSON.stringify(normalizedUrl)
+      query = `Open this exact URL: ${quotedUrl}\n${instructions}`
+    }
     argumentOptions = getWebSearchToolOptions(args)
-  } catch {
-    // Some providers return the query as a bare string. Keep it verbatim.
   }
 
   const parameters = getFunctionParameters(functionTool)

@@ -46,6 +46,8 @@ import {
   isWebSearchToolType,
 } from "~/services/copilot/mcp-web-search"
 import { createRetryBudget } from "~/services/copilot/transport-retry"
+import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
+import { mixedWebSearchResponse } from "~/services/web/tool-output"
 
 import {
   type AnthropicErrorEvent,
@@ -406,7 +408,10 @@ export async function handleWithNativeMessages(
 function hasPreparedWebSearchTool(
   tools: AnthropicMessagesPayload["tools"],
 ): boolean {
-  return tools?.some((tool) => tool.name === "web_search") ?? false
+  return (
+    !isCallerOwnedWebSearch("web_search")
+    && (tools?.some((tool) => tool.name === "web_search") ?? false)
+  )
 }
 
 async function streamNativeMessages(
@@ -663,7 +668,9 @@ export async function resolveNativeWebSearch(
     })) as AnthropicResponse
     const calls = response.content.filter(
       (block): block is AnthropicToolUseBlock =>
-        block.type === "tool_use" && block.name === "web_search",
+        block.type === "tool_use"
+        && block.name === "web_search"
+        && !isCallerOwnedWebSearch("web_search"),
     )
     if (calls.length === 0) return response
     if (searchUses + calls.length > maxSearchUses) {
@@ -688,6 +695,12 @@ export async function resolveNativeWebSearch(
       })),
     )
 
+    const mixed = mixedWebSearchResponse(
+      response as unknown as Record<string, unknown>,
+      "messages",
+      results.map((r) => ({ id: r.tool_use_id, text: r.content })),
+    )
+    if (mixed) return mixed as unknown as AnthropicResponse
     payload = {
       ...payload,
       stream: false,
@@ -696,9 +709,7 @@ export async function resolveNativeWebSearch(
         ...payload.messages,
         {
           role: "assistant",
-          content: response.content.filter(
-            (block) => block.type !== "tool_use" || block.name === "web_search",
-          ),
+          content: response.content,
         },
         { role: "user", content: results },
       ],

@@ -296,11 +296,7 @@ test("Chat web-search follow-up retains the rewritten no-prefill history", async
       ],
       tools: [
         {
-          type: "function",
-          function: {
-            name: "web_search",
-            parameters: { type: "object", properties: {} },
-          },
+          type: "web_search",
         },
       ],
       tool_choice: "auto",
@@ -347,11 +343,7 @@ test("Chat web-search follow-up carries one fetched attachment forward", async (
       ],
       tools: [
         {
-          type: "function",
-          function: {
-            name: "web_search",
-            parameters: { type: "object", properties: {} },
-          },
+          type: "web_search",
         },
       ],
       tool_choice: "auto",
@@ -385,11 +377,7 @@ test("Chat web-search follow-up injects the generated JSON instruction once", as
       response_format: { type: "json_object" },
       tools: [
         {
-          type: "function",
-          function: {
-            name: "web_search",
-            parameters: { type: "object", properties: {} },
-          },
+          type: "web_search",
         },
       ],
       tool_choice: "auto",

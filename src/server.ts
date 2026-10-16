@@ -12,6 +12,7 @@ import {
   resolveRoutingAffinityFromHeaders,
   runWithRoutingAffinity,
 } from "~/lib/routing-affinity"
+import { webToolsMiddleware } from "~/services/web/middleware"
 
 import { authenticateAdminRequest } from "./lib/admin-auth"
 import {
@@ -244,6 +245,9 @@ server.use("*", async (c, next) => {
   // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
   await inferenceAuth(c, next)
 })
+
+// Add managed web tools only inside authenticated inference requests.
+server.use("*", webToolsMiddleware)
 
 // Direct Connect is disabled by default and, when explicitly enabled for
 // private development, remains behind both normal authentication layers.

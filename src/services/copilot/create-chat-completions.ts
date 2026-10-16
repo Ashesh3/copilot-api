@@ -28,6 +28,7 @@ import {
   createRetryBudget,
   PRE_HEADER_MAX_DELAY_SECONDS,
 } from "~/services/copilot/transport-retry"
+import { runManagedWebRequest } from "~/services/web/tool-loop"
 
 import { fitChatCompletionsCompactionPayload } from "./compaction-payload"
 import { classifyCompatibilityRetry } from "./compatibility-retry"
@@ -575,6 +576,38 @@ export async function createChatCompletionsWithProcessedPayload(
 }
 
 async function createChatCompletionsCore(
+  payload: ChatCompletionsPayload,
+  options?: ChatCompletionsRequestOptions,
+): Promise<ChatCompletionsCoreResult> {
+  let processedPayload = payload
+  const pinnedOptions = {
+    ...options,
+    routedAccountPin: options?.routedAccountPin ?? {},
+  }
+  const response = (await runManagedWebRequest({
+    protocol: "chat",
+    payload: payload as unknown as Record<string, unknown>,
+    disabled: options?.compaction,
+    accountId: pinnedOptions.routedAccountPin.accountId,
+    signal: options?.signal,
+    send: async (body, _managed, reportProcessedPayload) => {
+      const result = await dispatchChatCompletionsCore(
+        body as unknown as ChatCompletionsPayload,
+        pinnedOptions,
+      )
+      processedPayload = result.processedPayload
+      reportProcessedPayload(
+        result.processedPayload as unknown as Record<string, unknown>,
+      )
+      return result.response as
+        | Record<string, unknown>
+        | AsyncIterable<StreamEvent>
+    },
+  })) as ChatCompletionsResult
+  return { response, processedPayload }
+}
+
+async function dispatchChatCompletionsCore(
   payload: ChatCompletionsPayload,
   options?: ChatCompletionsRequestOptions,
 ): Promise<ChatCompletionsCoreResult> {

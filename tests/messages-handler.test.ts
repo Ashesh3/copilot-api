@@ -1,6 +1,6 @@
-/* eslint-disable max-lines */
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
 
+/* eslint-disable max-lines */
 import type { ChatCompletionsPayload } from "../src/services/copilot/create-chat-completions"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
 
@@ -9,6 +9,7 @@ import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
 import { getUsageResponse } from "../src/lib/usage-tracker"
 import { server } from "../src/server"
+import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
   PROTOCOL_GATEWAY_KEY,
   seedProtocolDatabase,
@@ -605,7 +606,7 @@ test("preserves system and future roles plus unknown native tool and top-level f
 
   expect(response.status).toBe(200)
   expect(lastUpstreamUrl).toContain("/v1/messages")
-  expect(lastUpstreamPayload).toMatchObject({
+  expect(clientToolsPayload(lastUpstreamPayload ?? {})).toMatchObject({
     system: [futureSystemBlock],
     messages: [
       { role: "system", content: "bootstrap" },
@@ -641,7 +642,7 @@ test("preserves unnamed future native tool records on the messages route", async
 
   expect(response.status).toBe(200)
   expect(lastUpstreamUrl).toContain("/v1/messages")
-  expect(lastUpstreamPayload).toMatchObject({
+  expect(clientToolsPayload(lastUpstreamPayload ?? {})).toMatchObject({
     tools: [futureTool],
   })
 })
@@ -695,7 +696,7 @@ test.each([
 
     expect(response.status).toBe(200)
     expect(lastUpstreamUrl).toContain("/v1/messages")
-    expect(lastUpstreamPayload).toMatchObject({
+    expect(clientToolsPayload(lastUpstreamPayload ?? {})).toMatchObject({
       tools: [futureTool],
     })
   },
@@ -732,7 +733,7 @@ test("drops malformed optional controls and invalid optional Anthropic headers",
   )
 
   expect(response.status).toBe(200)
-  expect(lastUpstreamPayload).toEqual({
+  expect(clientToolsPayload(lastUpstreamPayload ?? {})).toEqual({
     model: "claude-opus-4.8",
     max_tokens: 64000,
     messages: [{ role: "user", content: "hello" }],
@@ -760,7 +761,7 @@ test("fills a missing native max_tokens from model metadata at transport time", 
   )
 
   expect(response.status).toBe(200)
-  expect(lastUpstreamPayload).toMatchObject({
+  expect(clientToolsPayload(lastUpstreamPayload ?? {})).toMatchObject({
     model: "claude-opus-4.8",
     max_tokens: 64000,
     messages: [{ role: "user", content: "hello" }],
@@ -794,7 +795,7 @@ test("strips Claude diagnostics before native Messages dispatch", async () => {
   expect(response.status).toBe(200)
   expect(fetchMock).toHaveBeenCalledTimes(1)
   expect(lastUpstreamPayload).not.toHaveProperty("diagnostics")
-  expect(lastUpstreamPayload).toMatchObject({
+  expect(clientToolsPayload(lastUpstreamPayload ?? {})).toMatchObject({
     thinking: { type: "adaptive" },
     output_config: { effort: "xhigh" },
     context_management: {
@@ -819,7 +820,7 @@ test("allows chat fallback requests without max_tokens", async () => {
   )
 
   expect(response.status).toBe(200)
-  expect(lastUpstreamPayload).toMatchObject({
+  expect(clientToolsPayload(lastUpstreamPayload ?? {})).toMatchObject({
     model: "gpt-4o",
     messages: [{ role: "user", content: "hello" }],
   })

@@ -115,6 +115,46 @@ Translated signed Anthropic reasoning uses an opaque round-trip representation
 in `reasoning_opaque`; clients should echo it unchanged with the assistant
 message.
 
+### GitHub-hosted web search and page reading
+
+Ordinary tool-capable inference requests get one web search tool by default,
+without changing client configuration: Messages, Chat Completions, Responses
+HTTP/WebSocket, Google AI, and custom chat providers. It can search or open a
+specific HTTP(S) URL. **GitHub retrieves webpages; the gateway does not download,
+parse, or cache them, and has no local-fetch fallback.**
+
+- Plain queries keep the Copilot MCP search path. Include an exact URL in the
+  query to read a page through GitHub's hosted Responses `web_search` tool and
+  its `open_page` capability. Native hosted Responses tools remain unchanged.
+- For translated/custom clients, page reading uses an eligible Responses model
+  from the selected Copilot account's live catalog without changing the parent
+  conversation's model or account. This auxiliary inference uses Copilot quota;
+  observed usage is recorded separately under the helper model.
+- Results contain model-extracted content and source URLs, not raw HTML,
+  guaranteed complete downloads, or character-offset pagination. A matching
+  upstream `open_page` action and successful extraction result are required.
+  Unsupported capabilities and failed retrievals return errors, not search
+  snippets presented as fetched content.
+- Codex `web.run` commands with exact URLs are forwarded to hosted page reading.
+  Page references/line numbers from a separate browser session are not locally
+  cached or resolved; provide the source URL and the information to extract.
+- Explicit no-tool choices, structured output, compaction, permission review,
+  and known non-tool models do not receive automatic tools. Required caller
+  tool choices (`required` / `any` / Google `ANY`) also keep their original
+  tool set, so a gateway web call cannot replace a required client call.
+  Caller-owned functions, custom/discovered tools, and mixed batches remain
+  intact. Gateway tool use is bounded to eight calls per request, with tighter
+  caller limits honored.
+- Observed model usage is retained across managed rounds, including cancelled
+  HTTP streams and WebSocket turns. Failed Responses usage is excluded, while
+  completed rounds remain counted; invalid counts retain known subtotals and
+  mark an accounting gap instead of becoming measured zero usage.
+
+This feature adds no standalone `web_fetch` implementation. Existing caller
+server-tool declarations still pass through subject to upstream support. Page
+text remains untrusted input, and access depends on GitHub's model/account
+capabilities and remote browsing service, not the proxy's access to page origins.
+
 ### Model control
 
 - Builds discovery results from the live models available to the authenticated

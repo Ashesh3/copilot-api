@@ -97,6 +97,7 @@ import {
   finalizeNativeResponsesRequest,
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
+import { runWithWebTools } from "~/services/web/tool-context"
 
 import { createResponsesAttachmentCache } from "./attachment-cache"
 import {
@@ -396,7 +397,14 @@ async function handleResponsesWebSocketMessage(
             canRetry: () =>
               !turn.outputStarted && turn.terminal.state === "open",
           },
-          execute,
+          () =>
+            runWithWebTools(
+              {
+                ...payload,
+                ...(reviewModel ? { model: "codex-auto-review" } : {}),
+              },
+              execute,
+            ),
         )
       }),
     )
