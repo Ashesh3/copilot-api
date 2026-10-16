@@ -102,6 +102,7 @@ interface SettingFormState {
   unsupportedRequestParameters: Array<ModelRequestParameter>
   forcedSystemPrompt: string
   clearOtherSystemPrompts: boolean
+  forceAppendSystemPrompt: boolean
 }
 
 const EMPTY_SETTING_FORM: SettingFormState = {
@@ -116,6 +117,7 @@ const EMPTY_SETTING_FORM: SettingFormState = {
   unsupportedRequestParameters: [],
   forcedSystemPrompt: "",
   clearOtherSystemPrompts: false,
+  forceAppendSystemPrompt: false,
 }
 
 function toSettingBody(form: SettingFormState) {
@@ -135,6 +137,8 @@ function toSettingBody(form: SettingFormState) {
     forcedSystemPrompt: forcedSystemPrompt || null,
     clearOtherSystemPrompts:
       forcedSystemPrompt ? form.clearOtherSystemPrompts : null,
+    forceAppendSystemPrompt:
+      forcedSystemPrompt ? form.forceAppendSystemPrompt : null,
   }
 }
 
@@ -215,6 +219,7 @@ export default function ModelSettingsScreen() {
       unsupportedRequestParameters: row.unsupportedRequestParameters ?? [],
       forcedSystemPrompt: row.forcedSystemPrompt ?? "",
       clearOtherSystemPrompts: row.clearOtherSystemPrompts === true,
+      forceAppendSystemPrompt: row.forceAppendSystemPrompt === true,
     })
   }
 
@@ -369,15 +374,15 @@ export default function ModelSettingsScreen() {
         if (!item.forcedSystemPrompt) {
           return <Text color="secondary">—</Text>
         }
+        const addedLabel =
+          item.forceAppendSystemPrompt ? "Force append" : "Added first"
         return (
           <VStack gap={1}>
             <HStack gap={1}>
               <Badge
                 variant={item.clearOtherSystemPrompts ? "warning" : "info"}
                 label={
-                  item.clearOtherSystemPrompts ? "Replaces others" : (
-                    "Added first"
-                  )
+                  item.clearOtherSystemPrompts ? "Replaces others" : addedLabel
                 }
               />
             </HStack>
@@ -593,8 +598,8 @@ export default function ModelSettingsScreen() {
                     <VStack gap={1}>
                       <Heading level={4}>Forced system prompt</Heading>
                       <Text color="secondary">
-                        Sent as the first system message on every request for
-                        this model ID.
+                        Sent before the client's system instructions on every
+                        request for this model ID.
                       </Text>
                     </VStack>
                     <TextArea
@@ -610,6 +615,24 @@ export default function ModelSettingsScreen() {
                       width="100%"
                     />
                     <CheckboxInput
+                      label="Force append"
+                      description="Add this text to the top of the existing system prompt. Creates a system prompt if none exists."
+                      value={
+                        hasForcedSystemPrompt && form.forceAppendSystemPrompt
+                      }
+                      onChange={(checked) =>
+                        setForm((f) => ({
+                          ...f,
+                          forceAppendSystemPrompt: checked,
+                          clearOtherSystemPrompts:
+                            checked ? false : f.clearOtherSystemPrompts,
+                        }))
+                      }
+                      isDisabled={!hasForcedSystemPrompt}
+                      disabledMessage="Enter a forced system prompt first."
+                      width="100%"
+                    />
+                    <CheckboxInput
                       label="Clear other system prompts"
                       description="Remove the system and developer prompts sent by the client, so this is the only system prompt the model receives."
                       value={
@@ -619,6 +642,8 @@ export default function ModelSettingsScreen() {
                         setForm((f) => ({
                           ...f,
                           clearOtherSystemPrompts: checked,
+                          forceAppendSystemPrompt:
+                            checked ? false : f.forceAppendSystemPrompt,
                         }))
                       }
                       isDisabled={!hasForcedSystemPrompt}

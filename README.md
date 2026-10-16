@@ -135,7 +135,9 @@ message.
 - Sends a model's forced system prompt as the first system instruction of every
   Chat Completions, Messages, Responses (HTTP and WebSocket), Google, and
   Responses compaction request for that model ID, including requests that a
-  redirect or fallback serves with another model. With **Clear other system
+  redirect or fallback serves with another model. **Force append** puts the
+  text at the top of the existing system prompt instead of adding a separate
+  one, creating a prompt only when none exists. With **Clear other system
   prompts**, the client's own system and developer prompts are removed. Claude
   permission-review classifier requests keep their own prompt.
 - Sends no reasoning effort to a model whose Supported efforts setting is

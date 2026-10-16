@@ -250,9 +250,18 @@ afterEach(() => {
   setModelSettingsForTest([])
 })
 
-function forceFor(model: string, clearOtherSystemPrompts = false): void {
+function forceFor(
+  model: string,
+  clearOtherSystemPrompts = false,
+  forceAppendSystemPrompt = false,
+): void {
   setModelSettingsForTest([
-    { model, forcedSystemPrompt: FORCED, clearOtherSystemPrompts },
+    {
+      model,
+      forcedSystemPrompt: FORCED,
+      clearOtherSystemPrompts,
+      forceAppendSystemPrompt,
+    },
   ])
 }
 
@@ -298,28 +307,38 @@ test("matches the requested model through reasoning suffixes and normalized vers
     model: "claude-opus-4.6",
     prompt: FORCED,
     clearOtherSystemPrompts: true,
+    forceAppendSystemPrompt: false,
   })
   expect(resolveForcedSystemPrompt("claude-opus-4.7")).toBeUndefined()
 })
 
-test("Chat Completions sends the forced prompt before the client's system prompts", async () => {
-  forceFor(CHAT_MODEL)
+test.each([false, true])(
+  "Chat Completions sends the forced prompt with force append %s",
+  async (forceAppend) => {
+    forceFor(CHAT_MODEL, false, forceAppend)
 
-  const response = await post("/v1/chat/completions", {
-    model: CHAT_MODEL,
-    messages: [
-      { role: "system", content: "Client system." },
+    const response = await post("/v1/chat/completions", {
+      model: CHAT_MODEL,
+      messages: [
+        { role: "system", content: "Client system." },
+        { role: "user", content: "Hello" },
+      ],
+    })
+
+    expect(response.status).toBe(200)
+    const system =
+      forceAppend ?
+        [{ role: "system", content: `${FORCED}\n\nClient system.` }]
+      : [
+          { role: "system", content: FORCED },
+          { role: "system", content: "Client system." },
+        ]
+    expect(upstreamTurns("/chat/completions")).toEqual([
+      ...system,
       { role: "user", content: "Hello" },
-    ],
-  })
-
-  expect(response.status).toBe(200)
-  expect(upstreamTurns("/chat/completions")).toEqual([
-    { role: "system", content: FORCED },
-    { role: "system", content: "Client system." },
-    { role: "user", content: "Hello" },
-  ])
-})
+    ])
+  },
+)
 
 test("Chat Completions keeps only the forced prompt when clearing", async () => {
   forceFor(CHAT_MODEL, true)
@@ -385,6 +404,34 @@ test("Messages puts the forced prompt first in system for native Claude requests
   expect(system.map((block) => block.text)).toEqual([FORCED, "Client system."])
 })
 
+test.each(["/v1/messages", "/v1/messages/count_tokens"])(
+  "Messages force append keeps one system block for %s",
+  async (path) => {
+    forceFor(CLAUDE_MODEL, false, true)
+    const response = await post(path, {
+      model: CLAUDE_MODEL,
+      max_tokens: 64,
+      system: [
+        {
+          type: "text",
+          text: "Client system.",
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [{ role: "user", content: "Hello" }],
+    })
+
+    expect(response.status).toBe(200)
+    expect(lastUpstream(path).system).toEqual([
+      {
+        type: "text",
+        text: `${FORCED}\n\nClient system.`,
+        cache_control: { type: "ephemeral" },
+      },
+    ])
+  },
+)
+
 test("Messages clearing removes client system prompts, including for token counts", async () => {
   forceFor(CLAUDE_MODEL, true)
   const body = {
@@ -411,22 +458,25 @@ test("Messages clearing removes client system prompts, including for token count
   }
 })
 
-test("Messages translated to Chat keeps the forced prompt at the top", async () => {
-  forceFor(CHAT_MODEL)
+test.each([false, true])(
+  "Messages translated to Chat keeps the prompt at the top with force append %s",
+  async (forceAppend) => {
+    forceFor(CHAT_MODEL, false, forceAppend)
 
-  const response = await post("/v1/messages", {
-    model: CHAT_MODEL,
-    max_tokens: 64,
-    system: "Client system.",
-    messages: [{ role: "user", content: "Hello" }],
-  })
+    const response = await post("/v1/messages", {
+      model: CHAT_MODEL,
+      max_tokens: 64,
+      system: "Client system.",
+      messages: [{ role: "user", content: "Hello" }],
+    })
 
-  expect(response.status).toBe(200)
-  const [first, ...rest] = upstreamMessages("/chat/completions")
-  expect(first.role).toBe("system")
-  expect(String(first.content)).toStartWith(FORCED)
-  expect(JSON.stringify([first, ...rest])).toContain("Client system.")
-})
+    expect(response.status).toBe(200)
+    const [first, ...rest] = upstreamMessages("/chat/completions")
+    expect(first.role).toBe("system")
+    expect(String(first.content)).toStartWith(FORCED)
+    expect(JSON.stringify([first, ...rest])).toContain("Client system.")
+  },
+)
 
 test("Claude permission reviews keep their classifier prompt", async () => {
   setConfigForTest({ permissionReviewModel: CLAUDE_MODEL })
@@ -452,24 +502,50 @@ test("Claude permission reviews keep their classifier prompt", async () => {
   expect(system).not.toContain(FORCED)
 })
 
-test("Responses puts the forced prompt at the start of instructions", async () => {
-  forceFor(RESPONSES_MODEL)
+test.each([false, true])(
+  "Responses prefixes existing instructions with force append %s",
+  async (forceAppend) => {
+    forceFor(RESPONSES_MODEL, false, forceAppend)
 
-  const response = await post("/v1/responses", {
-    model: RESPONSES_MODEL,
-    instructions: "Client instructions.",
-    input: [
-      { type: "message", role: "developer", content: "Client developer." },
-      { type: "message", role: "user", content: "Hello" },
-    ],
-    stream: false,
-  })
+    const response = await post("/v1/responses", {
+      model: RESPONSES_MODEL,
+      instructions: "Client instructions.",
+      input: [
+        { type: "message", role: "developer", content: "Client developer." },
+        { type: "message", role: "user", content: "Hello" },
+      ],
+      stream: false,
+    })
 
-  expect(response.status).toBe(200)
-  const sent = lastUpstream("/responses")
-  expect(sent.instructions).toBe(`${FORCED}\n\nClient instructions.`)
-  expect(JSON.stringify(sent.input)).toContain("Client developer.")
-})
+    expect(response.status).toBe(200)
+    const sent = lastUpstream("/responses")
+    expect(sent.instructions).toBe(`${FORCED}\n\nClient instructions.`)
+    expect(JSON.stringify(sent.input)).toContain("Client developer.")
+  },
+)
+
+test.each([CHAT_MODEL, CLAUDE_MODEL, RESPONSES_MODEL])(
+  "Responses force append prefixes input instructions for %s",
+  async (model) => {
+    forceFor(model, false, true)
+    const response = await post("/v1/responses", {
+      model,
+      input: [
+        { role: "system", content: "Client instructions." },
+        { role: "user", content: "Hello" },
+      ],
+      stream: false,
+    })
+
+    expect(response.status).toBe(200)
+    const sent = upstream.at(-1)?.body
+    if (!sent) throw new Error("Expected an upstream request")
+    const serialized = JSON.stringify(sent)
+    expect(serialized.split(FORCED)).toHaveLength(2)
+    expect(serialized).toContain("Client instructions.")
+    expect(sent.instructions).toBeFalsy()
+  },
+)
 
 test("Responses clearing replaces instructions and drops system and developer input", async () => {
   forceFor(RESPONSES_MODEL, true)
@@ -538,25 +614,30 @@ test("clearing keeps the gateway's JSON instruction for json_object output", asy
   expect(ws.sent.some((frame) => frame.type === "error")).toBe(false)
 })
 
-test("compaction puts the forced prompt before the summary instructions", async () => {
-  forceFor(RESPONSES_MODEL, true)
+test.each([false, true])(
+  "compaction prefixes summary instructions with force append %s",
+  async (forceAppend) => {
+    forceFor(RESPONSES_MODEL, !forceAppend, forceAppend)
 
-  const response = await post("/v1/responses/compact", {
-    model: RESPONSES_MODEL,
-    instructions: "Client instructions.",
-    input: [
-      { type: "message", role: "developer", content: "Client developer." },
-      { type: "message", role: "user", content: "Hello" },
-      { type: "message", role: "assistant", content: "Hi" },
-    ],
-  })
+    const response = await post("/v1/responses/compact", {
+      model: RESPONSES_MODEL,
+      instructions: "Client instructions.",
+      input: [
+        { type: "message", role: "developer", content: "Client developer." },
+        { type: "message", role: "user", content: "Hello" },
+        { type: "message", role: "assistant", content: "Hi" },
+      ],
+    })
 
-  expect(response.status).toBe(200)
-  const sent = lastUpstream("/responses")
-  expect(sent.instructions).toBe(`${FORCED}\n\n${getCompactionPrompt()}`)
-  expect(JSON.stringify(sent.input)).not.toContain("Client developer.")
-  expect(JSON.stringify(sent.input)).toContain("Hello")
-})
+    expect(response.status).toBe(200)
+    const sent = lastUpstream("/responses")
+    expect(sent.instructions).toBe(`${FORCED}\n\n${getCompactionPrompt()}`)
+    expect(JSON.stringify(sent.input).includes("Client developer.")).toBe(
+      forceAppend,
+    )
+    expect(JSON.stringify(sent.input)).toContain("Hello")
+  },
+)
 
 test("Gemini requests get the forced prompt before their system instruction", async () => {
   forceFor(CHAT_MODEL)
@@ -572,60 +653,101 @@ test("Gemini requests get the forced prompt before their system instruction", as
   expect(JSON.stringify(rest)).toContain("Client system.")
 })
 
-test("WebSocket continuations use the current prompt of the requested model", async () => {
-  setModelRedirectsForTest([
-    {
-      id: "forced-ws-redirect",
-      sourceModel: RESPONSES_MODEL,
-      sourceEffort: "all",
-      targetModel: OTHER_RESPONSES_MODEL,
-      enabled: true,
-    },
-  ])
-  const targetSetting = {
-    model: OTHER_RESPONSES_MODEL,
-    forcedSystemPrompt: "Target model prompt.",
-  }
-  setModelSettingsForTest([
-    { model: RESPONSES_MODEL, forcedSystemPrompt: FORCED },
-    targetSetting,
-  ])
-  const ws = await createSocket()
-
-  await sendTurn(ws, {
-    model: RESPONSES_MODEL,
-    instructions: "Client instructions.",
-    input: "first",
-  })
-  // Later turns omit the model and instructions, so both come from the
-  // stored turn, which holds the routed target model.
-  setModelSettingsForTest([
-    { model: RESPONSES_MODEL, forcedSystemPrompt: "Updated prompt." },
-    targetSetting,
-  ])
-  await sendTurn(ws, {
-    previous_response_id: completedResponseIds(ws).at(-1),
-    input: "second",
-  })
-  setModelSettingsForTest([targetSetting])
-  await sendTurn(ws, {
-    previous_response_id: completedResponseIds(ws).at(-1),
-    input: "third",
+test("Gemini force append keeps a single system message", async () => {
+  forceFor(CHAT_MODEL, false, true)
+  const response = await post(`/v1beta/models/${CHAT_MODEL}:generateContent`, {
+    systemInstruction: { parts: [{ text: "Client system." }] },
+    contents: [{ role: "user", parts: [{ text: "Hello" }] }],
   })
 
-  const turns = upstream.filter((call) => call.path.endsWith("/responses"))
-  expect(turns.map((call) => call.body.model)).toEqual([
-    OTHER_RESPONSES_MODEL,
-    OTHER_RESPONSES_MODEL,
-    OTHER_RESPONSES_MODEL,
+  expect(response.status).toBe(200)
+  expect(upstreamTurns("/chat/completions")).toEqual([
+    { role: "system", content: `${FORCED}\n\nClient system.` },
+    { role: "user", content: "Hello" },
   ])
-  expect(turns.map((call) => call.body.instructions)).toEqual([
-    `${FORCED}\n\nClient instructions.`,
-    "Updated prompt.\n\nClient instructions.",
-    "Client instructions.",
-  ])
-  expect(ws.sent.some((frame) => frame.type === "error")).toBe(false)
 })
+
+test.each([
+  { forceAppendSystemPrompt: false, inputPrompt: false },
+  { forceAppendSystemPrompt: true, inputPrompt: false },
+  { forceAppendSystemPrompt: true, inputPrompt: true },
+])(
+  "WebSocket continuations use current prompts without changing stored instructions %#",
+  async ({ forceAppendSystemPrompt, inputPrompt }) => {
+    setModelRedirectsForTest([
+      {
+        id: "forced-ws-redirect",
+        sourceModel: RESPONSES_MODEL,
+        sourceEffort: "all",
+        targetModel: OTHER_RESPONSES_MODEL,
+        enabled: true,
+      },
+    ])
+    const targetSetting = {
+      model: OTHER_RESPONSES_MODEL,
+      forcedSystemPrompt: "Target model prompt.",
+    }
+    setModelSettingsForTest([
+      {
+        model: RESPONSES_MODEL,
+        forcedSystemPrompt: FORCED,
+        forceAppendSystemPrompt,
+      },
+      targetSetting,
+    ])
+    const ws = await createSocket()
+
+    await sendTurn(ws, {
+      model: RESPONSES_MODEL,
+      ...(inputPrompt ?
+        {
+          input: [
+            { role: "system", content: "Client instructions." },
+            { role: "user", content: "first" },
+          ],
+        }
+      : { instructions: "Client instructions.", input: "first" }),
+    })
+    // Later turns omit the model and instructions, so both come from the
+    // stored turn, which holds the routed target model.
+    setModelSettingsForTest([
+      {
+        model: RESPONSES_MODEL,
+        forcedSystemPrompt: "Updated prompt.",
+        forceAppendSystemPrompt,
+      },
+      targetSetting,
+    ])
+    await sendTurn(ws, {
+      previous_response_id: completedResponseIds(ws).at(-1),
+      input: "second",
+    })
+    setModelSettingsForTest([targetSetting])
+    await sendTurn(ws, {
+      previous_response_id: completedResponseIds(ws).at(-1),
+      input: "third",
+    })
+
+    const turns = upstream.filter((call) => call.path.endsWith("/responses"))
+    expect(turns.map((call) => call.body.model)).toEqual([
+      OTHER_RESPONSES_MODEL,
+      OTHER_RESPONSES_MODEL,
+      OTHER_RESPONSES_MODEL,
+    ])
+    const prompts = turns.map(({ body }) => {
+      if (!inputPrompt) return body.instructions
+      expect(body.instructions).toBeUndefined()
+      const input = body.input as Array<Record<string, unknown>>
+      return input.find((item) => item.role === "system")?.content
+    })
+    expect(prompts).toEqual([
+      `${FORCED}\n\nClient instructions.`,
+      "Updated prompt.\n\nClient instructions.",
+      "Client instructions.",
+    ])
+    expect(ws.sent.some((frame) => frame.type === "error")).toBe(false)
+  },
+)
 
 function completedResponseIds(
   ws: Awaited<ReturnType<typeof createSocket>>,

@@ -23,6 +23,7 @@ interface ModelSettingsRequestBody {
   unsupportedRequestParameters?: Array<ModelRequestParameter> | null
   forcedSystemPrompt?: string | null
   clearOtherSystemPrompts?: boolean | null
+  forceAppendSystemPrompt?: boolean | null
 }
 
 export async function handleListModelSettings(c: Context) {
@@ -101,6 +102,12 @@ function validateForcedSystemPromptBody(
   if (!isValidOptionalBoolean(body.clearOtherSystemPrompts)) {
     return "clearOtherSystemPrompts is invalid"
   }
+  if (!isValidOptionalBoolean(body.forceAppendSystemPrompt)) {
+    return "forceAppendSystemPrompt is invalid"
+  }
+  if (body.forceAppendSystemPrompt && body.clearOtherSystemPrompts) {
+    return "forceAppendSystemPrompt cannot be combined with clearOtherSystemPrompts"
+  }
   return undefined
 }
 
@@ -174,6 +181,9 @@ function modelSettingsUpdate(body: ModelSettingsRequestBody) {
     : {}),
     ...(body.clearOtherSystemPrompts !== undefined ?
       { clearOtherSystemPrompts: body.clearOtherSystemPrompts }
+    : {}),
+    ...(body.forceAppendSystemPrompt !== undefined ?
+      { forceAppendSystemPrompt: body.forceAppendSystemPrompt }
     : {}),
   }
 }
