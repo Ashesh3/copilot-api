@@ -126,20 +126,22 @@ message.
 - Stores per-model settings for supported/default or omitted reasoning
   efforts, virtual model visibility, implicit defaults, assistant-prefill
   behavior, selected unsupported request parameters, Sentry model names, and
-  forced system prompts.
+  ordered system prompt overrides.
 - Treats every version of Claude Opus, Sonnet, Haiku, and Fable as rejecting
   assistant prefill unless that model's setting allows it. When the gateway
   sends a Copilot request for one of these models that ends with an assistant
   text message, it sends that message as a user message. Requests that clients
   send directly to `/v1/messages` keep their messages unchanged.
-- Sends a model's forced system prompt as the first system instruction of every
-  Chat Completions, Messages, Responses (HTTP and WebSocket), Google, and
-  Responses compaction request for that model ID, including requests that a
-  redirect or fallback serves with another model. **Force append** puts the
-  text at the top of the existing system prompt instead of adding a separate
-  one, creating a prompt only when none exists. With **Clear other system
-  prompts**, the client's own system and developer prompts are removed. Claude
-  permission-review classifier requests keep their own prompt.
+- Applies **System prompt overrides** in the configured order to Chat
+  Completions, Messages, Responses (HTTP and WebSocket), Google, and Responses
+  compaction requests, including requests served through redirects or fallback.
+  Each configuration selects one mode: **Clear system prompts** removes the
+  existing system/developer prompts and optionally supplies a new prompt;
+  **Force append** prefixes text inside the existing prompt; **Find and replace**
+  replaces every literal, case-sensitive match in system/developer text.
+  Configurations can be added, removed, and reordered. Existing saved prompt
+  settings retain their behavior. Claude permission-review classifier requests
+  and gateway compaction instructions keep their required prompts.
 - Sends no reasoning effort to a model whose Supported efforts setting is
   **Omit**. Copilot and custom-provider requests for that model drop Messages
   `output_config.effort` (and an `output_config` left empty), Chat Completions

@@ -658,8 +658,8 @@ the existing `system` string or first text block (or a system/developer turn
 when the top-level field is absent), and Responses prefixes
 `instructions` or the first system/developer input message if instructions are
 absent. Existing message roles, other prompts, and block metadata are retained.
-If no system instructions exist, a prompt is created. Force append and clearing
-other system prompts are mutually exclusive.
+If no system instructions exist, a prompt is created. In legacy single-prompt
+settings, Force append and clearing other system prompts are mutually exclusive.
 Responses compaction places it before the gateway summary instructions, and
 Messages token counting includes it. Clearing other prompts removes the
 client's system and developer messages, Messages `system` content, and
@@ -668,6 +668,34 @@ WebSocket turns apply the current setting to each upstream copy, so stored
 continuations keep the client's instructions; a continuation that omits
 `model` uses the model its conversation requested. Claude permission-review
 classifier requests keep their policy prompt.
+
+Model Settings can also save an ordered `systemPromptOverrides` array. Rules
+run from top to bottom, and each receives the previous rule's result:
+
+- `clear` removes system/developer messages and top-level instructions, then
+  optionally installs `prompt`. An empty prompt clears without adding one.
+- `append` prefixes `prompt` inside the existing instruction message/string or
+  first text block. It creates a system prompt if none exists.
+- `replace` uses literal, case-sensitive `find` and `replacement` strings to
+  replace every match in all system/developer text fields and blocks. An empty
+  replacement deletes matched text. It never edits user, assistant, or tool
+  content, and matches do not span separate content blocks.
+
+Each rule has one mode; multiple rules of the same mode are supported. For
+example, two append rules are both executed, so the later prefix appears above
+the earlier one. Replacement strings such as `$&` stay literal, and whitespace
+is preserved. A chain supports up to 32 rules and 200,000 total configured text
+characters. Requests exceeding 2,000,000 added characters during execution
+receive a client error before the oversized result is allocated.
+
+The dashboard uses numbered configurations with mode descriptions and
+add/remove/reorder controls. Legacy prompts remain compatible; editing a legacy
+separate-message prompt shows its `prepend` mode as **Add separate prompt**.
+Saving a new chain clears the legacy fields; an empty array or null removes all
+prompt overrides. Request logs contain modes and counts without prompt text.
+WebSocket continuations retain original client instructions and use current
+rules on each upstream copy. Compaction transforms configured prompts and client
+instruction history before reattaching the unchanged gateway summary prompt.
 
 An omitted reasoning effort belongs to the model ID that receives the upstream
 request, so it also applies when a redirect or fallback sends another model's

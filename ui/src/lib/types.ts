@@ -2,6 +2,8 @@
 // and src/routes/dashboard/llm-debug-replay.ts. Keep these in sync when the
 // server-side handlers change shape.
 
+import type { SystemPromptOverride } from "../../../src/lib/system-prompt-overrides"
+
 export interface Overview {
   activeSessions: number
   codeSessionsCount: number
@@ -139,6 +141,7 @@ export interface ModelSetting {
   exposeVirtualReasoningModels?: boolean
   supportsAssistantPrefill?: boolean
   unsupportedRequestParameters?: Array<ModelRequestParameter>
+  systemPromptOverrides?: Array<SystemPromptOverride>
   forcedSystemPrompt?: string
   clearOtherSystemPrompts?: boolean
   forceAppendSystemPrompt?: boolean

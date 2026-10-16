@@ -8,6 +8,10 @@ import {
   removeModelSettings,
   setModelSettings,
 } from "~/lib/model-settings"
+import {
+  type SystemPromptOverride,
+  validateSystemPromptOverrides,
+} from "~/lib/system-prompt-overrides"
 
 type ModelSettingsEffort = "low" | "medium" | "high" | "xhigh" | "max"
 
@@ -21,6 +25,7 @@ interface ModelSettingsRequestBody {
   exposeVirtualReasoningModels?: boolean | null
   supportsAssistantPrefill?: boolean | null
   unsupportedRequestParameters?: Array<ModelRequestParameter> | null
+  systemPromptOverrides?: Array<SystemPromptOverride> | null
   forcedSystemPrompt?: string | null
   clearOtherSystemPrompts?: boolean | null
   forceAppendSystemPrompt?: boolean | null
@@ -92,6 +97,16 @@ function validateOmitReasoningEffortBody(
 function validateForcedSystemPromptBody(
   body: ModelSettingsRequestBody,
 ): string | undefined {
+  if (Object.hasOwn(body, "systemPromptOverrides")) {
+    if (
+      Object.hasOwn(body, "forcedSystemPrompt")
+      || Object.hasOwn(body, "clearOtherSystemPrompts")
+      || Object.hasOwn(body, "forceAppendSystemPrompt")
+    ) {
+      return "systemPromptOverrides cannot be combined with legacy prompt fields"
+    }
+    return validateSystemPromptOverrides(body.systemPromptOverrides)
+  }
   const prompt = body.forcedSystemPrompt
   if (!isValidOptionalString(prompt)) return "forcedSystemPrompt is invalid"
   if (
@@ -175,6 +190,9 @@ function modelSettingsUpdate(body: ModelSettingsRequestBody) {
     : {}),
     ...(body.unsupportedRequestParameters !== undefined ?
       { unsupportedRequestParameters: body.unsupportedRequestParameters }
+    : {}),
+    ...(body.systemPromptOverrides !== undefined ?
+      { systemPromptOverrides: body.systemPromptOverrides }
     : {}),
     ...(body.forcedSystemPrompt !== undefined ?
       { forcedSystemPrompt: body.forcedSystemPrompt }

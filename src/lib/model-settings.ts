@@ -7,6 +7,10 @@ import {
 } from "~/lib/storage/domain-settings"
 import { StorageSchemaError } from "~/lib/storage/errors"
 import { normalizeSettingsJson } from "~/lib/storage/settings-repository"
+import {
+  type SystemPromptOverride,
+  validateSystemPromptOverrides,
+} from "~/lib/system-prompt-overrides"
 
 export interface ModelSettings {
   model: string
@@ -19,6 +23,8 @@ export interface ModelSettings {
   exposeVirtualReasoningModels?: boolean
   supportsAssistantPrefill?: boolean
   unsupportedRequestParameters?: Array<ModelRequestParameter>
+  /** Apply these system prompt edits in order. Supersedes the legacy fields. */
+  systemPromptOverrides?: Array<SystemPromptOverride>
   /** Sent before the client's system instructions for this model. */
   forcedSystemPrompt?: string
   /** Remove the client's own system and developer prompts. */
@@ -36,6 +42,7 @@ export interface ModelSettingsUpdate {
   exposeVirtualReasoningModels?: boolean | null
   supportsAssistantPrefill?: boolean | null
   unsupportedRequestParameters?: Array<ModelRequestParameter> | null
+  systemPromptOverrides?: Array<SystemPromptOverride> | null
   forcedSystemPrompt?: string | null
   clearOtherSystemPrompts?: boolean | null
   forceAppendSystemPrompt?: boolean | null
@@ -254,11 +261,15 @@ function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
   if (unsupportedRequestParameters && unsupportedRequestParameters.length > 0) {
     normalized.unsupportedRequestParameters = unsupportedRequestParameters
   }
-  applyForcedSystemPromptFields(normalized, {
-    forcedSystemPrompt: value.forcedSystemPrompt,
-    clearOtherSystemPrompts: value.clearOtherSystemPrompts,
-    forceAppendSystemPrompt: value.forceAppendSystemPrompt,
-  })
+  if (Array.isArray(value.systemPromptOverrides)) {
+    applySystemPromptOverrides(normalized, value.systemPromptOverrides)
+  } else {
+    applyForcedSystemPromptFields(normalized, {
+      forcedSystemPrompt: value.forcedSystemPrompt,
+      clearOtherSystemPrompts: value.clearOtherSystemPrompts,
+      forceAppendSystemPrompt: value.forceAppendSystemPrompt,
+    })
+  }
   applyOmitReasoningEffort(normalized, value.omitReasoningEffort === true)
 
   return hasCustomModelSettings(normalized) ? normalized : undefined
@@ -296,6 +307,7 @@ function hasCustomModelSettings(settings: ModelSettings): boolean {
     || settings.exposeVirtualReasoningModels !== undefined
     || settings.supportsAssistantPrefill !== undefined
     || settings.unsupportedRequestParameters !== undefined
+    || settings.systemPromptOverrides !== undefined
     || settings.forcedSystemPrompt !== undefined
   )
 }
@@ -322,6 +334,9 @@ function validateStoredModelSettingFields(item: Record<string, unknown>): void {
     forcedSystemPrompt: (value) => typeof value === "string",
     clearOtherSystemPrompts: (value) => typeof value === "boolean",
     forceAppendSystemPrompt: (value) => typeof value === "boolean",
+    systemPromptOverrides: (value) =>
+      Array.isArray(value)
+      && validateSystemPromptOverrides(value) === undefined,
   }
   for (const [key, validate] of Object.entries(fields)) {
     if (Object.hasOwn(item, key) && !validate(item[key]))
@@ -542,6 +557,10 @@ function applyForcedSystemPromptUpdate(
   settings: ModelSettings,
   updates: ModelSettingsUpdate,
 ): void {
+  if (updates.systemPromptOverrides !== undefined) {
+    applySystemPromptOverrides(settings, updates.systemPromptOverrides)
+    return
+  }
   if (
     updates.forcedSystemPrompt === undefined
     && updates.clearOtherSystemPrompts === undefined
@@ -549,6 +568,7 @@ function applyForcedSystemPromptUpdate(
   ) {
     return
   }
+  delete settings.systemPromptOverrides
   applyForcedSystemPromptFields(settings, {
     forcedSystemPrompt:
       updates.forcedSystemPrompt === undefined ?
@@ -564,6 +584,22 @@ function applyForcedSystemPromptUpdate(
         settings.forceAppendSystemPrompt
       : updates.forceAppendSystemPrompt,
   })
+}
+
+function applySystemPromptOverrides(
+  settings: ModelSettings,
+  value: Array<SystemPromptOverride> | null,
+): void {
+  const error = validateSystemPromptOverrides(value)
+  if (error) throw new StorageSchemaError(error)
+  delete settings.forcedSystemPrompt
+  delete settings.clearOtherSystemPrompts
+  delete settings.forceAppendSystemPrompt
+  if (value && value.length > 0) {
+    settings.systemPromptOverrides = value.map((rule) => ({ ...rule }))
+  } else {
+    delete settings.systemPromptOverrides
+  }
 }
 
 function applyBooleanModelSettingUpdate(
