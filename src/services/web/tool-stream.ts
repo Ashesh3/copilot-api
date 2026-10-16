@@ -7,6 +7,10 @@ import type {
 import type { ManagedWebUsage } from "./tool-usage"
 
 import { isRecord, webToolError } from "./tool-context"
+import {
+  checkWebContinuationLimit,
+  MAX_MANAGED_WEB_ROUNDS,
+} from "./tool-limits"
 import { completeWebCalls, isWebStream } from "./tool-loop"
 import {
   continuationPayload,
@@ -18,6 +22,7 @@ import {
   withoutUnexecutedManagedCalls,
   type CompletedWebCall,
 } from "./tool-output"
+import { updateUsageSnapshot } from "./tool-usage-output"
 
 // Implemented protocol adapters retain ordinary text streaming and hold tool-call
 // events until their ownership is known.
@@ -39,7 +44,7 @@ export async function* streamManagedWebRequest(
   }
   let usage: Record<string, unknown> | undefined
   const allOutput: Array<Record<string, unknown>> = []
-  for (let round = 0; round < 18; round++) {
+  for (let round = 0; round < MAX_MANAGED_WEB_ROUNDS; round++) {
     position.usage = usage
     position.output = allOutput
     const state = new RoundState(
@@ -87,6 +92,7 @@ export async function* streamManagedWebRequest(
       }
       return
     }
+    checkWebContinuationLimit(round)
     const payload = continuationPayload(dispatch.processedPayload(), response, {
       completed,
       protocol: options.protocol,
@@ -260,6 +266,7 @@ class RoundState {
   private terminal = false
   private finishReason: unknown
   private usage: unknown
+  private visibleUsage?: Record<string, unknown>
   private terminalEnvelope: Record<string, unknown> = {}
   private trailingChat = false
   intercepted = false
@@ -336,6 +343,10 @@ class RoundState {
     if (this.protocol === "messages") this.acceptMessages(value)
     else if (this.protocol === "responses") this.acceptResponses(value)
     else this.acceptChat(value)
+    this.visibleUsage = updateUsageSnapshot(
+      this.visibleUsage,
+      this.observedUsage,
+    )
     return value
   }
   markForwarded(value: Record<string, unknown>): void {
@@ -548,15 +559,17 @@ class RoundState {
       }
       return {
         ...this.response,
+        usage: this.visibleUsage,
         content: [...this.blocks.entries()]
           .sort((a, b) => a[0] - b[0])
           .map(([, b]) => b),
       }
     }
-    if (this.protocol === "responses") return this.response
+    if (this.protocol === "responses")
+      return { ...this.response, usage: this.visibleUsage }
     return {
       ...this.response,
-      usage: this.usage,
+      usage: this.visibleUsage,
       choices: [
         {
           index: 0,

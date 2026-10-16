@@ -8,6 +8,7 @@ import {
   leaseAccount,
   withAccountLeaseScope,
 } from "~/lib/account-lease-context"
+import { LocalHTTPError } from "~/lib/error"
 import {
   routedAccountStorage,
   getLastUsedRoutedAccountId,
@@ -26,6 +27,7 @@ import { getHistoryRuntime } from "~/lib/telemetry-writer"
 import { tokenPool } from "~/lib/token-pool"
 import { requestedWebPages } from "~/services/copilot/hosted-web-search"
 import {
+  buildWebSearchQuery,
   executeWebSearch,
   resetWebSearchSessionsForTest,
 } from "~/services/copilot/mcp-web-search"
@@ -185,6 +187,146 @@ test.each(["'", "`"])(
     expect(requests[0].body.input).toStartWith(
       "Requested exact URLs:\nhttps://pages.test/guide\n",
     )
+  },
+)
+
+test.each([
+  {
+    url: 'https://pages.test/search?q="hello"&lang=en',
+    expected: "https://pages.test/search?q=%22hello%22&lang=en",
+    query: "Read matching results",
+  },
+  {
+    url: 'https://pages.test/search?q="hello"&lang=en',
+    expected: "https://pages.test/search?q=%22hello%22&lang=en",
+    query: undefined,
+  },
+  {
+    url: "https://pages.test/search?q=%22hello%22&path=%2Fdocs%2F&literal=%2522",
+    expected:
+      "https://pages.test/search?q=%22hello%22&path=%2Fdocs%2F&literal=%2522",
+    query: "Read matching results",
+  },
+  {
+    url: 'https://pages.test/"topic"?q="hello"&lang=en#results',
+    expected: "https://pages.test/%22topic%22?q=%22hello%22&lang=en",
+    query: "Read matching results",
+  },
+  {
+    url: String.raw`https://pages.test/path?q=\hello&lang=en`,
+    expected: "https://pages.test/path?q=%5Chello&lang=en",
+    query: "Read matching results",
+  },
+  {
+    url: "https://pages.test/path?q=%5Chello&literal=%255C&lang=en",
+    expected: "https://pages.test/path?q=%5Chello&literal=%255C&lang=en",
+    query: "Read matching results",
+  },
+])(
+  "explicit URL retains its complete normalized target through hosted browsing: %p",
+  async ({ url, expected, query }) => {
+    ;(result.output as Array<Record<string, unknown>>)[0].action = {
+      type: "open_page",
+      url: expected,
+    }
+    const text = await executeWebSearch(
+      buildWebSearchQuery(JSON.stringify({ url, query })),
+    )
+    expect(requests).toHaveLength(1)
+    expect(requests[0].url.pathname).toBe("/responses")
+    expect(requests[0].redirect).toBe("error")
+    expect(requests[0].body.input).toStartWith(
+      `Requested exact URLs:\n${expected}\n\nUser's web request:\n`,
+    )
+    expect(requests[0].body.input).toContain(
+      `Open this exact URL: "${expected}"`,
+    )
+    if (query) expect(requests[0].body.input).toContain(query)
+    expect(text).toContain("REMOTE_PAGE_EVIDENCE")
+    expect(text).toEndWith(`Opened URLs:\n${expected}`)
+  },
+)
+
+test("explicit quoted URL rejects a hosted action that opened only its truncated prefix", async () => {
+  ;(result.output as Array<Record<string, unknown>>)[0].action = {
+    type: "open_page",
+    url: "https://pages.test/search?q=",
+  }
+  const text = await executeWebSearch(
+    buildWebSearchQuery(
+      JSON.stringify({
+        url: 'https://pages.test/search?q="hello"&lang=en',
+        query: "Read matching results",
+      }),
+    ),
+  )
+  expect(requests).toHaveLength(1)
+  expect(text).toMatch(/^Web search failed:/)
+  expect(text).not.toContain("REMOTE_PAGE_EVIDENCE")
+})
+
+test("repeated explicit URL is normalized without changing other targets or constraints", async () => {
+  const url = 'https://pages.test/search?q="hello"&lang=en&literal=$&'
+  const normalized =
+    "https://pages.test/search?q=%22hello%22&lang=en&literal=$&"
+  const other = "https://pages.test/other?keep=%2F"
+  const output = result.output as Array<Record<string, unknown>>
+  output[0].action = { type: "open_page", url: normalized }
+  output.push({
+    type: "web_search_call",
+    status: "completed",
+    action: { type: "open_page", url: other },
+  })
+  const text = await executeWebSearch(
+    buildWebSearchQuery(
+      JSON.stringify({
+        url,
+        query: `Read ${url} and compare with ${other}; reread ${url}`,
+        allowed_domains: ["pages.test"],
+      }),
+    ),
+  )
+  expect(requests).toHaveLength(1)
+  expect(requests[0].url.pathname).toBe("/responses")
+  expect(requests[0].body.input).toBe(
+    `Requested exact URLs:\n${normalized}\n${other}\n\nUser's web request:\n`
+      + `Open this exact URL: "${normalized}"\n`
+      + `Read ${normalized} and compare with ${other}; reread ${normalized}`
+      + "\n\nSearch constraints: Only use sources from: pages.test.",
+  )
+  expect(text).toContain("REMOTE_PAGE_EVIDENCE")
+  expect(text).toEndWith(`Opened URLs:\n${normalized}\n${other}`)
+})
+
+test.each([
+  'https://user:password@pages.test/search?q="hello"&lang=en',
+  "https://user@pages.test/guide",
+  'https://pages.test"@private.test/guide',
+  "ftp://pages.test/guide",
+  "file:///tmp/guide.html",
+  "javascript:alert(1)",
+  "not-a-url",
+])(
+  "invalid explicit page target fails before any hosted or MCP dispatch: %s",
+  async (url) => {
+    for (const query of ["Read the page", undefined]) {
+      let caught: unknown
+      try {
+        await executeWebSearch(
+          buildWebSearchQuery(JSON.stringify({ url, query })),
+        )
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toBeInstanceOf(LocalHTTPError)
+      expect(caught).toMatchObject({
+        response: { status: 400 },
+        clientBody: {
+          error: { type: "invalid_request_error", code: "invalid_web_url" },
+        },
+      })
+      expect(requests).toHaveLength(0)
+    }
   },
 )
 

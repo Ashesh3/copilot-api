@@ -28,9 +28,16 @@ import { peekStorageRuntime } from "~/lib/storage/runtime"
 import { tokenPool } from "~/lib/token-pool"
 import { copilotBaseUrl } from "~/services/copilot/copilot-client"
 import { createCopilotTransportInit } from "~/services/copilot/transport-options"
-import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
+import {
+  isCallerOwnedWebSearch,
+  webToolError,
+} from "~/services/web/tool-context"
 
-import { executeHostedPageRead, requestedWebPages } from "./hosted-web-search"
+import {
+  executeHostedPageRead,
+  pageUrl,
+  requestedWebPages,
+} from "./hosted-web-search"
 
 // --- MCP Session State ---
 
@@ -697,16 +704,33 @@ export const buildWebSearchQuery = (
 ): string => {
   let query = rawArguments
   let argumentOptions: WebSearchToolOptions = {}
+  let args: unknown
   try {
-    const args = JSON.parse(rawArguments) as Record<string, unknown>
+    args = JSON.parse(rawArguments) as unknown
+  } catch {
+    // Some providers return the query as a bare string. Keep it verbatim.
+  }
+  if (isRecord(args)) {
     if (typeof args.query === "string" && args.query.length > 0) {
       query = args.query
     }
-    if (typeof args.url === "string" && args.url.trim())
-      query = `Open this exact URL: ${JSON.stringify(args.url)}\n${query}`
+    if (typeof args.url === "string" && args.url.trim()) {
+      const url = pageUrl(args.url)
+      if (!url)
+        throw webToolError(
+          "invalid_web_url",
+          "Page URL must be an absolute HTTP(S) URL without credentials.",
+        )
+      // A query backslash survives URL normalization but delimits extracted URLs.
+      const normalizedUrl = url.replaceAll("\\", "%5C")
+      const instructions =
+        typeof args.query === "string" ?
+          args.query.replaceAll(args.url, () => normalizedUrl)
+        : ""
+      const quotedUrl = JSON.stringify(normalizedUrl)
+      query = `Open this exact URL: ${quotedUrl}\n${instructions}`
+    }
     argumentOptions = getWebSearchToolOptions(args)
-  } catch {
-    // Some providers return the query as a bare string. Keep it verbatim.
   }
 
   const parameters = getFunctionParameters(functionTool)

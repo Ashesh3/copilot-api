@@ -10,25 +10,37 @@ import {
 
 import { isRecord, type WebProtocol } from "./tool-context"
 
-function readUsage(
+type UsageComponents = Record<string, number | null | undefined>
+
+function updateUsage(
   value: unknown,
   protocol: WebProtocol,
+  components: UsageComponents,
 ): ObservedRequestUsage | undefined {
-  if (!isRecord(value)) return undefined
+  const incoming = isRecord(value) ? value : {}
   const inputFields =
     protocol === "messages" ?
       ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
     : [protocol === "chat" ? "prompt_tokens" : "input_tokens"]
   const outputField =
     protocol === "chat" ? "completion_tokens" : "output_tokens"
-  if ([...inputFields, outputField].every((key) => value[key] === undefined))
-    return undefined
-  const input = sumCounts(inputFields.map((key) => value[key]))
-  const output = sumCounts([value[outputField]])
+  const fields = [...inputFields, outputField]
+  let invalid = false
+  for (const key of fields) {
+    if (incoming[key] === undefined) continue
+    const count = normalizeUsageTokenCount(incoming[key])
+    if (count === null) {
+      invalid = true
+      components[key] ??= null
+    } else components[key] = count
+  }
+  if (fields.every((key) => components[key] === undefined)) return undefined
+  const input = sumCounts(inputFields.map((key) => components[key]))
+  const output = sumCounts([components[outputField]])
   return {
     inputTokens: input.total,
     outputTokens: output.total,
-    unknownTokenCount: input.unknown || output.unknown,
+    unknownTokenCount: invalid || input.unknown || output.unknown,
   }
 }
 
@@ -75,6 +87,7 @@ function combinedUsage(
 export class ManagedWebUsage {
   private completed?: ObservedRequestUsage
   private current?: ObservedRequestUsage
+  private components: UsageComponents = {}
   private active = false
   private readonly protocol: WebProtocol
   private readonly publish: RequestUsageObserver | undefined
@@ -89,7 +102,10 @@ export class ManagedWebUsage {
 
   observe(usage: unknown, intercepted: boolean): void {
     this.active ||= intercepted
-    this.current = readUsage(usage, this.protocol)
+    const current = updateUsage(usage, this.protocol, this.components)
+    if (current)
+      current.unknownTokenCount ||= this.current?.unknownTokenCount === true
+    this.current = current
     const total = combinedUsage(this.completed, this.current)
     if (this.active)
       this.publish?.(
@@ -100,5 +116,6 @@ export class ManagedWebUsage {
   nextRound(): void {
     this.completed = combinedUsage(this.completed, this.current)
     this.current = undefined
+    this.components = {}
   }
 }

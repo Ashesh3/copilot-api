@@ -13,6 +13,10 @@ import { modelAllowsWebTools } from "./model-capabilities"
 import { prepareManagedWebTools, webToolError } from "./tool-context"
 import { executeManagedWebCall } from "./tool-executor"
 import {
+  checkWebContinuationLimit,
+  MAX_MANAGED_WEB_ROUNDS,
+} from "./tool-limits"
+import {
   continuationPayload,
   isUnsuccessfulWebResponse,
   responseCalls,
@@ -145,7 +149,7 @@ export async function runManagedWebRequest(
       dispatch,
     })
   let usage: Record<string, unknown> | undefined
-  for (let round = 0; round < 18; round++) {
+  for (let round = 0; round < MAX_MANAGED_WEB_ROUNDS; round++) {
     const intercepted = responseCalls(response, options.protocol).some(
       (call) => !call.clientOwned && prepared.managed.has(call.name),
     )
@@ -185,6 +189,7 @@ export async function runManagedWebRequest(
         ...withoutManagedCalls(response, completed, options.protocol),
         ...(usage ? { usage } : {}),
       }
+    checkWebContinuationLimit(round)
     const payload = continuationPayload(dispatch.processedPayload(), response, {
       completed,
       protocol: options.protocol,
