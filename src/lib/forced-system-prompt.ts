@@ -1,14 +1,17 @@
 import type { RequestBehavior } from "~/lib/request-logger"
 import type {
+  AnthropicCustomMessage,
   AnthropicMessagesPayload,
   AnthropicSystemContentBlock,
 } from "~/routes/messages/anthropic-types"
 import type { Message } from "~/services/copilot/create-chat-completions"
 import type {
   ResponseInputItem,
+  ResponseInputMessage,
   ResponsesPayload,
 } from "~/services/copilot/create-responses"
 
+import { createInvalidRequestError } from "~/lib/error"
 import { normalizeModelName } from "~/lib/model-resolver"
 import { getModelSettings } from "~/lib/model-settings"
 import { parseModelSuffix } from "~/lib/model-suffix"
@@ -21,6 +24,7 @@ export interface ForcedSystemPrompt {
   prompt: string
   /** Remove the client's own system and developer prompts. */
   clearOtherSystemPrompts: boolean
+  forceAppendSystemPrompt: boolean
 }
 
 interface ForcedSystemPromptOutcome {
@@ -33,7 +37,9 @@ const isInstructionRole = (role: unknown): boolean =>
   role === "system" || role === "developer"
 
 /** A Responses input message that carries system or developer instructions. */
-function isResponsesInstructionItem(item: unknown): boolean {
+function isResponsesInstructionItem(
+  item: unknown,
+): item is ResponseInputMessage {
   if (typeof item !== "object" || item === null) return false
   const record = item as Record<string, unknown>
   if (record.type !== undefined && record.type !== "message") return false
@@ -64,16 +70,78 @@ export function resolveForcedSystemPrompt(
         model,
         prompt: settings.forcedSystemPrompt,
         clearOtherSystemPrompts: settings.clearOtherSystemPrompts === true,
+        forceAppendSystemPrompt: settings.forceAppendSystemPrompt === true,
       }
     }
   }
   return undefined
 }
 
-/**
- * Put the forced prompt first as its own system message. Applying it again
- * leaves an already-forced request unchanged.
- */
+function prependPromptText(text: string, prompt: string): string {
+  if (text === prompt || text.startsWith(`${prompt}\n\n`)) return text
+  return text ? `${prompt}\n\n${text}` : prompt
+}
+
+function assertPromptContent(
+  content: unknown,
+  param: string,
+): asserts content is string | Array<object> | null | undefined {
+  if (content === undefined || content === null || typeof content === "string")
+    return
+  if (
+    Array.isArray(content)
+    && content.every(
+      (block: unknown) =>
+        typeof block === "object" && block !== null && !Array.isArray(block),
+    )
+  )
+    return
+  throw createInvalidRequestError(
+    "System prompt content must be text or an array of content blocks.",
+    param,
+  )
+}
+
+/** Keep the first text block's metadata and all later blocks intact. */
+function prependTextBlock<Block extends object>(
+  blocks: Array<Block>,
+  prefix: Block & { type: string; text: string },
+): Array<Block> {
+  const first = blocks.at(0)
+  if (
+    first
+    && "type" in first
+    && first.type === prefix.type
+    && "text" in first
+    && typeof first.text === "string"
+  ) {
+    return [
+      { ...first, text: prependPromptText(first.text, prefix.text) },
+      ...blocks.slice(1),
+    ]
+  }
+  return [prefix, ...blocks]
+}
+
+function appendToChatSystemPrompt(
+  payload: { messages: Array<Message> },
+  prompt: string,
+): boolean {
+  const existing =
+    payload.messages.find((message) => message.role === "system")
+    ?? payload.messages.find((message) => message.role === "developer")
+  if (!existing) return false
+  const content =
+    Array.isArray(existing.content) ?
+      prependTextBlock(existing.content, { type: "text", text: prompt })
+    : prependPromptText(existing.content ?? "", prompt)
+  payload.messages = payload.messages.map((message) =>
+    message === existing ? { ...existing, content } : message,
+  )
+  return true
+}
+
+/** Put the prompt first, optionally within the client's existing message. */
 function applyForcedSystemPromptToChat(
   payload: { messages: Array<Message> },
   forced: ForcedSystemPrompt,
@@ -87,6 +155,13 @@ function applyForcedSystemPromptToChat(
     payload.messages = payload.messages.filter(
       (message) => !isInstructionRole(message.role),
     )
+  }
+  if (
+    forced.forceAppendSystemPrompt
+    && !forced.clearOtherSystemPrompts
+    && appendToChatSystemPrompt(payload, forced.prompt)
+  ) {
+    return { forced, removed }
   }
   const first = payload.messages.at(0)
   if (first?.role !== "system" || first.content !== forced.prompt) {
@@ -123,6 +198,39 @@ function prependSystemBlock(
   return [textBlock(prompt), ...system]
 }
 
+function appendToMessagesSystemPrompt(
+  system: AnthropicMessagesPayload["system"],
+  prompt: string,
+): AnthropicMessagesPayload["system"] {
+  if (system === undefined || typeof system === "string") {
+    return prependPromptText(system ?? "", prompt)
+  }
+  return prependTextBlock(system, { type: "text", text: prompt })
+}
+
+function appendToMessagesInstructionTurn(
+  payload: AnthropicMessagesPayload,
+  prompt: string,
+): boolean {
+  const instructions = payload.messages.filter(
+    (message): message is AnthropicCustomMessage =>
+      isInstructionRole(message.role),
+  )
+  const existing =
+    instructions.find((message) => message.role === "system")
+    ?? instructions.at(0)
+  if (!existing) return false
+  assertPromptContent(existing.content, "messages")
+  const content =
+    Array.isArray(existing.content) ?
+      prependTextBlock(existing.content, { type: "text", text: prompt })
+    : prependPromptText(existing.content, prompt)
+  payload.messages = payload.messages.map((message) =>
+    message === existing ? { ...existing, content } : message,
+  )
+  return true
+}
+
 /**
  * Put the forced prompt first in the Messages `system` field. Clearing also
  * removes system and developer turns that Claude clients send in `messages`;
@@ -133,7 +241,17 @@ function applyForcedSystemPromptToMessages(
   forced: ForcedSystemPrompt,
 ): ForcedSystemPromptOutcome {
   if (!forced.clearOtherSystemPrompts) {
-    payload.system = prependSystemBlock(payload.system, forced.prompt)
+    if (
+      forced.forceAppendSystemPrompt
+      && (!payload.system || payload.system.length === 0)
+      && appendToMessagesInstructionTurn(payload, forced.prompt)
+    ) {
+      return { forced, removed: 0 }
+    }
+    payload.system =
+      forced.forceAppendSystemPrompt ?
+        appendToMessagesSystemPrompt(payload.system, forced.prompt)
+      : prependSystemBlock(payload.system, forced.prompt)
     return { forced, removed: 0 }
   }
   const instructionTurns = payload.messages.filter((message) =>
@@ -154,9 +272,31 @@ function withoutInstructionItems(
   return input.filter((item) => !isResponsesInstructionItem(item))
 }
 
+function appendToResponsesInput(
+  payload: ResponsesPayload,
+  prompt: string,
+): boolean {
+  if (!Array.isArray(payload.input)) return false
+  const instructions = payload.input.filter((item) =>
+    isResponsesInstructionItem(item),
+  )
+  const existing =
+    instructions.find((item) => item.role === "system") ?? instructions.at(0)
+  if (!existing) return false
+  assertPromptContent(existing.content, "input")
+  const content =
+    Array.isArray(existing.content) ?
+      prependTextBlock(existing.content, { type: "input_text", text: prompt })
+    : prependPromptText(existing.content ?? "", prompt)
+  payload.input = payload.input.map((item) =>
+    item === existing ? { ...existing, content } : item,
+  )
+  return true
+}
+
 /**
- * Put the forced prompt at the start of Responses `instructions`, which every
- * upstream route places before the input items.
+ * Prefix Responses `instructions`, or the first instruction input message
+ * when force append is enabled and no top-level instructions exist.
  */
 export function applyForcedSystemPromptToResponses(
   payload: ResponsesPayload,
@@ -174,13 +314,14 @@ export function applyForcedSystemPromptToResponses(
     payload.instructions = forced.prompt
     return { forced, removed }
   }
-  const alreadyForced =
-    instructions === forced.prompt
-    || instructions.startsWith(`${forced.prompt}\n\n`)
-  if (!alreadyForced) {
-    payload.instructions =
-      instructions ? `${forced.prompt}\n\n${instructions}` : forced.prompt
+  if (
+    forced.forceAppendSystemPrompt
+    && !instructions
+    && appendToResponsesInput(payload, forced.prompt)
+  ) {
+    return { forced, removed: 0 }
   }
+  payload.instructions = prependPromptText(instructions, forced.prompt)
   return { forced, removed: 0 }
 }
 
@@ -190,15 +331,19 @@ export function forcedSystemPromptBehavior(
 ): RequestBehavior {
   const { forced, removed } = outcome
   const plural = removed === 1 ? "" : "s"
+  let message = `Sent the forced system prompt from the ${forced.model} model setting before the client's system prompts`
+  if (forced.clearOtherSystemPrompts) {
+    message = `Sent the forced system prompt from the ${forced.model} model setting and removed ${removed} other system prompt${plural}`
+  } else if (forced.forceAppendSystemPrompt) {
+    message = `Sent the forced system prompt from the ${forced.model} model setting with force append`
+  }
   return {
     kind: "forced_system_prompt",
-    message:
-      forced.clearOtherSystemPrompts ?
-        `Sent the forced system prompt from the ${forced.model} model setting and removed ${removed} other system prompt${plural}`
-      : `Sent the forced system prompt from the ${forced.model} model setting before the client's system prompts`,
+    message,
     data: {
       model: forced.model,
       clearOtherSystemPrompts: forced.clearOtherSystemPrompts,
+      forceAppendSystemPrompt: forced.forceAppendSystemPrompt,
       removedSystemPrompts: removed,
     },
   }

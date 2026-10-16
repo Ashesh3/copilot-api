@@ -141,6 +141,7 @@ export interface ModelSetting {
   unsupportedRequestParameters?: Array<ModelRequestParameter>
   forcedSystemPrompt?: string
   clearOtherSystemPrompts?: boolean
+  forceAppendSystemPrompt?: boolean
 }
 
 export type CustomProviderModelKind = "chat" | "embedding"

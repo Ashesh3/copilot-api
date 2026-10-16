@@ -48,44 +48,48 @@ async function list(): Promise<unknown> {
   return await response.json()
 }
 
-test("saves a trimmed forced system prompt that survives a storage restart", async () => {
-  const response = await save({
-    model: "claude-opus-5.5",
-    forcedSystemPrompt: "  Be brief.\nCite files.  \n",
-    clearOtherSystemPrompts: true,
-  })
+test.each(["clearOtherSystemPrompts", "forceAppendSystemPrompt"])(
+  "saves a trimmed forced prompt with %s across a storage restart",
+  async (mode) => {
+    const response = await save({
+      model: "claude-opus-5.5",
+      forcedSystemPrompt: "  Be brief.\nCite files.  \n",
+      [mode]: true,
+    })
 
-  expect(response.status).toBe(200)
-  const saved = {
-    model: "claude-opus-5.5",
-    forcedSystemPrompt: "Be brief.\nCite files.",
-    clearOtherSystemPrompts: true,
-  }
-  expect(await response.json()).toEqual(saved)
-  const storageConfig = getStorageRuntime().config
-  await closeStorageRuntime()
-  await initializeStorageRuntime({ config: storageConfig })
-  expect(await list()).toEqual([saved])
-})
+    expect(response.status).toBe(200)
+    const saved = {
+      model: "claude-opus-5.5",
+      forcedSystemPrompt: "Be brief.\nCite files.",
+      [mode]: true,
+    }
+    expect(await response.json()).toEqual(saved)
+    const storageConfig = getStorageRuntime().config
+    await closeStorageRuntime()
+    await initializeStorageRuntime({ config: storageConfig })
+    expect(await list()).toEqual([saved])
+  },
+)
 
-test("clearing applies only with a prompt, and an empty prompt removes the setting", async () => {
-  expect(
-    await (
-      await save({ model: "gpt-5.5", clearOtherSystemPrompts: true })
-    ).json(),
-  ).toEqual({ model: "gpt-5.5" })
-  expect(await list()).toEqual([])
+test.each(["clearOtherSystemPrompts", "forceAppendSystemPrompt"])(
+  "%s applies only with a prompt, and removing the prompt clears it",
+  async (mode) => {
+    expect(
+      await (await save({ model: "gpt-5.5", [mode]: true })).json(),
+    ).toEqual({ model: "gpt-5.5" })
+    expect(await list()).toEqual([])
 
-  await save({
-    model: "gpt-5.5",
-    forcedSystemPrompt: "Be brief.",
-    clearOtherSystemPrompts: true,
-  })
-  expect(
-    (await save({ model: "gpt-5.5", forcedSystemPrompt: "   " })).status,
-  ).toBe(200)
-  expect(await list()).toEqual([])
-})
+    await save({
+      model: "gpt-5.5",
+      forcedSystemPrompt: "Be brief.",
+      [mode]: true,
+    })
+    expect(
+      (await save({ model: "gpt-5.5", forcedSystemPrompt: "   " })).status,
+    ).toBe(200)
+    expect(await list()).toEqual([])
+  },
+)
 
 test.each([
   [{ forcedSystemPrompt: 42 }, "forcedSystemPrompt is invalid"],
@@ -96,6 +100,18 @@ test.each([
   [
     { forcedSystemPrompt: "Be brief.", clearOtherSystemPrompts: "yes" },
     "clearOtherSystemPrompts is invalid",
+  ],
+  [
+    { forcedSystemPrompt: "Be brief.", forceAppendSystemPrompt: "yes" },
+    "forceAppendSystemPrompt is invalid",
+  ],
+  [
+    {
+      forcedSystemPrompt: "Be brief.",
+      clearOtherSystemPrompts: true,
+      forceAppendSystemPrompt: true,
+    },
+    "forceAppendSystemPrompt cannot be combined with clearOtherSystemPrompts",
   ],
 ])("rejects invalid forced prompt fields %#", async (fields, error) => {
   const response = await save({ model: "gpt-5.5", ...fields })
@@ -108,7 +124,58 @@ test.each([
 test("the dashboard bundle includes the forced system prompt controls", () => {
   expect(DASHBOARD_HTML).toContain("Forced system prompt")
   expect(DASHBOARD_HTML).toContain("Clear other system prompts")
+  expect(DASHBOARD_HTML).toContain("Force append")
 })
+
+test("switching prompt modes clears the previous mode and preserves prompt edits", async () => {
+  const model = "gpt-5.5"
+  await save({
+    model,
+    forcedSystemPrompt: "Be brief.",
+    clearOtherSystemPrompts: true,
+  })
+
+  expect(
+    await (await save({ model, forceAppendSystemPrompt: true })).json(),
+  ).toEqual({
+    model,
+    forcedSystemPrompt: "Be brief.",
+    forceAppendSystemPrompt: true,
+  })
+  expect(
+    await (await save({ model, forcedSystemPrompt: "Use examples." })).json(),
+  ).toEqual({
+    model,
+    forcedSystemPrompt: "Use examples.",
+    forceAppendSystemPrompt: true,
+  })
+  expect(
+    await (await save({ model, clearOtherSystemPrompts: true })).json(),
+  ).toEqual({
+    model,
+    forcedSystemPrompt: "Use examples.",
+    clearOtherSystemPrompts: true,
+  })
+})
+
+test.each([false, null])(
+  "force append can be disabled with %s",
+  async (value) => {
+    const model = "gpt-5.5"
+    await save({
+      model,
+      forcedSystemPrompt: "Be brief.",
+      forceAppendSystemPrompt: true,
+    })
+
+    expect(
+      await (await save({ model, forceAppendSystemPrompt: value })).json(),
+    ).toEqual({
+      model,
+      forcedSystemPrompt: "Be brief.",
+    })
+  },
+)
 
 test("Omit replaces the effort levels and survives a storage restart", async () => {
   const model = "claude-haiku-4.5"

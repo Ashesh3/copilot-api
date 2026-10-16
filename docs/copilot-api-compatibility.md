@@ -652,6 +652,14 @@ exactly, then without an effort suffix, then by its normalized name; redirect
 and fallback targets keep the requested model's prompt. Chat Completions and
 translated Google requests receive it as the first system message, Messages as
 the first `system` block, and Responses as the start of `instructions`.
+With **Force append**, Chat Completions prefixes the first existing system
+message (or developer message if no system message exists), Messages prefixes
+the existing `system` string or first text block (or a system/developer turn
+when the top-level field is absent), and Responses prefixes
+`instructions` or the first system/developer input message if instructions are
+absent. Existing message roles, other prompts, and block metadata are retained.
+If no system instructions exist, a prompt is created. Force append and clearing
+other system prompts are mutually exclusive.
 Responses compaction places it before the gateway summary instructions, and
 Messages token counting includes it. Clearing other prompts removes the
 client's system and developer messages, Messages `system` content, and

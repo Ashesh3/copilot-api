@@ -19,10 +19,12 @@ export interface ModelSettings {
   exposeVirtualReasoningModels?: boolean
   supportsAssistantPrefill?: boolean
   unsupportedRequestParameters?: Array<ModelRequestParameter>
-  /** Sent as the first system message of every request for this model. */
+  /** Sent before the client's system instructions for this model. */
   forcedSystemPrompt?: string
   /** Remove the client's own system and developer prompts. */
   clearOtherSystemPrompts?: boolean
+  /** Prefix the existing system prompt instead of adding a separate prompt. */
+  forceAppendSystemPrompt?: boolean
 }
 
 export interface ModelSettingsUpdate {
@@ -36,6 +38,7 @@ export interface ModelSettingsUpdate {
   unsupportedRequestParameters?: Array<ModelRequestParameter> | null
   forcedSystemPrompt?: string | null
   clearOtherSystemPrompts?: boolean | null
+  forceAppendSystemPrompt?: boolean | null
 }
 
 export type ModelRequestParameter = "temperature" | "top_p"
@@ -149,16 +152,23 @@ function normalizeForcedSystemPrompt(value: unknown): string | undefined {
   return prompt.length > 0 ? prompt : undefined
 }
 
-/** Clearing other prompts is only meaningful while a forced prompt is set. */
+/** Prompt modes are exclusive and only meaningful with a forced prompt. */
 function applyForcedSystemPromptFields(
   settings: ModelSettings,
-  prompt: unknown,
-  clearOtherSystemPrompts: unknown,
+  fields: {
+    forcedSystemPrompt: unknown
+    clearOtherSystemPrompts: unknown
+    forceAppendSystemPrompt: unknown
+  },
 ): void {
-  const forcedSystemPrompt = normalizeForcedSystemPrompt(prompt)
+  const { clearOtherSystemPrompts, forceAppendSystemPrompt } = fields
+  const forcedSystemPrompt = normalizeForcedSystemPrompt(
+    fields.forcedSystemPrompt,
+  )
   if (!forcedSystemPrompt) {
     delete settings.forcedSystemPrompt
     delete settings.clearOtherSystemPrompts
+    delete settings.forceAppendSystemPrompt
     return
   }
   settings.forcedSystemPrompt = forcedSystemPrompt
@@ -166,6 +176,11 @@ function applyForcedSystemPromptFields(
     settings.clearOtherSystemPrompts = true
   } else {
     delete settings.clearOtherSystemPrompts
+  }
+  if (forceAppendSystemPrompt === true && clearOtherSystemPrompts !== true) {
+    settings.forceAppendSystemPrompt = true
+  } else {
+    delete settings.forceAppendSystemPrompt
   }
 }
 
@@ -239,11 +254,11 @@ function normalizeModelSettings(raw: unknown): ModelSettings | undefined {
   if (unsupportedRequestParameters && unsupportedRequestParameters.length > 0) {
     normalized.unsupportedRequestParameters = unsupportedRequestParameters
   }
-  applyForcedSystemPromptFields(
-    normalized,
-    value.forcedSystemPrompt,
-    value.clearOtherSystemPrompts,
-  )
+  applyForcedSystemPromptFields(normalized, {
+    forcedSystemPrompt: value.forcedSystemPrompt,
+    clearOtherSystemPrompts: value.clearOtherSystemPrompts,
+    forceAppendSystemPrompt: value.forceAppendSystemPrompt,
+  })
   applyOmitReasoningEffort(normalized, value.omitReasoningEffort === true)
 
   return hasCustomModelSettings(normalized) ? normalized : undefined
@@ -306,6 +321,7 @@ function validateStoredModelSettingFields(item: Record<string, unknown>): void {
     supportsAssistantPrefill: (value) => typeof value === "boolean",
     forcedSystemPrompt: (value) => typeof value === "string",
     clearOtherSystemPrompts: (value) => typeof value === "boolean",
+    forceAppendSystemPrompt: (value) => typeof value === "boolean",
   }
   for (const [key, validate] of Object.entries(fields)) {
     if (Object.hasOwn(item, key) && !validate(item[key]))
@@ -529,18 +545,25 @@ function applyForcedSystemPromptUpdate(
   if (
     updates.forcedSystemPrompt === undefined
     && updates.clearOtherSystemPrompts === undefined
+    && updates.forceAppendSystemPrompt === undefined
   ) {
     return
   }
-  applyForcedSystemPromptFields(
-    settings,
-    updates.forcedSystemPrompt === undefined ?
-      settings.forcedSystemPrompt
-    : updates.forcedSystemPrompt,
-    updates.clearOtherSystemPrompts === undefined ?
-      settings.clearOtherSystemPrompts
-    : updates.clearOtherSystemPrompts,
-  )
+  applyForcedSystemPromptFields(settings, {
+    forcedSystemPrompt:
+      updates.forcedSystemPrompt === undefined ?
+        settings.forcedSystemPrompt
+      : updates.forcedSystemPrompt,
+    clearOtherSystemPrompts:
+      updates.clearOtherSystemPrompts === undefined ?
+        settings.clearOtherSystemPrompts
+        && updates.forceAppendSystemPrompt !== true
+      : updates.clearOtherSystemPrompts,
+    forceAppendSystemPrompt:
+      updates.forceAppendSystemPrompt === undefined ?
+        settings.forceAppendSystemPrompt
+      : updates.forceAppendSystemPrompt,
+  })
 }
 
 function applyBooleanModelSettingUpdate(
