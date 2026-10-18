@@ -11,8 +11,9 @@ export function clientToolsPayload<T extends Record<string, unknown>>(
         (record.function as Record<string, unknown>)
       : record
     return (
-      typeof definition.name !== "string"
-      || !definition.name.startsWith("_copilot_web_")
+      (record.type !== "web_search" || Object.keys(record).length !== 1)
+      && (typeof definition.name !== "string"
+        || !definition.name.startsWith("_copilot_web_"))
     )
   })
   const result = { ...payload, tools }

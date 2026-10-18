@@ -11,7 +11,7 @@ import {
   executeWebSearch,
 } from "~/services/copilot/mcp-web-search"
 import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
-import { mixedWebSearchResponse } from "~/services/web/tool-output"
+import { assertNoClientWebCalls } from "~/services/web/tool-output"
 
 export const MAX_GOOGLE_RESPONSES_WEB_SEARCH_USES = 8
 
@@ -21,7 +21,9 @@ function searchCalls(
   if (isCallerOwnedWebSearch("web_search")) return []
   return result.output.filter(
     (item): item is ResponseOutputFunctionCall =>
-      item.type === "function_call" && item.name === "web_search",
+      item.type === "function_call"
+      && !item.namespace
+      && item.name === "web_search",
   )
 }
 
@@ -53,6 +55,12 @@ export async function resolvePreparedGoogleResponsesWebSearch(options: {
 
   while (true) {
     const calls = searchCalls(current)
+    if (calls.length > 0 || uses > 0)
+      assertNoClientWebCalls(
+        current as unknown as Record<string, unknown>,
+        "responses",
+        new Set(calls.map((call) => call.call_id)),
+      )
     if (calls.length === 0) return current
     if (uses + calls.length > maxUses) throw searchLimitError(maxUses)
     uses += calls.length
@@ -65,12 +73,6 @@ export async function resolvePreparedGoogleResponsesWebSearch(options: {
         ),
       })),
     )
-    const mixed = mixedWebSearchResponse(
-      current as unknown as Record<string, unknown>,
-      "responses",
-      results.map((r) => ({ id: r.callId, text: r.output })),
-    )
-    if (mixed) return mixed as unknown as ResponsesResult
     const completedCalls = current.output as Array<ResponseInputItem>
     currentPayload = {
       ...currentPayload,

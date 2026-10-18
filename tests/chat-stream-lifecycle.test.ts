@@ -455,7 +455,18 @@ test.each(["throw", "eof", "malformed"] as const)(
 )
 
 test("preserves split Messages tool arguments before EOF failure", async () => {
-  const responsePromise = postChat("claude-lifecycle-model")
+  const responsePromise = postChat("claude-lifecycle-model", [
+    {
+      type: "function",
+      function: {
+        name: "lookup",
+        parameters: {
+          type: "object",
+          properties: { city: { type: "string" } },
+        },
+      },
+    },
+  ])
   await waitForUpstreamController()
   enqueueAnthropic("message_start", {
     type: "message_start",
@@ -583,7 +594,10 @@ test.each([
   },
 )
 
-function postChat(model: string): Promise<Response> {
+function postChat(
+  model: string,
+  tools?: Array<Record<string, unknown>>,
+): Promise<Response> {
   return Promise.resolve(
     seedProtocolDatabase().then(() =>
       server.request("/v1/chat/completions", {
@@ -596,6 +610,7 @@ function postChat(model: string): Promise<Response> {
           model,
           messages: [{ role: "user", content: "hello" }],
           stream: true,
+          ...(tools ? { tools } : {}),
         }),
       }),
     ),

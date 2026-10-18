@@ -59,23 +59,6 @@ afterEach(() => {
   resetWebSearchSessionsForTest()
 })
 
-function collaborationTool() {
-  return {
-    type: "namespace",
-    name: "collaboration",
-    tools: [
-      {
-        type: "function",
-        name: "send_message",
-        parameters: {
-          type: "object",
-          properties: { message: { type: "string", encrypted: true } },
-        },
-      },
-    ],
-  }
-}
-
 function sourcePayload(protocol: WebProtocol, stream: boolean) {
   const common = { model, stream, top_p: 0.9 }
   if (protocol === "messages")
@@ -91,7 +74,6 @@ function sourcePayload(protocol: WebProtocol, stream: boolean) {
       ...common,
       input: [{ role: "user", content: "Find the fixture." }],
       temperature: 0.7,
-      tools: [collaborationTool()],
       service_tier: "priority",
     }
   return {
@@ -171,15 +153,6 @@ function completion(protocol: WebProtocol, managed: boolean) {
               content: [
                 { type: "output_text", text: "FINAL_ANSWER", annotations: [] },
               ],
-            },
-            {
-              type: "function_call",
-              id: "client-item",
-              call_id: "client-call",
-              namespace: "copilot_collaboration",
-              name: "send_message",
-              arguments: '{"message":"fixture"}',
-              status: "completed",
             },
           ],
       usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
@@ -427,9 +400,6 @@ for (const protocol of ["chat", "responses", "messages"] as const) {
         })
         expect(bodies[2]).toMatchObject({ store: false, tool_choice: "auto" })
         expect(bodies[2]).not.toHaveProperty("service_tier")
-        expect(JSON.stringify(result)).toContain('"namespace":"collaboration"')
-        expect(JSON.stringify(result)).toContain('"encrypted_function_args":[]')
-        expect(JSON.stringify(result)).not.toContain("copilot_collaboration")
       } else if (protocol === "messages") {
         expect(history[2]).toEqual({
           role: "user",

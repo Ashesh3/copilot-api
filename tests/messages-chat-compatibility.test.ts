@@ -540,7 +540,7 @@ test.each([
   { streaming: false, webSearch: true },
   { streaming: true, webSearch: true },
 ])(
-  "Chat delivers and exactly replays ordered signed/redacted content (stream=$streaming, web_search=$webSearch)",
+  "Chat preserves signed content or rejects unsupported hosted search with caller tools (stream=$streaming, web_search=$webSearch)",
   async ({ streaming, webSearch }) => {
     const tools = [
       ...(webSearch ? [{ type: "web_search" }] : []),
@@ -566,10 +566,17 @@ test.each([
       stream: streaming,
       tools,
     })
+    if (webSearch) {
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({
+        error: { code: "unsupported_web_tool_combination" },
+      })
+      expect(calls).toHaveLength(0)
+      return
+    }
     expect(response.status).toBe(200)
     expect(calls).toHaveLength(1)
     expect(new URL(calls[0].url).pathname).toBe("/v1/messages")
-    if (webSearch) expect(calls[0].body.stream).toBe(false)
     const chunks =
       streaming ? readChatChunks(await response.clone().text()) : []
     const assistant = await readChatAssistant(response, streaming)

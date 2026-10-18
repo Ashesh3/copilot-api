@@ -900,7 +900,19 @@ test("flushes a pending Chat tool call as the Google EOF terminal", async () => 
     ],
   })}\n\n`
 
-  const response = await requestGoogleStream(model.id)
+  const response = await requestGoogleStream(model.id, "", [
+    {
+      functionDeclarations: [
+        {
+          name: "get_weather",
+          parameters: {
+            type: "OBJECT",
+            properties: { city: { type: "STRING" } },
+          },
+        },
+      ],
+    },
+  ])
   expect(await response.json()).toEqual([
     {
       candidates: [

@@ -9,6 +9,7 @@ import { resolveCopilotRequestAttribution } from "~/lib/copilot-request-context"
 import { parseRoutingMetadataRecord } from "~/lib/routing-affinity"
 import { sanitizeCopilotHeaderValue } from "~/services/copilot/copilot-contract"
 import { sanitizeAnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
+import { withoutLegacyWebResults } from "~/services/web/legacy-history"
 
 const FRAME_ENVELOPE_KEYS = new Set([
   "agent_task_id",
@@ -285,9 +286,8 @@ export function rehydrateContinuationPayloadFromSnapshot(
 ): ResponsesPayload {
   const snapshotClone = structuredClone(snapshotPayload)
   const payloadClone = structuredClone(payload)
-  const mergedInput = mergeContinuationInput(
-    snapshotClone.input,
-    payloadClone.input,
+  const mergedInput = withoutLegacyWebResults(
+    mergeContinuationInput(snapshotClone.input, payloadClone.input),
   )
   const {
     client_metadata: _ignoredClientMetadata,

@@ -1151,6 +1151,7 @@ const handleResponsesInner = async (
 
           try {
             const response = await createResponses(preparedPayload, {
+              nativeResponses: true,
               copilotSessionToken,
               vision,
               initiator,
@@ -1246,6 +1247,7 @@ const handleResponsesInner = async (
       }),
       async (span) => {
         const result = (await createResponses(preparedPayload, {
+          nativeResponses: true,
           copilotSessionToken,
           vision,
           initiator,

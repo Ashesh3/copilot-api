@@ -516,6 +516,7 @@ const SAFE_LOCAL_ERROR_CODES = new Set([
   "session_account_continuity_error",
   "session_account_rejected",
   "unsupported_value",
+  "unsupported_web_tool_combination",
   "web_search_limit_exceeded",
 ])
 

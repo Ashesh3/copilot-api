@@ -12,6 +12,7 @@ import {
   snapshotRequestPlainDataRecord,
 } from "~/lib/plain-data-snapshot"
 import { ANTHROPIC_REASONING_ENVELOPE_PREFIX } from "~/routes/responses/messages-reasoning-provenance"
+import { withoutLegacyWebResults } from "~/services/web/legacy-history"
 
 import type { ResponseInputMessage, ResponsesPayload } from "./create-responses"
 
@@ -103,6 +104,8 @@ export function finalizeResponsesRequest(
   options: FinalizeResponsesRequestOptions,
 ): PreparedResponsesRequest {
   const prepared = prepareLegacyResponsesRequest(payload)
+  if (Array.isArray(prepared.body.input))
+    prepared.body.input = withoutLegacyWebResults(prepared.body.input)
   stripForeignReasoningEnvelopes(prepared.body)
   if (
     shouldFinalizeResponsesReasoning(prepared.body, options)
@@ -134,6 +137,8 @@ export function finalizeNativeResponsesRequest(
     })
   }
   const body = structuredClone(sourceSnapshot) as ResponsesWireBody
+  if (Array.isArray(body.input))
+    body.input = withoutLegacyWebResults(body.input)
   const normalizationClasses = [...prepared.normalizationClasses]
   body.model = options.model
   body.store = false
@@ -280,6 +285,8 @@ export function prepareResponsesRequest(
     normalizationClasses.push("stateless_controls")
   }
   const source = structuredClone(sourceSnapshot)
+  if (Array.isArray(source.input))
+    source.input = withoutLegacyWebResults(source.input)
   source.store = false
   return { source, normalizationClasses }
 }

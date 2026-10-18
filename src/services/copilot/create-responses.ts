@@ -480,6 +480,7 @@ interface ResponsesRequestOptions {
   signal?: AbortSignal
   compaction?: boolean
   prepared?: boolean
+  nativeResponses?: boolean
   routedAccountPin?: RoutedAccountPin
   retryBudget?: RetryBudget
 }
@@ -551,6 +552,7 @@ export const createResponses = async (
   const operation: ResponsesOperationState = {}
   return (await runManagedWebRequest({
     protocol: "responses",
+    nativeResponses: options.nativeResponses,
     payload,
     disabled: options.compaction || isResponsesCompactionRequest(payload),
     accountId: pinnedOptions.routedAccountPin.accountId,

@@ -62,7 +62,7 @@ test.each(["/responses", "/v1/responses", "/v1/responses/"])(
       callerNames: Array<string>
     }
     expect(body.source).toEqual(source)
-    expect(body.managed).toEqual(["_copilot_web_search_1"])
+    expect(body.managed).toEqual([])
     expect(body.callerNames).toEqual(["_copilot_web_search"])
     expect(body.payload.tools[0]).toEqual(source.tools[0])
     expect(webToolsContext()).toBeUndefined()

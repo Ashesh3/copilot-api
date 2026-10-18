@@ -12,6 +12,9 @@ export interface ManagedWebTool {
 }
 export interface WebToolsContext {
   enabled: boolean
+  searchAllowed: boolean
+  hasCallerTools: boolean
+  forcedCallerTool: boolean
   callerNames: Set<string>
   requested: Map<string, ManagedWebTool>
   injected: Map<string, ManagedWebTool>
@@ -65,6 +68,7 @@ function toolDeclarations(
 function allowsDefaults(
   source: Record<string, unknown>,
   external = false,
+  ignoreRequired = false,
 ): boolean {
   const choice = source.tool_choice ?? source.function_call
   const format =
@@ -90,7 +94,8 @@ function allowsDefaults(
   // A required client call must not be satisfied by an injected server tool.
   const active = external ? undefined : context.getStore()
   if (
-    required
+    !ignoreRequired
+    && required
     && toolDeclarations(source).some((tool) => {
       const name = toolName(tool)
       const type = typeof tool.type === "string" ? tool.type.trim() : ""
@@ -160,6 +165,47 @@ function allowsDefaults(
   )
 }
 
+function isHostedSearch(tool: Record<string, unknown>): boolean {
+  return (
+    typeof tool.type === "string"
+    && /^web_search(?:_[a-z\d]+)*$/.test(tool.type)
+  )
+}
+
+function isForcedCallerTool(
+  source: Record<string, unknown>,
+  callerNames: ReadonlySet<string>,
+): boolean {
+  const choice = source.tool_choice ?? source.function_call
+  if (!isRecord(choice)) return false
+  if (choice.type && choice.type !== "function" && choice.type !== "tool")
+    return false
+  const name = isRecord(choice.function) ? choice.function.name : choice.name
+  return typeof name === "string" && callerNames.has(name)
+}
+
+function hasCallerDeclarations(
+  source: Record<string, unknown>,
+  active: WebToolsContext,
+): boolean {
+  return (
+    active.hasCallerTools
+    || toolDeclarations(source).some((tool) => {
+      if (isHostedSearch(tool)) return false
+      const name = toolName(tool)
+      if (
+        name
+        && !active.callerNames.has(name)
+        && (active.injected.has(name)
+          || active.requested.has(name)
+          || name === "web_search")
+      )
+        return false
+      return Boolean(name || tool.type)
+    })
+  )
+}
+
 export function webToolError(code: string, message: string): LocalHTTPError {
   const body = { error: { type: "invalid_request_error", code, message } }
   return new LocalHTTPError(message, Response.json(body, { status: 400 }), body)
@@ -188,18 +234,24 @@ export function runWithWebTools<T>(
 ): T {
   const callerNames = new Set<string>()
   const requested = new Map<string, ManagedWebTool>()
+  let hasCallerTools = false
   for (const tool of toolDeclarations(source)) {
     const name = toolName(tool)
-    if (
-      typeof tool.type === "string"
-      && /^web_search(?:_[a-z\d]+)*$/.test(tool.type)
-    )
+    if (isHostedSearch(tool))
       requested.set(name ?? "web_search", definition("search", tool))
-    else if (name) callerNames.add(name)
+    else if (isRecord(tool.googleSearch))
+      requested.set("web_search", definition("search", tool.googleSearch))
+    else {
+      hasCallerTools ||= Boolean(name || tool.type)
+      if (name) callerNames.add(name)
+    }
   }
   return context.run(
     {
       enabled: allowsDefaults(source, true),
+      searchAllowed: allowsDefaults(source, true, true),
+      hasCallerTools,
+      forcedCallerTool: isForcedCallerTool(source, callerNames),
       callerNames,
       requested,
       injected: new Map(),
@@ -252,21 +304,88 @@ function availableName(base: string, names: Set<string>): string {
   names.add(name)
   return name
 }
+
+interface WebPreparationOptions {
+  disabled?: boolean
+  hostedDefault?: boolean
+  nativeResponses?: boolean
+}
+
+function allowsManagedCombination(
+  source: Record<string, unknown>,
+  active: WebToolsContext,
+  nativeHosted: boolean,
+): boolean {
+  if (nativeHosted || !hasCallerDeclarations(source, active)) return true
+  const explicitSearch =
+    active.requested.size > 0
+    || toolDeclarations(source).some((tool) => isHostedSearch(tool))
+  if (
+    explicitSearch
+    && active.searchAllowed
+    && allowsDefaults(source, false, true)
+    && !active.forcedCallerTool
+    && !isForcedCallerTool(source, active.callerNames)
+  )
+    throw webToolError(
+      "unsupported_web_tool_combination",
+      "Gateway-managed web search cannot be combined with client tools on this route. Use native Responses hosted search or a client-owned search tool.",
+    )
+  return false
+}
+
+function usesHostedSearch(
+  source: Record<string, unknown>,
+  protocol: WebProtocol,
+): boolean {
+  return (
+    protocol === "responses"
+    && toolDeclarations(source).some((tool) => isHostedSearch(tool))
+  )
+}
+
+function defaultManagedTool(active: WebToolsContext): [string, ManagedWebTool] {
+  return (
+    [...active.requested.entries()].at(0) ?? [
+      "_copilot_web_search",
+      definition("search", {}),
+    ]
+  )
+}
+
 export function prepareManagedWebTools(
   source: Record<string, unknown>,
   protocol: WebProtocol,
-  disabled = false,
+  options: WebPreparationOptions = {},
 ): PreparedManagedWebTools {
   const active = context.getStore()
   const managed = new Map<string, ManagedWebTool>()
-  if (!active?.enabled || disabled || !allowsDefaults(source))
+  const unchanged = {
+    payload: source as PreparedManagedWebTools["payload"],
+    managed,
+  }
+  if (!active || options.disabled) return unchanged
+  const hostedDefault =
+    protocol === "responses" && options.hostedDefault === true
+  const nativeHosted = usesHostedSearch(source, protocol)
+  // Stateless translated protocols cannot replay hidden search results after a
+  // client-tool handoff. Do not introduce this unsupported combination by default.
+  if (
+    !allowsManagedCombination(
+      source,
+      active,
+      options.nativeResponses === true && (nativeHosted || hostedDefault),
+    )
+  )
+    return unchanged
+  if (!active.enabled || !allowsDefaults(source))
     return { payload: source as PreparedManagedWebTools["payload"], managed }
   const payload = structuredClone(source) as PreparedManagedWebTools["payload"]
   const tools =
     Array.isArray(payload.tools) ?
       payload.tools.filter((item: unknown) => isRecord(item))
     : []
-  const kinds = new Set<ManagedWebTool["kind"]>()
+  const kinds = new Set<ManagedWebTool["kind"]>(nativeHosted ? ["search"] : [])
   const names = new Set([
     ...active.callerNames,
     ...tools
@@ -316,10 +435,12 @@ export function prepareManagedWebTools(
   })
   for (const kind of ["search"] as const) {
     if (kinds.has(kind)) continue
-    const requested = [...active.requested.entries()].at(0)
-    const preferred = requested?.[0] ?? `_copilot_web_${kind}`
+    if (hostedDefault) {
+      payload.tools.push({ type: "web_search" })
+      continue
+    }
+    const [preferred, tool] = defaultManagedTool(active)
     const name = availableName(preferred, names)
-    const tool = requested?.[1] ?? definition(kind, {})
     managed.set(name, tool)
     active.injected.set(name, tool)
     payload.tools.push(customTool(name, protocol))
