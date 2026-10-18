@@ -8,9 +8,10 @@ import { LocalHTTPError } from "~/lib/error"
 import {
   buildWebSearchQuery,
   executeWebSearch,
+  isChatWebSearchFunctionTool,
 } from "~/services/copilot/mcp-web-search"
 import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
-import { mixedWebSearchResponse } from "~/services/web/tool-output"
+import { assertNoClientWebCalls } from "~/services/web/tool-output"
 
 export const MAX_RESPONSES_WEB_SEARCH_USES = 8
 
@@ -37,13 +38,13 @@ export type ResponsesChatCompletionFactory = (
 
 function webSearchCalls(response: ChatCompletionResponse): Array<ToolCall> {
   if (isCallerOwnedWebSearch("web_search")) return []
-  return (response.choices[0]?.message.tool_calls ?? []).filter(
-    (call) => call.function.name === "web_search",
+  return (response.choices[0]?.message.tool_calls ?? []).filter((call) =>
+    isChatWebSearchFunctionTool(call),
   )
 }
 
 function webSearchTool(payload: ChatCompletionsPayload): unknown {
-  return payload.tools?.find((tool) => tool.function.name === "web_search")
+  return payload.tools?.find((tool) => isChatWebSearchFunctionTool(tool))
 }
 
 export async function resolvePreparedResponsesWebSearchCalls(options: {
@@ -64,6 +65,12 @@ export async function resolvePreparedResponsesWebSearchCalls(options: {
 
   while (true) {
     const calls = webSearchCalls(current)
+    if (calls.length > 0 || searchUses > 0)
+      assertNoClientWebCalls(
+        current as unknown as Record<string, unknown>,
+        "chat",
+        new Set(calls.map((call) => call.id)),
+      )
     if (calls.length === 0) return current
     if (
       iterations >= maxSearchUses
@@ -85,12 +92,6 @@ export async function resolvePreparedResponsesWebSearchCalls(options: {
         ),
       })),
     )
-    const mixed = mixedWebSearchResponse(
-      current as unknown as Record<string, unknown>,
-      "chat",
-      results.map((r) => ({ id: r.callId, text: r.result })),
-    )
-    if (mixed) return mixed as unknown as ChatCompletionResponse
     const nextPayload: ChatCompletionsPayload = {
       ...currentPayload,
       messages: [

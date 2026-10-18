@@ -97,6 +97,7 @@ import {
   finalizeNativeResponsesRequest,
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
+import { withoutLegacyWebResults } from "~/services/web/legacy-history"
 import { runWithWebTools } from "~/services/web/tool-context"
 
 import { createResponsesAttachmentCache } from "./attachment-cache"
@@ -800,6 +801,7 @@ async function handleResponseCreate(
       turn.forcedSystemPrompt ? payload : candidate.payload
     const response = await waitForWebSocketTurn(
       createResponses(candidate.payload, {
+        nativeResponses: true,
         allowCompatibilityRetry: false,
         vision,
         initiator,
@@ -2115,8 +2117,10 @@ function createCompletedResponseSnapshot(
   const snapshotPayload = structuredClone(payload)
   const completedInput =
     Array.isArray(output) ?
-      mergeContinuationInput(snapshotPayload.input, structuredClone(output))
-    : snapshotPayload.input
+      withoutLegacyWebResults(
+        mergeContinuationInput(snapshotPayload.input, structuredClone(output)),
+      )
+    : withoutLegacyWebResults(snapshotPayload.input)
 
   const snapshot: ResponsesPayload = {
     ...snapshotPayload,

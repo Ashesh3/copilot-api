@@ -68,13 +68,13 @@ test("executes owned tools and replays all thinking before final synthesis", asy
   })
 })
 
-test("mixed calls preserve the client call and expose completed web evidence", async () => {
+test("Messages rejects unexpected mixed calls before executing managed search", async () => {
   const source = {
     model: "fixture",
     messages: [],
-    tools: [{ name: "read_file", input_schema: { type: "object" } }],
   }
   let sends = 0
+  let executions = 0
   const result = await runWithWebTools(source, () =>
     runManagedWebRequest({
       protocol: "messages",
@@ -97,19 +97,19 @@ test("mixed calls preserve the client call and expose completed web evidence", a
           },
         ])
       },
-      execute: async () => ({ text: "VERIFIED_WEB_CONTENT", isError: false }),
+      execute: async () => {
+        executions++
+        return { text: "PRIVATE_WEB_CONTENT", isError: false }
+      },
     }),
-  )
+  ).catch((error: unknown) => error)
   expect(sends).toBe(1)
+  expect(executions).toBe(0)
   expect(result).toMatchObject({
-    stop_reason: "tool_use",
-    content: [
-      { type: "thinking", signature: "signed" },
-      { type: "text" },
-      { type: "tool_use", id: "client-1", name: "read_file" },
-    ],
+    response: { status: 400 },
+    clientBody: { error: { code: "unsupported_web_tool_combination" } },
   })
-  expect(JSON.stringify(result)).toContain("VERIFIED_WEB_CONTENT")
+  expect(JSON.stringify(result)).not.toContain("PRIVATE_WEB_CONTENT")
 })
 
 test.each([
@@ -136,9 +136,10 @@ test.each([
     arguments: "{}",
   },
 ])(
-  "Responses returns mixed client calls without an unfulfilled continuation: %j",
+  "Responses rejects unexpected mixed client calls before any execution: %j",
   async (clientCall) => {
     let sends = 0
+    let executions = 0
     const payload = { input: "open page" }
     const result = await runWithWebTools(payload, () =>
       runManagedWebRequest({
@@ -159,11 +160,19 @@ test.each([
             ],
           }
         },
-        execute: async () => ({ text: "PAGE", isError: false }),
+        execute: async () => {
+          executions++
+          return { text: "PRIVATE_PAGE", isError: false }
+        },
       }),
-    )
+    ).catch((error: unknown) => error)
     expect(sends).toBe(1)
-    expect(result).toMatchObject({ output: [{ type: "message" }, clientCall] })
+    expect(executions).toBe(0)
+    expect(result).toMatchObject({
+      response: { status: 400 },
+      clientBody: { error: { code: "unsupported_web_tool_combination" } },
+    })
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_PAGE")
   },
 )
 

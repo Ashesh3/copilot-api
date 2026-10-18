@@ -16,7 +16,6 @@ import {
 import { server } from "~/server"
 
 import { clientToolsPayload } from "./helpers/client-tools-payload"
-import { isGithubOrigin } from "./helpers/github-origin"
 import {
   PROTOCOL_GATEWAY_KEY,
   seedProtocolDatabase,
@@ -270,57 +269,16 @@ test.each(["tools", "additional_tools"] as const)(
   },
 )
 
-test("WebSocket clients open pages on GitHub through default web search", async () => {
-  const providerFetch = globalThis.fetch
-  let pageRequests = 0
-  globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
-    const target = new URL(url instanceof Request ? url.url : String(url))
-    if (!isGithubOrigin(target))
-      throw new Error("Proxy must not fetch page origins")
-    const body = JSON.parse(
-      typeof init?.body === "string" ? init.body : "{}",
-    ) as Record<string, unknown>
-    if (body.stream === false) {
-      pageRequests++
-      expect(target.pathname).toBe("/responses")
-      expect(body.tools).toEqual([
-        { type: "web_search", external_web_access: true },
-      ])
-      return Promise.resolve(
-        Response.json({
-          status: "completed",
-          output: [
-            {
-              type: "web_search_call",
-              status: "completed",
-              action: { type: "open_page", url: "https://pages.test/" },
-            },
-            {
-              type: "message",
-              role: "assistant",
-              content: [
-                {
-                  type: "output_text",
-                  text: '{"status":"ok","content":"WEB_SOCKET_PAGE_EVIDENCE"}',
-                },
-              ],
-            },
-          ],
-        }),
-      )
-    }
-    return providerFetch(url, init)
-  }) as typeof fetch
+test("WebSocket defaults preserve hosted page events and citations", async () => {
   const ws = await createSocket()
-  const call = {
-    id: "ws_web_call",
-    type: "function_call",
-    call_id: "web_call",
-    name: "_copilot_web_search",
-    arguments: '{"query":"Open https://pages.test/"}',
+  const page = {
+    id: "ws_page",
+    type: "web_search_call",
+    status: "completed",
+    action: { type: "open_page", url: "https://pages.test/" },
   }
   const answer = {
-    id: "ws_answer",
+    id: "msg_page_answer",
     type: "message",
     role: "assistant",
     status: "completed",
@@ -328,68 +286,67 @@ test("WebSocket clients open pages on GitHub through default web search", async 
       { type: "output_text", text: "Verified WebSocket page", annotations: [] },
     ],
   }
-  for (const [index, item] of [call, answer].entries()) {
-    const response = {
-      id: `web_response_${index}`,
-      model,
-      object: "response",
-      status: "completed",
-      output: [item],
-      usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 },
-    }
-    const frames = [
-      {
-        type: "response.created",
-        response: { ...response, output: [], status: "in_progress" },
-      },
-      { type: "response.output_item.added", output_index: 0, item },
-      ...(index === 1 ?
-        [
-          {
-            type: "response.output_text.delta",
-            output_index: 0,
-            item_id: item.id,
-            content_index: 0,
-            delta: "Verified WebSocket page",
-          },
-        ]
-      : []),
-      { type: "response.output_item.done", output_index: 0, item },
-      { type: "response.completed", response },
-    ]
-    responses.push(
-      new Response(
-        frames
-          .map(
-            (frame) =>
-              `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`,
-          )
-          .join(""),
-        { headers: { "content-type": "text/event-stream" } },
-      ),
-    )
+  const response = {
+    id: "resp_hosted_page",
+    model,
+    object: "response",
+    status: "completed",
+    output: [page, answer],
+    usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 },
   }
+  const frames = [
+    {
+      type: "response.created",
+      response: { ...response, output: [], status: "in_progress" },
+    },
+    { type: "response.output_item.added", output_index: 0, item: page },
+    {
+      type: "response.web_search_call.completed",
+      output_index: 0,
+      item_id: page.id,
+    },
+    { type: "response.output_item.done", output_index: 0, item: page },
+    { type: "response.output_item.added", output_index: 1, item: answer },
+    {
+      type: "response.output_text.delta",
+      output_index: 1,
+      item_id: answer.id,
+      content_index: 0,
+      delta: "Verified WebSocket page",
+    },
+    { type: "response.output_item.done", output_index: 1, item: answer },
+    { type: "response.completed", response },
+  ]
+  responses.push(
+    new Response(
+      frames
+        .map(
+          (frame) => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`,
+        )
+        .join(""),
+      { headers: { "content-type": "text/event-stream" } },
+    ),
+  )
   await sendTurn(ws, { input: "Read https://pages.test/" })
-  expect(pageRequests).toBe(1)
-  expect(requests).toHaveLength(2)
-  expect(JSON.stringify(requests[1].input)).toContain(
-    "WEB_SOCKET_PAGE_EVIDENCE",
-  )
-  expect(requests[0].tools).toMatchObject([{ name: "_copilot_web_search" }])
+  expect(requests).toHaveLength(1)
+  expect(requests[0].tools).toEqual([{ type: "web_search" }])
   expect(ws.sent.filter((frame) => frame.type === "error")).toEqual([])
-  const terminal = ws.sent.filter(
-    (frame) => frame.type === "response.completed",
-  )
-  expect(terminal).toHaveLength(1)
-  expect(terminal[0]).toMatchObject({
-    response: { id: "web_response_0", usage: { total_tokens: 10 } },
+  expect(
+    ws.sent.filter((frame) => frame.type === "response.completed"),
+  ).toEqual([
+    {
+      type: "response.completed",
+      response: { ...response, output_text: "Verified WebSocket page" },
+    },
+  ])
+  expect(ws.sent).toContainEqual({
+    type: "response.web_search_call.completed",
+    output_index: 0,
+    item_id: page.id,
   })
-  expect(JSON.stringify(terminal[0])).toContain("Verified WebSocket page")
-  expect(JSON.stringify(terminal[0])).not.toContain(
-    '"name":"_copilot_web_search"',
-  )
+  expect(JSON.stringify(ws.sent)).not.toContain("web_result_")
+  expect(JSON.stringify(ws.sent)).not.toContain("[Web tool")
 })
-
 test("restores plaintext collaboration calls before WebSocket continuation snapshots", async () => {
   const ws = await createSocket()
   responses.push(

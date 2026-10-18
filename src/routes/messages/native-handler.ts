@@ -47,7 +47,7 @@ import {
 } from "~/services/copilot/mcp-web-search"
 import { createRetryBudget } from "~/services/copilot/transport-retry"
 import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
-import { mixedWebSearchResponse } from "~/services/web/tool-output"
+import { assertNoClientWebCalls } from "~/services/web/tool-output"
 
 import {
   type AnthropicErrorEvent,
@@ -672,6 +672,12 @@ export async function resolveNativeWebSearch(
         && block.name === "web_search"
         && !isCallerOwnedWebSearch("web_search"),
     )
+    if (calls.length > 0 || searchUses > 0)
+      assertNoClientWebCalls(
+        response as unknown as Record<string, unknown>,
+        "messages",
+        new Set(calls.map((call) => call.id)),
+      )
     if (calls.length === 0) return response
     if (searchUses + calls.length > maxSearchUses) {
       throw createNativeWebSearchLimitError(maxSearchUses)
@@ -695,12 +701,6 @@ export async function resolveNativeWebSearch(
       })),
     )
 
-    const mixed = mixedWebSearchResponse(
-      response as unknown as Record<string, unknown>,
-      "messages",
-      results.map((r) => ({ id: r.tool_use_id, text: r.content })),
-    )
-    if (mixed) return mixed as unknown as AnthropicResponse
     payload = {
       ...payload,
       stream: false,

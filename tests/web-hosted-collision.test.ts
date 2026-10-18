@@ -84,7 +84,11 @@ for (const stream of [false, true])
         )
       }) as typeof fetch
       const response = await runWithWebTools(payload, () =>
-        createResponses(payload, { initiator: "user", vision: false }),
+        createResponses(payload, {
+          nativeResponses: true,
+          initiator: "user",
+          vision: false,
+        }),
       )
       if (Symbol.asyncIterator in response)
         for await (const _event of response) {

@@ -27,9 +27,10 @@ import {
 import {
   buildWebSearchQuery,
   executeWebSearch,
+  isChatWebSearchFunctionTool,
 } from "~/services/copilot/mcp-web-search"
 import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
-import { mixedWebSearchResponse } from "~/services/web/tool-output"
+import { assertNoClientWebCalls } from "~/services/web/tool-output"
 
 import {
   type AnthropicResponse,
@@ -94,7 +95,7 @@ export const extractWebSearchCalls = (
   if (isCallerOwnedWebSearch("web_search")) return []
   const toolCalls = response.choices[0]?.message.tool_calls
   if (!toolCalls) return []
-  return toolCalls.filter((tc) => tc.function.name === "web_search")
+  return toolCalls.filter((call) => isChatWebSearchFunctionTool(call))
 }
 
 export const resolveWebSearchCalls = async (
@@ -128,6 +129,12 @@ export const resolveWebSearchCalls = async (
   while (true) {
     iteration += 1
     const webSearchCalls = extractWebSearchCalls(current)
+    if (webSearchCalls.length > 0 || iteration > 1)
+      assertNoClientWebCalls(
+        current as unknown as Record<string, unknown>,
+        "chat",
+        new Set(webSearchCalls.map((call) => call.id)),
+      )
     if (webSearchCalls.length === 0) return current
     budget.claimBatch(webSearchCalls.length)
 
@@ -146,12 +153,6 @@ export const resolveWebSearchCalls = async (
       }),
     )
 
-    const mixed = mixedWebSearchResponse(
-      current as unknown as Record<string, unknown>,
-      "chat",
-      results.map((r) => ({ id: r.callId, text: r.result })),
-    )
-    if (mixed) return mixed as unknown as ChatCompletionResponse
     const assistantMessage: Message = current.choices[0].message
 
     const toolMessages: Array<Message> = results.map((r) => ({
@@ -225,8 +226,16 @@ export const resolveResponsesWebSearchCalls = async (
     iteration += 1
     const webSearchCalls = current.output.filter(
       (item): item is ResponseOutputFunctionCall =>
-        item.type === "function_call" && item.name === "web_search",
+        item.type === "function_call"
+        && !item.namespace
+        && item.name === "web_search",
     )
+    if (webSearchCalls.length > 0 || iteration > 1)
+      assertNoClientWebCalls(
+        current as unknown as Record<string, unknown>,
+        "responses",
+        new Set(webSearchCalls.map((call) => call.call_id)),
+      )
     if (webSearchCalls.length === 0) return current
     budget.claimBatch(webSearchCalls.length)
 
@@ -248,12 +257,6 @@ export const resolveResponsesWebSearchCalls = async (
       }),
     )
 
-    const mixed = mixedWebSearchResponse(
-      current as unknown as Record<string, unknown>,
-      "responses",
-      searchResults.map((r) => ({ id: r.callId, text: r.result })),
-    )
-    if (mixed) return mixed as unknown as ResponsesResult
     const resolvedOutputItems = current.output as Array<ResponseInputItem>
 
     const newInput: Array<ResponseInputItem> = [

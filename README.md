@@ -117,13 +117,14 @@ message.
 
 ### GitHub-hosted web search and page reading
 
-Ordinary tool-capable inference requests get one web search tool by default,
-without changing client configuration: Messages, Chat Completions, Responses
-HTTP/WebSocket, Google AI, and custom chat providers. It can search or open a
-specific HTTP(S) URL. **GitHub retrieves webpages; the gateway does not download,
+Eligible native Responses HTTP/WebSocket requests get a hosted `web_search`
+tool by default, preserving native search events, citations, and client-tool
+history. Other tool-capable routes get a gateway-managed search tool only when
+no caller tools are present. Both can search or open a specific HTTP(S) URL.
+**GitHub retrieves webpages; the gateway does not download,
 parse, or cache them, and has no local-fetch fallback.**
 
-- Plain queries keep the Copilot MCP search path. Include an exact URL in the
+- For gateway-managed search, plain queries keep the Copilot MCP path. Include an exact URL in the
   query to read a page through GitHub's hosted Responses `web_search` tool and
   its `open_page` capability. Native hosted Responses tools remain unchanged.
 - For translated/custom clients, page reading uses an eligible Responses model
@@ -142,8 +143,15 @@ parse, or cache them, and has no local-fetch fallback.**
   and known non-tool models do not receive automatic tools. Required caller
   tool choices (`required` / `any` / Google `ANY`) also keep their original
   tool set, so a gateway web call cannot replace a required client call.
-  Caller-owned functions, custom/discovered tools, and mixed batches remain
-  intact. Gateway tool use is bounded to eight calls per request, with tighter
+  Caller-owned functions and custom/discovered tools remain intact. Native
+  hosted search can be combined with client tools. Other routes reject explicit
+  server-search/client-tool combinations with `unsupported_web_tool_combination`:
+  their stateless adapters cannot replay hidden server results after a client
+  handoff. Use a client-owned search tool or native hosted Responses instead.
+- Managed results stay in private tool history, never synthetic assistant
+  messages. Affected Responses conversations recover on replay by removing
+  only exact legacy gateway `web_result_*` artifacts, not genuine messages.
+  Gateway tool use is bounded to eight calls per request, with tighter
   caller limits honored.
 - Observed model usage is retained across managed rounds, including cancelled
   HTTP streams and WebSocket turns. Failed Responses usage is excluded, while

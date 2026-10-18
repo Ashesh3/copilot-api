@@ -21,6 +21,12 @@ const clientCall = {
   name: "read_file",
   arguments: '{"path":"README"}',
 }
+const hostedCall = {
+  type: "web_search_call",
+  id: "ws_search",
+  status: "completed",
+  action: { type: "open_page", url: "https://example.com" },
+}
 async function* events(
   values: Array<Record<string, unknown> | string>,
 ): AsyncGenerator<WebEvent> {
@@ -46,7 +52,6 @@ test.each(["incomplete", "failed"])(
     const payload = {
       model: "fixture",
       input: "open page",
-      tools: [{ type: "function", name: "read_file", parameters: {} }],
     }
     let executions = 0
     let sends = 0
@@ -122,19 +127,26 @@ test("Messages retains explicit serial-tool policy after managed web continuatio
   expect(sends).toBe(2)
 })
 
-test("Responses emits held managed and client items in output-index order", async () => {
+test("Responses preserves native hosted and client item order with argument deltas", async () => {
   const payload = {
     input: "open",
     stream: true,
-    tools: [{ type: "function", name: "read_file", parameters: {} }],
+    tools: [
+      { type: "web_search" },
+      { type: "function", name: "read_file", parameters: {} },
+    ],
   }
+  let executions = 0
   const output = await runWithWebTools(payload, async () =>
     collect(
       await runManagedWebRequest({
         protocol: "responses",
+        nativeResponses: true,
         payload,
-        send: async () =>
-          events([
+        send: async (body, managed) => {
+          expect(body.tools).toEqual(payload.tools)
+          expect(managed.size).toBe(0)
+          return events([
             {
               type: "response.created",
               response: { id: "r1" },
@@ -143,12 +155,12 @@ test("Responses emits held managed and client items in output-index order", asyn
             {
               type: "response.output_item.added",
               output_index: 0,
-              item: webCall,
+              item: hostedCall,
             },
             {
               type: "response.output_item.done",
               output_index: 0,
-              item: webCall,
+              item: hostedCall,
             },
             {
               type: "response.output_item.added",
@@ -170,14 +182,19 @@ test("Responses emits held managed and client items in output-index order", asyn
               response: {
                 id: "r1",
                 status: "completed",
-                output: [webCall, clientCall],
+                output: [hostedCall, clientCall],
               },
             },
-          ]),
-        execute: async () => ({ text: "PAGE", isError: false }),
+          ])
+        },
+        execute: async () => {
+          executions++
+          return { text: "must remain native", isError: false }
+        },
       }),
     ),
   )
+  expect(executions).toBe(0)
   const values = output.filter((value) => typeof value !== "string")
   expect(
     values
@@ -193,7 +210,7 @@ test("Responses emits held managed and client items in output-index order", asyn
   ).toBeGreaterThan(start)
   expect(
     values.find((value) => value.type === "response.completed"),
-  ).toMatchObject({ response: { output: [{ type: "message" }, clientCall] } })
+  ).toMatchObject({ response: { output: [hostedCall, clientCall] } })
 })
 
 test.each(["response.incomplete", "response.failed"])(
@@ -203,7 +220,6 @@ test.each(["response.incomplete", "response.failed"])(
     const payload = {
       input: "open",
       stream: true,
-      tools: [{ type: "function", name: "read_file", parameters: {} }],
     }
     const output = await runWithWebTools(payload, async () =>
       collect(
@@ -320,13 +336,10 @@ test("Chat custom-only streams stay transparent rather than becoming empty funct
   expect(output).toEqual(frames)
 })
 
-test("Chat preserves encrypted reasoning and custom call shape alongside managed work", async () => {
+test("Chat replays encrypted reasoning while managed search results remain private", async () => {
   const payload = {
     messages: [],
     stream: true,
-    tools: [
-      { type: "custom", custom: { name: "shell", format: { type: "text" } } },
-    ],
   }
   let sends = 0
   const output = await runWithWebTools(payload, async () =>
@@ -375,14 +388,7 @@ test("Chat preserves encrypted reasoning and custom call shape alongside managed
                 {
                   index: 0,
                   delta: {
-                    tool_calls: [
-                      {
-                        index: 0,
-                        id: "shell-call",
-                        type: "custom",
-                        custom: { name: "shell", input: "echo " },
-                      },
-                    ],
+                    content: "Final ",
                   },
                   finish_reason: null,
                 },
@@ -394,9 +400,9 @@ test("Chat preserves encrypted reasoning and custom call shape alongside managed
                 {
                   index: 0,
                   delta: {
-                    tool_calls: [{ index: 0, custom: { input: "hello" } }],
+                    content: "answer",
                   },
-                  finish_reason: "tool_calls",
+                  finish_reason: "stop",
                 },
               ],
             },
@@ -414,12 +420,20 @@ test("Chat preserves encrypted reasoning and custom call shape alongside managed
     .flatMap((choice) =>
       records((choice.delta as Record<string, unknown>).tool_calls),
     )
-  expect(calls).toEqual([
-    {
-      index: 0,
-      id: "shell-call",
-      type: "custom",
-      custom: { name: "shell", input: "echo hello" },
-    },
-  ])
+  expect(calls).toEqual([])
+  const deltas = output
+    .filter((value) => typeof value !== "string")
+    .flatMap((value) => records(value.choices))
+    .map((choice) => choice.delta as Record<string, unknown>)
+  expect(
+    deltas
+      .map((delta) => (typeof delta.content === "string" ? delta.content : ""))
+      .join(""),
+  ).toBe("Final answer")
+  expect(deltas).toContainEqual({
+    encrypted_content: "signed-encrypted-state",
+    reasoning_opaque: "signed-opaque-state",
+  })
+  expect(JSON.stringify(output)).not.toContain("REMOTE")
+  expect(JSON.stringify(output)).not.toContain("[Web tool")
 })

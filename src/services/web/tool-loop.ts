@@ -9,7 +9,10 @@ import type {
 import type { ManagedToolResult, WebToolCall } from "./tool-executor"
 import type { CompletedWebCall } from "./tool-output"
 
-import { modelAllowsWebTools } from "./model-capabilities"
+import {
+  modelAllowsHostedWebSearch,
+  modelAllowsWebTools,
+} from "./model-capabilities"
 import { prepareManagedWebTools, webToolError } from "./tool-context"
 import { executeManagedWebCall } from "./tool-executor"
 import {
@@ -17,11 +20,11 @@ import {
   MAX_MANAGED_WEB_ROUNDS,
 } from "./tool-limits"
 import {
+  assertNoClientWebCalls,
   continuationPayload,
   isUnsuccessfulWebResponse,
   responseCalls,
   sumUsage,
-  withoutManagedCalls,
   withoutUnexecutedManagedCalls,
 } from "./tool-output"
 import { streamManagedWebRequest } from "./tool-stream"
@@ -39,6 +42,7 @@ export interface ManagedWebRequest {
   payload: Record<string, unknown>
   signal?: AbortSignal
   disabled?: boolean
+  nativeResponses?: boolean
   accountId?: number
   send: (
     payload: Record<string, unknown>,
@@ -81,12 +85,16 @@ export async function completeWebCalls(
   options: ManagedWebRequest,
   prepared: PreparedManagedWebTools,
   response: Record<string, unknown>,
-): Promise<{ completed: Array<CompletedWebCall>; mixed: boolean }> {
-  if (isUnsuccessfulWebResponse(response, options.protocol))
-    return { completed: [], mixed: false }
+): Promise<Array<CompletedWebCall>> {
+  if (isUnsuccessfulWebResponse(response, options.protocol)) return []
   const calls = responseCalls(response, options.protocol)
   const owned = calls.filter(
     (call) => !call.clientOwned && prepared.managed.has(call.name),
+  )
+  assertNoClientWebCalls(
+    response,
+    options.protocol,
+    new Set(owned.map((call) => call.id)),
   )
   const completed: Array<CompletedWebCall> = []
   for (const call of owned) {
@@ -99,9 +107,10 @@ export async function completeWebCalls(
       tool,
       { context: prepared.context, signal: options.signal },
     )
+    options.signal?.throwIfAborted()
     completed.push({ call, result })
   }
-  return { completed, mixed: calls.length > owned.length }
+  return completed
 }
 
 function transparentBufferedRound(
@@ -128,14 +137,15 @@ function chargeableUsage(
 export async function runManagedWebRequest(
   options: ManagedWebRequest,
 ): Promise<WebResponse> {
-  const prepared = prepareManagedWebTools(
-    options.payload,
-    options.protocol,
-    options.disabled
+  const prepared = prepareManagedWebTools(options.payload, options.protocol, {
+    nativeResponses: options.nativeResponses,
+    disabled:
+      options.disabled
       || !modelAllowsWebTools(options.payload.model, options.accountId),
-  )
+    hostedDefault: shouldUseHostedDefault(options),
+  })
   if (prepared.managed.size === 0)
-    return await options.send(options.payload, prepared.managed, () => {})
+    return await options.send(prepared.payload, prepared.managed, () => {})
   const dispatch = createManagedDispatch(options, prepared.managed)
   const observedUsage = new ManagedWebUsage(
     options.protocol,
@@ -169,6 +179,8 @@ export async function runManagedWebRequest(
     )
     options.signal?.throwIfAborted()
     usage = sumUsage(usage, response.usage)
+    if (round > 0)
+      assertPrivateContinuation(response, prepared, options.protocol)
     if (isUnsuccessfulWebResponse(response, options.protocol))
       return {
         ...withoutUnexecutedManagedCalls(response, prepared.managed, {
@@ -177,18 +189,9 @@ export async function runManagedWebRequest(
         }),
         ...(usage ? { usage } : {}),
       }
-    const { completed, mixed } = await completeWebCalls(
-      options,
-      prepared,
-      response,
-    )
+    const completed = await completeWebCalls(options, prepared, response)
     if (completed.length === 0)
       return { ...response, ...(usage ? { usage } : {}) }
-    if (mixed)
-      return {
-        ...withoutManagedCalls(response, completed, options.protocol),
-        ...(usage ? { usage } : {}),
-      }
     checkWebContinuationLimit(round)
     const payload = continuationPayload(dispatch.processedPayload(), response, {
       completed,
@@ -206,5 +209,31 @@ export async function runManagedWebRequest(
   throw webToolError(
     "web_tool_limit_exceeded",
     "Web tool continuation limit exceeded.",
+  )
+}
+
+function shouldUseHostedDefault(options: ManagedWebRequest): boolean {
+  return (
+    options.nativeResponses === true
+    && options.protocol === "responses"
+    && modelAllowsHostedWebSearch(options.payload.model, options.accountId)
+  )
+}
+
+function assertPrivateContinuation(
+  response: Record<string, unknown>,
+  prepared: PreparedManagedWebTools,
+  protocol: WebProtocol,
+): void {
+  assertNoClientWebCalls(
+    withoutUnexecutedManagedCalls(response, prepared.managed, {
+      protocol,
+      callerNames:
+        isUnsuccessfulWebResponse(response, protocol) ?
+          prepared.context?.callerNames
+        : undefined,
+    }),
+    protocol,
+    new Set(),
   )
 }

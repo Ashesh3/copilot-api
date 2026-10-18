@@ -170,6 +170,30 @@ test("falls back after upstream 422 and keeps original-model continuations usabl
   expect(ws.data.activeTurns.size).toBe(0)
 })
 
+test("WebSocket fallback recomputes hosted defaults from the selected model without changing client tools", async () => {
+  const target = state.models?.data[1]
+  if (!target) throw new Error("Missing target fixture")
+  target.capabilities.supports = { tool_calls: true, web_search: false }
+  const callerTools = [
+    {
+      type: "function",
+      name: "get_weather",
+      parameters: { type: "object", properties: {} },
+    },
+  ]
+  const ws = await createSocket()
+  responses.push(
+    new Response("unprocessable", { status: 422 }),
+    completedResponse("resp_hosted_fallback"),
+  )
+  await sendTurn(ws, { input: "first", tools: callerTools })
+  expect(requests).toHaveLength(2)
+  expect(requests[0].tools).toEqual([...callerTools, { type: "web_search" }])
+  expect(requests[1].tools).toEqual(callerTools)
+  expect(requests[1].model).toBe(targetModel)
+  expect(ws.sent.some((frame) => frame.type === "error")).toBe(false)
+})
+
 test("isolates sibling thread fallback state on one parent session", async () => {
   const ws = await createSocket({ "session-id": "parent-session" })
   responses.push(

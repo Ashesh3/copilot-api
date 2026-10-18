@@ -178,15 +178,6 @@ test.each<Protocol>(["messages", "chat"])(
   async (protocol) => {
     const payload = {
       messages: [],
-      tools:
-        protocol === "messages" ?
-          [{ name: "read_file", input_schema: {} }]
-        : [
-            {
-              type: "function",
-              function: { name: "read_file", parameters: {} },
-            },
-          ],
     }
     let sends = 0
     let executes = 0
@@ -337,7 +328,49 @@ test.each<Protocol>(["messages", "chat"])(
           protocol,
           payload,
           send: async () => {
-            if (++sends > 1) return streamed(protocol, sends)
+            if (++sends > 1)
+              return frames(
+                protocol === "messages" ?
+                  [
+                    {
+                      type: "message_start",
+                      message: {
+                        id: "second",
+                        usage: { input_tokens: 10, output_tokens: 0 },
+                      },
+                    },
+                    {
+                      type: "content_block_start",
+                      index: 0,
+                      content_block: text,
+                    },
+                    { type: "content_block_stop", index: 0 },
+                    {
+                      type: "message_delta",
+                      delta: { stop_reason: "max_tokens" },
+                      usage: { output_tokens: 4 },
+                    },
+                    { type: "message_stop" },
+                  ]
+                : [
+                    {
+                      id: "second",
+                      choices: [
+                        {
+                          index: 0,
+                          delta: { content: "partial answer" },
+                          finish_reason: "length",
+                        },
+                      ],
+                    },
+                    {
+                      id: "second",
+                      choices: [],
+                      usage: { prompt_tokens: 10, completion_tokens: 4 },
+                    },
+                    "[DONE]",
+                  ],
+              )
             return protocol === "messages" ?
                 frames([
                   {

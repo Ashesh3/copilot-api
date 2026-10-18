@@ -157,7 +157,8 @@ test("Messages streams page-reading continuations with one terminal and preserve
   const blocks = output.filter(
     (v) => typeof v !== "string" && v.type === "content_block_start",
   ) as Array<Record<string, unknown>>
-  expect(blocks.map((v) => v.index)).toEqual([0, 1, 2])
+  expect(blocks.map((v) => v.index)).toEqual([0, 1])
+  expect(JSON.stringify(output)).not.toContain("PAGE")
   expect(
     blocks.every(
       (v) => (v.content_block as Record<string, unknown>).type !== "tool_use",
@@ -165,20 +166,23 @@ test("Messages streams page-reading continuations with one terminal and preserve
   ).toBe(true)
 })
 
-test("Chat waits for fragmented tool names and returns a client call beside page evidence", async () => {
+test("Chat classifies fragmented managed names before rejecting an unexpected mixed batch", async () => {
   const payload = {
     model: "fixture",
     messages: [],
     stream: true,
-    tools: [{ type: "function", function: { name: "read_file" } }],
   }
+  let executions = 0
+  let sends = 0
+  let receivedFrames = 0
   const output = await runWithWebTools(payload, async () =>
     collect(
       await runManagedWebRequest({
         protocol: "chat",
         payload,
-        send: async () =>
-          events([
+        send: async () => {
+          sends++
+          const source = events([
             {
               id: "c1",
               model: "fixture",
@@ -250,31 +254,28 @@ test("Chat waits for fragmented tool names and returns a client call beside page
               },
             },
             "[DONE]",
-          ]),
-        execute: async () => ({ text: "PAGE_EVIDENCE", isError: false }),
+          ])
+          return (async function* () {
+            for await (const event of source) {
+              receivedFrames++
+              yield event
+            }
+          })()
+        },
+        execute: async () => {
+          executions++
+          return { text: "PRIVATE_PAGE_EVIDENCE", isError: false }
+        },
       }),
     ),
-  )
-  const values = output.filter((v) => typeof v !== "string")
-  expect(JSON.stringify(values)).toContain("PAGE_EVIDENCE")
-  const toolChunks = values.flatMap((v) =>
-    (v.choices as Array<{ delta: { tool_calls?: Array<unknown> } }>).flatMap(
-      (c) => c.delta.tool_calls ?? [],
-    ),
-  )
-  expect(toolChunks).toEqual([
-    {
-      id: "file",
-      type: "function",
-      function: { name: "read_file", arguments: '{"path":"README"}' },
-      index: 0,
-    },
-  ])
-  expect(output.filter((v) => v === "[DONE]")).toHaveLength(1)
-  expect(values.find((v) => v.usage)).toMatchObject({
-    choices: [],
-    usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
+  ).catch((error: unknown) => error)
+  expect(output).toMatchObject({
+    response: { status: 400 },
+    clientBody: { error: { code: "unsupported_web_tool_combination" } },
   })
+  expect(sends).toBe(1)
+  expect(executions).toBe(0)
+  expect(receivedFrames).toBe(5)
 })
 
 const chunk = (tool: Record<string, unknown>) => ({
@@ -282,32 +283,152 @@ const chunk = (tool: Record<string, unknown>) => ({
   choices: [{ index: 0, delta: { tool_calls: [tool] }, finish_reason: null }],
 })
 
-test("Chat does not replay a client call already streamed before the managed call", async () => {
-  const payload = {
-    stream: true,
-    tools: [{ type: "function", function: { name: "read_file" } }],
-  }
+test("Chat assembles fragmented owned names and arguments without emitting private results", async () => {
+  const payload = { messages: [], stream: true }
+  let sends = 0
+  let executions = 0
   const output = await runWithWebTools(payload, async () =>
     collect(
       await runManagedWebRequest({
         protocol: "chat",
         payload,
-        send: async () =>
-          events([
+        send: async (next) => {
+          if (++sends === 1)
+            return events([
+              chunk({
+                index: 0,
+                id: "web",
+                type: "function",
+                function: { name: "_copilot_web_", arguments: '{"query":' },
+              }),
+              chunk({
+                index: 0,
+                function: { name: "search", arguments: '"news"}' },
+              }),
+              {
+                id: "mixed",
+                choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+              },
+              {
+                id: "mixed",
+                choices: [],
+                usage: {
+                  prompt_tokens: 2,
+                  completion_tokens: 3,
+                  total_tokens: 5,
+                },
+              },
+              "[DONE]",
+            ])
+          expect(next.messages).toMatchObject([
+            {
+              role: "assistant",
+              tool_calls: [
+                {
+                  id: "web",
+                  type: "function",
+                  function: {
+                    name: "_copilot_web_search",
+                    arguments: '{"query":"news"}',
+                  },
+                },
+              ],
+            },
+            {
+              role: "tool",
+              tool_call_id: "web",
+              content: "PRIVATE_PAGE_EVIDENCE",
+            },
+          ])
+          return events([
+            {
+              id: "answer",
+              choices: [
+                { index: 0, delta: { content: "Final " }, finish_reason: null },
+              ],
+            },
+            {
+              id: "answer",
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: "answer" },
+                  finish_reason: "stop",
+                },
+              ],
+            },
+            {
+              id: "answer",
+              choices: [],
+              usage: {
+                prompt_tokens: 6,
+                completion_tokens: 4,
+                total_tokens: 10,
+              },
+            },
+            "[DONE]",
+          ])
+        },
+        execute: async (call) => {
+          executions++
+          expect(call).toEqual({
+            id: "web",
+            name: "_copilot_web_search",
+            input: '{"query":"news"}',
+          })
+          return { text: "PRIVATE_PAGE_EVIDENCE", isError: false }
+        },
+      }),
+    ),
+  )
+  expect(sends).toBe(2)
+  expect(executions).toBe(1)
+  const values = output.filter((value) => typeof value !== "string")
+  const choices = values.flatMap(
+    (value) =>
+      value.choices as Array<{
+        delta: { content?: string }
+        finish_reason?: string | null
+      }>,
+  )
+  expect(choices.map((choice) => choice.delta.content ?? "").join("")).toBe(
+    "Final answer",
+  )
+  expect(
+    choices
+      .filter((choice) => choice.finish_reason)
+      .map((choice) => choice.finish_reason),
+  ).toEqual(["stop"])
+  expect(values.find((value) => value.usage)).toMatchObject({
+    usage: { prompt_tokens: 8, completion_tokens: 7, total_tokens: 15 },
+  })
+  expect(output.filter((value) => value === "[DONE]")).toHaveLength(1)
+  expect(JSON.stringify(output)).not.toContain("PRIVATE_PAGE_EVIDENCE")
+  expect(JSON.stringify(output)).not.toContain("tool_calls")
+})
+
+test("Chat returns fragmented caller-owned calls once without injecting a managed tool", async () => {
+  const payload = {
+    stream: true,
+    tools: [{ type: "function", function: { name: "read_file" } }],
+  }
+  let executions = 0
+  let sends = 0
+  const output = await runWithWebTools(payload, async () =>
+    collect(
+      await runManagedWebRequest({
+        protocol: "chat",
+        payload,
+        send: async (body, managed) => {
+          sends++
+          expect(body.tools).toEqual(payload.tools)
+          expect(managed.size).toBe(0)
+          return events([
             chunk({
               index: 0,
               id: "client",
               type: "function",
               function: { name: "read_file", arguments: '{"path":' },
-            }),
-            chunk({
-              index: 1,
-              id: "fetch",
-              type: "function",
-              function: {
-                name: "_copilot_web_search",
-                arguments: '{"query":"Open https://example.com"}',
-              },
             }),
             chunk({ index: 0, function: { arguments: '"README"}' } }),
             {
@@ -315,11 +436,17 @@ test("Chat does not replay a client call already streamed before the managed cal
               choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
             },
             "[DONE]",
-          ]),
-        execute: async () => ({ text: "PAGE", isError: false }),
+          ])
+        },
+        execute: async () => {
+          executions++
+          return { text: "must not run", isError: false }
+        },
       }),
     ),
   )
+  expect(sends).toBe(1)
+  expect(executions).toBe(0)
   const values = output.filter((v) => typeof v !== "string")
   const calls = values.flatMap((v) =>
     (
@@ -340,27 +467,28 @@ test("Chat does not replay a client call already streamed before the managed cal
   expect(calls.every((c) => c.index === 0)).toBe(true)
 })
 
-test("Messages keeps mixed client blocks in index order after holding a page read", async () => {
+test("Messages preserves text and caller tool block indices without managed injection", async () => {
   const payload = {
     stream: true,
     tools: [{ name: "read_file", input_schema: {} }],
   }
+  let executions = 0
   const output = await runWithWebTools(payload, async () =>
     collect(
       await runManagedWebRequest({
         protocol: "messages",
         payload,
-        send: async () =>
-          events([
+        send: async (body, managed) => {
+          expect(body.tools).toEqual(payload.tools)
+          expect(managed.size).toBe(0)
+          return events([
             { type: "message_start", message: { id: "m1", content: [] } },
             {
               type: "content_block_start",
               index: 0,
               content_block: {
-                type: "tool_use",
-                id: "web",
-                name: "_copilot_web_search",
-                input: { query: "Open https://example.com" },
+                type: "text",
+                text: "Checking the file",
               },
             },
             { type: "content_block_stop", index: 0 },
@@ -389,11 +517,16 @@ test("Messages keeps mixed client blocks in index order after holding a page rea
               usage: { output_tokens: 5 },
             },
             { type: "message_stop" },
-          ]),
-        execute: async () => ({ text: "PAGE", isError: false }),
+          ])
+        },
+        execute: async () => {
+          executions++
+          return { text: "must not run", isError: false }
+        },
       }),
     ),
   )
+  expect(executions).toBe(0)
   const values = output.filter((v) => typeof v !== "string")
   expect(
     values.filter((v) => v.type === "content_block_start").map((v) => v.index),
@@ -401,6 +534,10 @@ test("Messages keeps mixed client blocks in index order after holding a page rea
   expect(
     values.find((v) => v.type === "content_block_delta" && v.index === 1),
   ).toMatchObject({ delta: { partial_json: '{"path":"README"}' } })
+  expect(values.find((v) => v.type === "message_delta")).toMatchObject({
+    delta: { stop_reason: "tool_use" },
+    usage: { output_tokens: 5 },
+  })
 })
 
 test("Responses retains terminal output and reindexes continued text after a page read", async () => {
@@ -488,7 +625,7 @@ test("Responses retains terminal output and reindexes continued text after a pag
   expect(final).toMatchObject({
     response: {
       id: "r1",
-      output: [{ type: "message" }, { type: "message" }],
+      output: [{ type: "message", id: "text1" }],
       usage: { total_tokens: 15 },
     },
   })
@@ -496,14 +633,15 @@ test("Responses retains terminal output and reindexes continued text after a pag
     values.find(
       (v) => v.type === "response.output_text.delta" && v.delta === "answer",
     ),
-  ).toHaveProperty("output_index", 1)
+  ).toHaveProperty("output_index", 0)
   expect(
     values.find(
       (v) =>
         v.type === "response.output_text.delta"
         && String(v.delta).includes("PAGE"),
     ),
-  ).toHaveProperty("output_index", 0)
+  ).toBeUndefined()
+  expect(JSON.stringify(values)).not.toContain("web_result_")
 })
 
 test.each(["response.incomplete", "response.failed"])(
@@ -570,14 +708,12 @@ test.each(["response.incomplete", "response.failed"])(
     expect(final).toMatchObject({
       response: {
         id: "r1",
-        output: [{ type: "message" }],
+        output: [],
         usage: { total_tokens: 23 },
         incomplete_details: { reason: "max_output_tokens" },
       },
     })
-    expect((final?.response as Record<string, unknown>).output_text).toContain(
-      "PAGE",
-    )
+    expect((final?.response as Record<string, unknown>).output_text).toBe("")
     const sequences = values.map((v) => Number(v.sequence_number))
     expect(
       sequences.every(

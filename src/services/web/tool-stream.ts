@@ -13,9 +13,11 @@ import {
 } from "./tool-limits"
 import { completeWebCalls, isWebStream } from "./tool-loop"
 import {
+  assertNoClientWebCalls,
   continuationPayload,
   isManagedChatCall,
   records,
+  responseCalls,
   responseOutputText,
   sumUsage,
   withoutManagedCalls,
@@ -58,30 +60,24 @@ export async function* streamManagedWebRequest(
       position,
       observedUsage,
     })
-    if (state.failed || (!state.intercepted && round === 0)) return
+    if (state.failed || (state.transparent && round === 0)) return
     const response = state.finish()
     usage = sumUsage(usage, response.usage)
-    const { completed, mixed } = await completeWebCalls(
-      options,
-      prepared,
-      response,
-    )
+    const completed =
+      state.canReturnWithoutExecution(round) ?
+        []
+      : await completeWebCalls(options, prepared, response)
     const visible = state.visibleResponse(response, completed)
     const visibleOutput =
       options.protocol === "responses" ? records(visible.output) : []
     allOutput.push(...visibleOutput)
-    // Client tool calls and local execution evidence were withheld as complete
-    // blocks, so they can now be emitted without leaking gateway-only functions.
-    for (const event of state.pendingEvents(
-      visible,
-      completed.length > 0,
-      state.truncated,
-    )) {
+    // Replay only genuine upstream items; helper output stays in private history.
+    for (const event of state.pendingEvents()) {
       const parsed = JSON.parse(event.data ?? "{}") as Record<string, unknown>
       yield remap(event, parsed, position)
     }
     position.offset += state.visibleSize(visible)
-    if (completed.length === 0 || mixed) {
+    if (completed.length === 0) {
       position.offset = 0
       for (const event of state.terminalEvents(visible, usage, allOutput)) {
         const parsed =
@@ -162,18 +158,19 @@ async function* consumeRound(
     }
     const parsed = state.accept(event)
     input.observedUsage.observe(state.observedUsage, state.intercepted)
+    if (round > 0 && parsed) state.assertPrivateContinuation(parsed)
     if (!parsed) {
       if (state.done) break
       if (event.data && event.data !== "[DONE]") yield event
       continue
     }
     if (state.failed) {
-      if (!state.intercepted && round === 0) yield event
+      if (state.transparent && round === 0) yield event
       else yield* failedRoundEvents(state, { event, parsed, position })
       return
     }
     if (repeatedStart(parsed, round, position)) continue
-    if (!state.intercepted && round === 0) {
+    if (state.transparent && round === 0) {
       state.markForwarded(parsed)
       if (typeof parsed.sequence_number === "number")
         position.sequence = parsed.sequence_number + 1
@@ -207,7 +204,7 @@ function* failedRoundEvents(
       state.managedTools,
       { protocol: position.protocol },
     )
-    for (const pending of state.pendingEvents(visible, false, true)) {
+    for (const pending of state.pendingEvents()) {
       yield remap(
         pending,
         JSON.parse(pending.data ?? "{}") as Record<string, unknown>,
@@ -254,6 +251,7 @@ class RoundState {
   private readonly blocks = new Map<number, Record<string, unknown>>()
   private readonly toolJson = new Map<number, string>()
   private readonly toolIndices = new Set<number>()
+  private firstToolIndex = Infinity
   private readonly outputIndices = new Map<string, number>()
   private readonly tools = new Map<number, Record<string, unknown>>()
   private readonly forwardedTools = new Set<number>()
@@ -273,6 +271,31 @@ class RoundState {
   failed = false
   get done(): boolean {
     return this.terminal
+  }
+  get hasPendingCalls(): boolean {
+    return this.tools.size > 0 || Number.isFinite(this.firstToolIndex)
+  }
+  get transparent(): boolean {
+    return !this.intercepted && !this.hasPendingCalls
+  }
+  canReturnWithoutExecution(round: number): boolean {
+    return round === 0 && !this.intercepted
+  }
+  assertPrivateContinuation(value: Record<string, unknown>): void {
+    const response =
+      isRecord(value.response) ? value.response : this.finishIfTerminal()
+    if (!response) return
+    assertNoClientWebCalls(
+      withoutUnexecutedManagedCalls(response, this.managed, {
+        protocol: this.protocol,
+        callerNames: this.truncated ? this.callerNames : undefined,
+      }),
+      this.protocol,
+      new Set(),
+    )
+  }
+  private finishIfTerminal(): Record<string, unknown> | undefined {
+    return this.done ? this.finish() : undefined
   }
   get truncated(): boolean {
     return this.protocol === "messages" ?
@@ -364,6 +387,8 @@ class RoundState {
       this.response = value.message
     if (value.type === "content_block_start" && isRecord(value.content_block)) {
       this.blocks.set(index, structuredClone(value.content_block))
+      if (value.content_block.type === "tool_use")
+        this.firstToolIndex = Math.min(this.firstToolIndex, index)
       if (
         value.content_block.type === "tool_use"
         && this.managed.has(String(value.content_block.name))
@@ -399,6 +424,15 @@ class RoundState {
     if (value.type === "message_stop") this.terminal = true
   }
   private acceptResponses(value: Record<string, unknown>): void {
+    if (
+      value.type === "response.output_item.added"
+      && isRecord(value.item)
+      && responseCalls({ output: [value.item] }, "responses").length > 0
+    )
+      this.firstToolIndex = Math.min(
+        this.firstToolIndex,
+        Number(value.output_index),
+      )
     if (
       value.type === "response.output_item.added"
       && isRecord(value.item)
@@ -498,7 +532,7 @@ class RoundState {
     if (this.protocol === "messages") {
       if (
         typeof value.index === "number"
-        && value.index >= Math.min(...this.toolIndices)
+        && value.index >= this.firstToolIndex
       ) {
         this.heldMessageEvents.push(value)
         return true
@@ -507,7 +541,7 @@ class RoundState {
     }
     if (this.protocol === "responses") {
       const index = this.responseEventIndex(value)
-      if (index !== undefined && index >= Math.min(...this.toolIndices)) {
+      if (index !== undefined && index >= this.firstToolIndex) {
         this.heldResponseEvents.push(value)
         return true
       }
@@ -592,18 +626,12 @@ class RoundState {
     }
   }
 
-  *pendingEvents(
-    visible: Record<string, unknown>,
-    completed: boolean,
-    failed = false,
-  ): Generator<WebEvent> {
+  *pendingEvents(): Generator<WebEvent> {
     if (this.protocol === "messages") {
-      yield* this.pendingMessages(visible, failed)
+      yield* this.pendingMessages()
     } else if (this.protocol === "responses") {
-      yield* this.pendingResponses(visible, failed)
+      yield* this.pendingResponses()
     } else {
-      const choice = records(visible.choices).at(0)
-      const message = isRecord(choice?.message) ? choice.message : {}
       const tools = [...this.tools.entries()]
         .filter(
           ([index, call]) =>
@@ -616,11 +644,7 @@ class RoundState {
         )
         .map(([, call]) => call)
       const firstIndex = Math.max(-1, ...this.forwardedTools) + 1
-      const evidence =
-        completed ?
-          textValue(message.content).slice(this.content.length).trimStart()
-        : ""
-      if (tools.length > 0 || evidence)
+      if (tools.length > 0)
         yield {
           data: JSON.stringify({
             ...this.response,
@@ -629,7 +653,6 @@ class RoundState {
               {
                 index: 0,
                 delta: {
-                  ...(evidence ? { content: "\n\n" + evidence } : {}),
                   ...(tools.length > 0 ?
                     {
                       tool_calls: tools.map((tool, index) => ({
@@ -646,27 +669,14 @@ class RoundState {
         }
     }
   }
-  private *pendingMessages(
-    visible: Record<string, unknown>,
-    failed: boolean,
-  ): Generator<WebEvent> {
-    const content = records(visible.content)
+  private *pendingMessages(): Generator<WebEvent> {
     for (const event of this.heldMessageEvents) {
       const index = Number(event.index)
       if (!this.toolIndices.has(index)) {
-        const removed =
-          failed ?
-            [...this.toolIndices].filter((owned) => owned < index).length
-          : 0
+        const removed = [...this.toolIndices].filter(
+          (owned) => owned < index,
+        ).length
         yield eventFor(String(event.type), { ...event, index: index - removed })
-      } else if (failed) {
-        continue
-      } else if (event.type === "content_block_start") {
-        const block = content.at(index)
-        if (block)
-          yield eventFor("content_block_start", { index, content_block: block })
-      } else if (event.type === "content_block_stop") {
-        yield eventFor("content_block_stop", { index })
       }
     }
   }
@@ -678,25 +688,14 @@ class RoundState {
         this.outputIndices.get(event.item_id)
       : undefined
   }
-  private *pendingResponses(
-    visible: Record<string, unknown>,
-    failed: boolean,
-  ): Generator<WebEvent> {
-    const output = records(visible.output)
+  private *pendingResponses(): Generator<WebEvent> {
     for (const event of this.heldResponseEvents) {
       const index = this.responseEventIndex(event)
       if (index === undefined) continue
-      if (this.toolIndices.has(index)) {
-        if (!failed && event.type === "response.output_item.added") {
-          const item = output.at(index)
-          if (item) yield* replacementMessageEvents(item, index)
-        }
-        continue
-      }
-      const removed =
-        failed ?
-          [...this.toolIndices].filter((owned) => owned < index).length
-        : 0
+      if (this.toolIndices.has(index)) continue
+      const removed = [...this.toolIndices].filter(
+        (owned) => owned < index,
+      ).length
       yield eventFor(String(event.type), {
         ...event,
         ...(typeof event.output_index === "number" ?
@@ -771,32 +770,4 @@ function appendToolFields(
   for (const field of fields)
     if (typeof delta[field] === "string")
       current[field] = textValue(current[field]) + delta[field]
-}
-
-function* replacementMessageEvents(
-  item: Record<string, unknown>,
-  index: number,
-): Generator<WebEvent> {
-  yield eventFor("response.output_item.added", {
-    output_index: index,
-    item: { ...item, status: "in_progress", content: [] },
-  })
-  for (const [contentIndex, part] of records(item.content).entries()) {
-    const address = {
-      output_index: index,
-      item_id: item.id,
-      content_index: contentIndex,
-    }
-    yield eventFor("response.content_part.added", {
-      ...address,
-      part: { ...part, text: "" },
-    })
-    yield eventFor("response.output_text.delta", {
-      ...address,
-      delta: part.text,
-    })
-    yield eventFor("response.output_text.done", { ...address, text: part.text })
-    yield eventFor("response.content_part.done", { ...address, part })
-  }
-  yield eventFor("response.output_item.done", { output_index: index, item })
 }

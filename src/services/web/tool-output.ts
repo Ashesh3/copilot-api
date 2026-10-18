@@ -1,7 +1,7 @@
 import type { WebProtocol } from "./tool-context"
 import type { ManagedToolResult, WebToolCall } from "./tool-executor"
 
-import { isRecord } from "./tool-context"
+import { isRecord, webToolError } from "./tool-context"
 
 export { sumUsage } from "./tool-usage-output"
 
@@ -13,24 +13,21 @@ const records = (value: unknown): Array<Record<string, unknown>> =>
   Array.isArray(value) ? value.filter((item: unknown) => isRecord(item)) : []
 export { records }
 
-/** Legacy explicit search adapters must also return unfulfilled client calls. */
-export function mixedWebSearchResponse(
+/** Hidden results cannot be replayed after a stateless client-tool handoff. */
+export function assertNoClientWebCalls(
   response: Record<string, unknown>,
   protocol: WebProtocol,
-  results: ReadonlyArray<{ id: string; text: string }>,
-): Record<string, unknown> | undefined {
-  const completed = results.map(({ id, text }) => ({
-    call: { id, name: "web_search", input: {} },
-    result: { text, isError: /^Web search (?:failed|error):/.test(text) },
-  }))
-  const ids = new Set(results.map((result) => result.id))
+  ids: ReadonlySet<string>,
+): void {
   if (
-    !responseCalls(response, protocol).some(
+    responseCalls(response, protocol).some(
       (call) => call.clientOwned || !ids.has(call.id),
     )
   )
-    return undefined
-  return withoutManagedCalls(response, completed, protocol)
+    throw webToolError(
+      "unsupported_web_tool_combination",
+      "Gateway-managed web search cannot hand off hidden results to client tools. Use native Responses hosted search or a client-owned search tool.",
+    )
 }
 
 export function responseCalls(
@@ -53,6 +50,8 @@ export function responseCalls(
           || b.type === "custom_tool_call"
           || b.type === "computer_call"
           || b.type === "apply_patch_call"
+          || b.type === "local_shell_call"
+          || (b.type === "shell_call" && b.execution !== "server")
           || (b.type === "tool_search_call" && b.execution === "client"),
       )
       .map((b) => ({
@@ -233,57 +232,26 @@ export function continuationPayload(
   }
 }
 
-export function completedWebText(
-  completed: ReadonlyArray<CompletedWebCall>,
-): string {
-  return completed
-    .map(
-      ({ call, result }) =>
-        `[Web tool ${call.name}${result.isError ? " failed" : " result"}]\n${result.text}\n[End web tool result]`,
-    )
-    .join("\n\n")
-}
-
 export function withoutManagedCalls(
   response: Record<string, unknown>,
   completed: ReadonlyArray<CompletedWebCall>,
   protocol: WebProtocol,
 ): Record<string, unknown> {
   const ids = new Set(completed.map((c) => c.call.id))
-  const evidence = completedWebText(completed)
   if (protocol === "messages")
     return {
       ...response,
-      content: records(response.content).flatMap((block) => {
-        if (block.type !== "tool_use" || !ids.has(String(block.id)))
-          return [block]
-        const found = completed.find((c) => c.call.id === block.id)
-        if (!found) throw new TypeError("Missing completed tool result")
-        return [{ type: "text", text: completedWebText([found]) }]
-      }),
+      content: records(response.content).filter(
+        (block) => block.type !== "tool_use" || !ids.has(String(block.id)),
+      ),
     }
   if (protocol === "responses") {
-    const output = records(response.output).flatMap((item) => {
-      if (item.type !== "function_call" || !ids.has(String(item.call_id)))
-        return [item]
-      const found = completed.find((c) => c.call.id === item.call_id)
-      if (!found) throw new TypeError("Missing completed tool result")
-      return [
-        {
-          type: "message",
-          id: `web_result_${String(item.call_id)}`,
-          role: "assistant",
-          status: "completed",
-          content: [
-            {
-              type: "output_text",
-              text: completedWebText([found]),
-              annotations: [],
-            },
-          ],
-        },
-      ]
-    })
+    const output = records(response.output).filter(
+      (item) =>
+        item.type !== "function_call"
+        || Boolean(item.namespace)
+        || !ids.has(String(item.call_id)),
+    )
     return { ...response, output, output_text: responseOutputText(output) }
   }
   return {
@@ -295,7 +263,6 @@ export function withoutManagedCalls(
         ...choice,
         message: {
           ...message,
-          content: [message.content, evidence].filter(Boolean).join("\n\n"),
           tool_calls: records(message.tool_calls).filter(
             (call) => !ids.has(String(call.id)),
           ),

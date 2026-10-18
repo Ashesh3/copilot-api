@@ -32,10 +32,10 @@ test("does not alter request tools or take ownership of client names", () =>
     expect(source.tools).toEqual([caller])
     expect(result.payload.tools?.[0]).toEqual(caller)
     expect(result.managed.has("_copilot_web_search")).toBe(false)
-    expect(result.managed.size).toBe(1)
+    expect(result.managed.size).toBe(0)
   }))
 
-test("reserves Chat custom tool names when choosing a default web tool name", () => {
+test("preserves Chat custom tools without injecting stateless managed search", () => {
   const source = {
     tools: [
       { type: "custom", custom: { name: "web_search" } },
@@ -46,7 +46,7 @@ test("reserves Chat custom tool names when choosing a default web tool name", ()
   runWithWebTools(source, () => {
     const result = prepareManagedWebTools(source, "chat")
     expect(result.payload.tools?.slice(0, 3)).toEqual(source.tools)
-    expect([...result.managed.keys()]).toEqual(["_copilot_web_search_2"])
+    expect([...result.managed.keys()]).toEqual([])
     expect(isCallerOwnedWebSearch("web_search")).toBe(true)
     expect(isCallerOwnedWebSearch("_copilot_web_search")).toBe(true)
     expect(isCallerOwnedWebSearch("_copilot_web_search_1")).toBe(true)
@@ -63,7 +63,7 @@ test("retains caller ownership when a Chat custom web_search is translated", () 
   runWithWebTools(source, () => {
     const result = prepareManagedWebTools(translated, "responses")
     expect(result.payload.tools?.[0]).toEqual(translated.tools[0])
-    expect([...result.managed.keys()]).toEqual(["_copilot_web_search"])
+    expect([...result.managed.keys()]).toEqual([])
     expect(isCallerOwnedWebSearch("web_search")).toBe(true)
   })
 })
@@ -290,7 +290,9 @@ test.each(["additional_tools", "tool_search_output"])(
       ],
     }
     runWithWebTools(source, () => {
-      const result = prepareManagedWebTools(source, "responses")
+      const result = prepareManagedWebTools(source, "responses", {
+        nativeResponses: true,
+      })
       expect(result.payload.tools?.[0]).toEqual(caller)
       expect(result.managed.has("web_search")).toBe(false)
       expect(result.managed.has("_copilot_web_search")).toBe(false)
@@ -316,12 +318,16 @@ test.each(["web_search", "web_search_preview"])(
     }
     const original = structuredClone(source)
     runWithWebTools(source, () => {
-      const result = prepareManagedWebTools(source, "responses")
+      const result = prepareManagedWebTools(source, "responses", {
+        nativeResponses: true,
+      })
       expect(result.payload).toEqual(source)
       expect(result.managed.size).toBe(0)
       expect(isCallerOwnedWebSearch("web_search")).toBe(true)
       expect(
-        prepareManagedWebTools(result.payload, "responses").payload,
+        prepareManagedWebTools(result.payload, "responses", {
+          nativeResponses: true,
+        }).payload,
       ).toEqual(source)
     })
     expect(source).toEqual(original)
@@ -358,6 +364,7 @@ test("keeps hosted Responses search without adding a separate fetch tool", () =>
     const result = prepareManagedWebTools(
       { tools: [{ type: "web_search" }, { type: "web_fetch", max_uses: 2 }] },
       "responses",
+      { nativeResponses: true },
     )
     expect(result.payload.tools?.[0]).toEqual({ type: "web_search" })
     expect(result.managed.size).toBe(0)
