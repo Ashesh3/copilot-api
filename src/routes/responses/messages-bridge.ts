@@ -70,6 +70,7 @@ import {
   createResponsesMessagesToolMap,
   type ResponsesMessagesToolMap,
 } from "./messages-tool-map"
+import { omitOptionalResponsesWebSearch } from "./optional-web-search"
 import { associateResponsesFunctionCalls } from "./tool-call-association"
 import { checkResponsesToMessagesTranslation } from "./translation-fidelity"
 
@@ -599,6 +600,12 @@ export async function adaptResponsesToMessagesCandidate(options: {
     }
   }
   const state = createTolerantMessagesState(source)
+  if (omitOptionalResponsesWebSearch(source)) {
+    addTranslationFinding(state.findings, {
+      class: "tool_shape",
+      severity: "omitted",
+    })
+  }
   const converted = await convertTolerantResponsesInput(
     source,
     state,

@@ -15,6 +15,7 @@ export interface WebToolsContext {
   searchAllowed: boolean
   hasCallerTools: boolean
   forcedCallerTool: boolean
+  forcedHostedSearch: boolean
   callerNames: Set<string>
   requested: Map<string, ManagedWebTool>
   injected: Map<string, ManagedWebTool>
@@ -252,6 +253,8 @@ export function runWithWebTools<T>(
       searchAllowed: allowsDefaults(source, true, true),
       hasCallerTools,
       forcedCallerTool: isForcedCallerTool(source, callerNames),
+      forcedHostedSearch:
+        isRecord(source.tool_choice) && isHostedSearch(source.tool_choice),
       callerNames,
       requested,
       injected: new Map(),
@@ -318,8 +321,14 @@ function allowsManagedCombination(
 ): boolean {
   if (nativeHosted || !hasCallerDeclarations(source, active)) return true
   const explicitSearch =
-    active.requested.size > 0
-    || toolDeclarations(source).some((tool) => isHostedSearch(tool))
+    active.forcedHostedSearch
+    || toolDeclarations(source).some((tool) => {
+      if (isHostedSearch(tool) || isRecord(tool.googleSearch)) return true
+      const name = toolName(tool)
+      return Boolean(
+        name && active.requested.has(name) && !active.callerNames.has(name),
+      )
+    })
   if (
     explicitSearch
     && active.searchAllowed
