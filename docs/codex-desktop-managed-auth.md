@@ -52,6 +52,14 @@ The inventory routes return the same membership in ChatGPT's keyed `accounts`
 map with `account_ordering`. Desktop treats an unclassified account as a
 workspace-policy failure, so these routes are what keep the Codex composer open.
 
+Desktop `26.1013.4894.0` also reads subscription metadata during its first
+render. Each inventory entry includes `entitlement` and
+`last_active_subscription` objects with null subscription IDs, plan, expiry,
+and purchase platform, plus false active-subscription and renewal flags. These
+describe the absence of a hosted billing subscription; `account.plan_type`
+still comes from the managed identity. Omitting the objects can produce
+"ChatGPT hit a snag" on startup even though "Try again" appears to recover.
+
 ## 1. Deploy the gateway and edge route
 
 Deploy a reviewed `copilot-api` revision containing the managed refresh route.
