@@ -28,6 +28,7 @@ import {
   createResponsesChatToolTranslation,
   type ResponsesChatToolMap,
 } from "./messages-tool-map"
+import { omitOptionalResponsesWebSearch } from "./optional-web-search"
 import { associateResponsesFunctionCalls } from "./tool-call-association"
 
 export type ResponsesChatCandidate = EvaluatedEndpointCandidate<
@@ -754,6 +755,9 @@ export async function adaptResponsesToChatCandidate(
     }
   }
   const state = createState(source)
+  if (omitOptionalResponsesWebSearch(source)) {
+    addFinding(state.findings, { class: "tool_shape", severity: "omitted" })
+  }
   if (toolTranslation.adaptedTools) {
     addFinding(state.findings, { class: "tool_shape", severity: "adapted" })
   }

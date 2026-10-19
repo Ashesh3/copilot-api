@@ -144,10 +144,15 @@ parse, or cache them, and has no local-fetch fallback.**
   tool choices (`required` / `any` / Google `ANY`) also keep their original
   tool set, so a gateway web call cannot replace a required client call.
   Caller-owned functions and custom/discovered tools remain intact. Native
-  hosted search can be combined with client tools. Other routes reject explicit
-  server-search/client-tool combinations with `unsupported_web_tool_combination`:
-  their stateless adapters cannot replay hidden server results after a client
-  handoff. Use a client-owned search tool or native hosted Responses instead.
+  hosted search can be combined with client tools. When a Responses client such
+  as Codex offers optional hosted search alongside coding tools on a Messages or
+  Chat fallback, the adapter omits that hosted declaration rather than rejecting
+  the chat. Client functions, custom tools, namespaces, and client-owned web
+  tools remain available. Explicitly forced hosted search and other unsupported
+  server-search/client-tool combinations still return
+  `unsupported_web_tool_combination`: stateless adapters cannot replay hidden
+  server results after a client handoff. Use a client-owned search tool or native
+  hosted Responses for that combination.
 - Managed results stay in private tool history, never synthetic assistant
   messages. Affected Responses conversations recover on replay by removing
   only exact legacy gateway `web_result_*` artifacts, not genuine messages.

@@ -15,6 +15,8 @@ export interface WebToolsContext {
   searchAllowed: boolean
   hasCallerTools: boolean
   forcedCallerTool: boolean
+  forcedHostedSearch: boolean
+  googleSearchRequested: boolean
   callerNames: Set<string>
   requested: Map<string, ManagedWebTool>
   injected: Map<string, ManagedWebTool>
@@ -235,13 +237,15 @@ export function runWithWebTools<T>(
   const callerNames = new Set<string>()
   const requested = new Map<string, ManagedWebTool>()
   let hasCallerTools = false
+  let googleSearchRequested = false
   for (const tool of toolDeclarations(source)) {
     const name = toolName(tool)
     if (isHostedSearch(tool))
       requested.set(name ?? "web_search", definition("search", tool))
-    else if (isRecord(tool.googleSearch))
+    else if (isRecord(tool.googleSearch)) {
+      googleSearchRequested = true
       requested.set("web_search", definition("search", tool.googleSearch))
-    else {
+    } else {
       hasCallerTools ||= Boolean(name || tool.type)
       if (name) callerNames.add(name)
     }
@@ -252,6 +256,9 @@ export function runWithWebTools<T>(
       searchAllowed: allowsDefaults(source, true, true),
       hasCallerTools,
       forcedCallerTool: isForcedCallerTool(source, callerNames),
+      forcedHostedSearch:
+        isRecord(source.tool_choice) && isHostedSearch(source.tool_choice),
+      googleSearchRequested,
       callerNames,
       requested,
       injected: new Map(),
@@ -318,8 +325,17 @@ function allowsManagedCombination(
 ): boolean {
   if (nativeHosted || !hasCallerDeclarations(source, active)) return true
   const explicitSearch =
-    active.requested.size > 0
-    || toolDeclarations(source).some((tool) => isHostedSearch(tool))
+    active.forcedHostedSearch
+    // Google search is never intentionally omitted by the Responses adapters.
+    // Its translated function name can collide with a caller-owned function.
+    || active.googleSearchRequested
+    || toolDeclarations(source).some((tool) => {
+      if (isHostedSearch(tool) || isRecord(tool.googleSearch)) return true
+      const name = toolName(tool)
+      return Boolean(
+        name && active.requested.has(name) && !active.callerNames.has(name),
+      )
+    })
   if (
     explicitSearch
     && active.searchAllowed
