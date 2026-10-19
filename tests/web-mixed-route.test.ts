@@ -86,6 +86,24 @@ const cases = [
     },
   },
   {
+    route: "/v1beta/models/mixed-fixture:generateContent",
+    body: {
+      contents: [{ role: "user", parts: [{ text: "Search with both tools" }] }],
+      tools: [
+        { googleSearch: {} },
+        {
+          functionDeclarations: [
+            {
+              name: "web_search",
+              description: "CALLER_SEARCH",
+              parameters: { type: "OBJECT", properties: {} },
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     route: "/v1/messages",
     body: {
       model: "mixed-fixture",
