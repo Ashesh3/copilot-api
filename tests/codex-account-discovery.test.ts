@@ -29,6 +29,29 @@ const INVENTORY_PATHS = [
 const PATHS = [...DIRECTORY_PATHS, ...INVENTORY_PATHS]
 const originalApiKeyAuth = state.apiKeyAuth
 
+interface DesktopAccountInventory {
+  accounts: Partial<
+    Record<
+      string,
+      {
+        account: { account_id: string; plan_type: string }
+        entitlement: {
+          subscription_id: string | null
+          subscription_plan: string | null
+          expires_at: string | null
+          has_active_subscription: boolean
+        }
+        last_active_subscription: {
+          subscription_id: string | null
+          purchase_origin_platform: string | null
+          will_renew: boolean
+        }
+      }
+    >
+  >
+  account_ordering: Array<string>
+}
+
 function encodeJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url")
 }
@@ -147,6 +170,17 @@ test.each(INVENTORY_PATHS)(
             workspace_backend_origin: "NO_CONSTRAINT",
             account_routing_override: "NO_CONSTRAINT",
           },
+          entitlement: {
+            subscription_id: null,
+            subscription_plan: null,
+            expires_at: null,
+            has_active_subscription: false,
+          },
+          last_active_subscription: {
+            subscription_id: null,
+            purchase_origin_platform: null,
+            will_renew: false,
+          },
           features: [],
           can_access_with_session: true,
           sso_connection_name: null,
@@ -154,6 +188,40 @@ test.each(INVENTORY_PATHS)(
       },
       account_ordering: ["local-account"],
     })
+  },
+)
+
+test.each(INVENTORY_PATHS)(
+  "supports Desktop's trial and renewal subscription reads at %s",
+  async (path) => {
+    for (const planType of ["free", "plus", "pro"]) {
+      const jwt = createJwt({ chatgpt_plan_type: planType })
+      await registerJwt(jwt)
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await request(path, jwt)
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as DesktopAccountInventory
+        const account = body.account_ordering
+          .map((id) => body.accounts[id])
+          .find((entry) => entry?.account.account_id === "local-account")
+        expect(account).toBeDefined()
+        expect(account?.account.plan_type).toBe(planType)
+
+        // Desktop 26.1013.4894.0 mounts its trial reader even without a trial.
+        // It guards the account, but directly dereferences these two objects.
+        const expiresAt = Date.parse(account?.entitlement.expires_at ?? "")
+        expect(expiresAt).toBeNaN()
+        expect(account?.entitlement.subscription_id).toBeNull()
+        expect(account?.entitlement.subscription_plan).toBeNull()
+        expect(account?.entitlement.has_active_subscription).toBe(false)
+        expect(
+          account?.last_active_subscription.purchase_origin_platform,
+        ).toBeNull()
+        expect(account?.last_active_subscription.subscription_id).toBeNull()
+        expect(account?.last_active_subscription.will_renew).toBe(false)
+      }
+    }
   },
 )
 

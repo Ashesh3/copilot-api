@@ -128,6 +128,19 @@ async function accountInventory(c: Context): Promise<Response> {
           ...personalMembership(claims),
           is_deactivated: false,
         },
+        // Desktop's startup trial and renewal readers dereference these
+        // objects even when the managed identity has no hosted subscription.
+        entitlement: {
+          subscription_id: null,
+          subscription_plan: null,
+          expires_at: null,
+          has_active_subscription: false,
+        },
+        last_active_subscription: {
+          subscription_id: null,
+          purchase_origin_platform: null,
+          will_renew: false,
+        },
         features: [],
         can_access_with_session: true,
         sso_connection_name: null,
