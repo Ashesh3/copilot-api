@@ -25,6 +25,92 @@ describe("classifyEmittedWebSocketTerminal", () => {
 })
 
 describe("parseResponsesWebSocketFrame", () => {
+  test("parses an interrupt without forwarding unrelated payload or headers", () => {
+    const result = parseResponsesWebSocketFrame(
+      JSON.stringify({
+        type: "response.interrupt",
+        response_id: " resp_opaque ",
+        mode: "discard_partial_items",
+        model: "must-not-pass",
+        input: "private input",
+        response: { response_id: "must-not-override" },
+        headers: {
+          Authorization: "Bearer private-secret",
+          "X-Client-Session-Id": "private-session",
+          "Anthropic-Beta": "private-beta",
+        },
+        initiator: "agent",
+        agent_task_id: "private-task",
+      }),
+    )
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        type: "response.interrupt",
+        responseId: " resp_opaque ",
+        mode: "discard_partial_items",
+      },
+    })
+  })
+
+  test.each(
+    [undefined, null, false, 1, {}, [], "", " \t\r\n"].map((responseId) => ({
+      responseId,
+    })),
+  )("rejects an interrupt with malformed response_id %p", ({ responseId }) => {
+    const result = parseResponsesWebSocketFrame(
+      JSON.stringify({
+        type: "response.interrupt",
+        response_id: responseId,
+        mode: "discard_partial_items",
+      }),
+    )
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "bad_request",
+        message: "response_id must be a non-empty string",
+        status: 400,
+        type: "invalid_request_error",
+      },
+    })
+  })
+
+  test.each(
+    [
+      undefined,
+      null,
+      false,
+      1,
+      {},
+      [],
+      "",
+      "preserve_partial_items",
+      "discard_partial_items ",
+      "DISCARD_PARTIAL_ITEMS",
+    ].map((mode) => ({ mode })),
+  )("rejects an interrupt with unsupported mode %p", ({ mode }) => {
+    const result = parseResponsesWebSocketFrame(
+      JSON.stringify({
+        type: "response.interrupt",
+        response_id: "resp_target",
+        mode,
+      }),
+    )
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "bad_request",
+        message: "mode must be discard_partial_items",
+        status: 400,
+        type: "invalid_request_error",
+      },
+    })
+  })
+
   test("merges payload fields while keeping the protocol envelope out", () => {
     const result = parseResponsesWebSocketFrame(
       JSON.stringify({
@@ -57,6 +143,7 @@ describe("parseResponsesWebSocketFrame", () => {
     expect(result).toEqual({
       ok: true,
       value: {
+        type: "response.create",
         attribution: {
           agentTaskId: "task-top",
           clientMachineId: "machine-1",
@@ -93,6 +180,7 @@ describe("parseResponsesWebSocketFrame", () => {
     expect(result).toEqual({
       ok: true,
       value: {
+        type: "response.create",
         attribution: {
           agentTaskId: "task-top",
           parentAgentId: "parent-header",
@@ -116,6 +204,7 @@ describe("parseResponsesWebSocketFrame", () => {
     expect(result).toEqual({
       ok: true,
       value: {
+        type: "response.create",
         attribution: {},
         initiator: "user",
         payload: { model: "gpt-current", stream: true },
@@ -142,6 +231,7 @@ describe("parseResponsesWebSocketFrame", () => {
     expect(result).toEqual({
       ok: true,
       value: {
+        type: "response.create",
         attribution: {},
         payload: { model: "gpt-current", stream: true },
         nativeMessagesOptions: {},
@@ -201,7 +291,8 @@ describe("parseResponsesWebSocketFrame", () => {
     )
 
     expect(result.ok).toBe(true)
-    if (result.ok) expect(result.value.payload.stream).toBe(true)
+    if (result.ok && result.value.type === "response.create")
+      expect(result.value.payload.stream).toBe(true)
   })
 
   test.each([null, false, "assistant", 1])(
@@ -216,7 +307,8 @@ describe("parseResponsesWebSocketFrame", () => {
       )
 
       expect(result.ok).toBe(true)
-      if (result.ok) expect(result.value.initiator).toBeUndefined()
+      if (result.ok && result.value.type === "response.create")
+        expect(result.value.initiator).toBeUndefined()
     },
   )
 
@@ -239,6 +331,7 @@ describe("parseResponsesWebSocketFrame", () => {
     expect(result).toEqual({
       ok: true,
       value: {
+        type: "response.create",
         attribution: { agentTaskId: "task-one" },
         payload: { model: "claude-sonnet-4.5", stream: true },
         nativeMessagesOptions: {
@@ -859,7 +952,8 @@ describe("parseResponsesWebSocketFrame attribution precedence", () => {
       )
 
       expect(result.ok).toBe(true)
-      if (result.ok) expect(result.value.attribution).toEqual(expected)
+      if (result.ok && result.value.type === "response.create")
+        expect(result.value.attribution).toEqual(expected)
     },
   )
 })

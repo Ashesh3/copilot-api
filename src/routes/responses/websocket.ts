@@ -138,6 +138,12 @@ import {
   getResponsesVerbosity,
 } from "./utils"
 import {
+  interruptResponsesWebSocket,
+  trackInterruptibleResponse,
+  type InterruptedResponseFrame,
+  type ResponsesWebSocketOutputFrame,
+} from "./websocket-interrupt"
+import {
   classifyWebSocketTerminal,
   createResponsesWebSocketTurn,
   ensureResponsesWebSocketLifecycle,
@@ -330,6 +336,10 @@ async function handleResponsesWebSocketMessage(
   const parsed = parseResponsesWebSocketFrame(message)
   if (!parsed.ok) {
     sendWebSocketError(ws, parsed.error)
+    return
+  }
+  if (parsed.value.type === "response.interrupt") {
+    await interruptResponsesWebSocket(ws, parsed.value.responseId)
     return
   }
   if (typeof message !== "string") return
@@ -1092,12 +1102,7 @@ async function emitTurnFrame(
     event: eventName,
     protocol: "Responses WebSocket",
     terminal: isResponsesTerminalEventName(eventName),
-  }) as
-    | {
-        response?: { id?: unknown; usage?: ResponseUsage | null }
-        type?: unknown
-      }
-    | undefined
+  }) as ResponsesWebSocketOutputFrame | undefined
   if (parsed === undefined) return true
 
   const response = parsed.response ?? {}
@@ -1111,12 +1116,15 @@ async function emitTurnFrame(
     publicFrame,
     getCopilotResponseHeaders(),
   )
-  ws.send(processed)
   turn.outputStarted = true
   updateResponsesFailureState(turn.failureState, {
     data: processed,
     event: typeof terminalType === "string" ? terminalType : eventName,
   })
+  trackInterruptibleResponse(turn, parsed, (interrupted) =>
+    finishInterruptedResponse(ws, turn, payload, interrupted),
+  )
+  ws.send(processed)
 
   if (terminalType === "response.completed") {
     const responseStatus = readEmittedResponseStatus(parsed)
@@ -1169,6 +1177,49 @@ async function emitTurnFrame(
     })
   }
   return true
+}
+
+// The bound callback runs in the original turn's request/routing context.
+// eslint-disable-next-line max-params
+function finishInterruptedResponse(
+  ws: ResponsesWebSocketState,
+  turn: ResponsesWebSocketTurn,
+  payload: ResponsesPayload,
+  frame: InterruptedResponseFrame,
+): Promise<boolean> {
+  if (
+    ws.data.closed
+    || turn.abortController.signal.aborted
+    || turn.terminal.state !== "open"
+  )
+    return Promise.resolve(false)
+  storeResponseSnapshot(
+    ws.data.responseSnapshots,
+    frame.response.id,
+    createCompletedResponseSnapshot(
+      turn.continuationModel ?
+        { ...payload, model: turn.continuationModel }
+      : payload,
+      frame,
+    ),
+  )
+  rememberPermissionReviewModel(ws.data, turn, payload, frame)
+  rememberForcedPromptModel(ws.data, turn, frame.response.id)
+  // The terminal transition is synchronous. Claim it before send() so a
+  // concurrent socket close cannot reclassify the delivered terminal as aborted.
+  const committed = turn.terminal.succeed({
+    kind: "incomplete",
+    status: 200,
+    terminalStatus: "COMPLETE",
+    usage: turn.failureState.usage,
+  })
+  ws.send(
+    addResponsesWebSocketMetadata(
+      JSON.stringify(frame),
+      getCopilotResponseHeaders(),
+    ),
+  )
+  return committed
 }
 
 // eslint-disable-next-line max-params -- The snapshot store, current turn, request and terminal frame have distinct roles.
@@ -1686,7 +1737,19 @@ async function streamChatCompletionsOverWs(options: {
   await streamChatCompletionsAsResponses(wsStream, ccStream, {
     model: responseContext.model,
     toolMap,
+    onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
   })
+}
+
+function updateWebSocketChatUsage(
+  turn: ResponsesWebSocketTurn,
+  usage: ResponseUsage | null,
+): void {
+  if (turn.abortController.signal.aborted || turn.terminal.state !== "open")
+    return
+  // Chat reports cumulative snapshots, not increments. The turn's existing
+  // terminal owner records them once, retaining managed-round usage precedence.
+  turn.failureState.usage = usage
 }
 
 /** Answer a Codex compaction trigger on Chat Completions with one item. */
@@ -1883,7 +1946,11 @@ async function streamCustomProviderCompletion(options: {
   await streamChatCompletionsAsResponses(
     writer,
     stream as AsyncIterable<{ data?: string; event?: string }>,
-    { model: payload.model, toolMap: candidate.toolMap },
+    {
+      model: payload.model,
+      toolMap: candidate.toolMap,
+      onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
+    },
   )
 }
 
@@ -1976,6 +2043,7 @@ async function streamCustomProviderOverWs(options: {
     {
       model: payload.model,
       toolMap: candidate.toolMap,
+      onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
     },
   )
 }
@@ -2039,7 +2107,11 @@ async function streamChatWebSearchOverWs(options: {
   await streamChatCompletionsAsResponses(
     wsStream,
     chatResponseAsStream(response),
-    { model: responseContext.model, toolMap },
+    {
+      model: responseContext.model,
+      toolMap,
+      onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
+    },
   )
 }
 

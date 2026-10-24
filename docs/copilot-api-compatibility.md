@@ -495,11 +495,21 @@ WebSocket sends, and continuations after output are never compatibility-retried;
 the final attempt alone owns any failure body.
 
 The Responses WebSocket accepts JSON text frames with
-`type: "response.create"`. Binary frames, invalid JSON, unsupported message
-types, and invalid initiators receive recoverable error frames while the socket
-remains open. `stream: false` is coerced to the streaming transport. A visible
-`response.incomplete` is a valid terminal, and `response.processed` is not
-treated as a create request.
+`type: "response.create"` or `type: "response.interrupt"`. Binary frames, invalid
+JSON, unsupported message types, and invalid initiators receive recoverable
+error frames while the socket remains open. `stream: false` is coerced to the
+streaming transport. A visible `response.incomplete` is a valid terminal, and
+`response.processed` is not treated as a create request.
+
+An interrupt requires the exact connection-local `response_id` and
+`mode: "discard_partial_items"`. An active target receives
+`response.interrupt.accepted` before a `response.incomplete` terminal with
+`incomplete_details.reason: "interrupted"`; unfinished output items are excluded,
+while completed items remain available for `previous_response_id` continuation
+on the same connection. Interrupting an already completed response is an
+idempotent acknowledgment; an unknown ID receives `response.interrupt.failed`
+with `response_not_found`. The control frame starts no additional inference or
+LLM Debug capture.
 
 Successful Responses WebSocket turns can create snapshots for continuation.
 Only response IDs issued on the current WebSocket connection are valid. A stale
