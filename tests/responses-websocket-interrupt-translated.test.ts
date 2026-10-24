@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
 
 import type { ResponsesWebSocketData } from "~/routes/responses/websocket"
 import type { Model } from "~/services/copilot/get-models"
@@ -6,6 +6,10 @@ import type { Model } from "~/services/copilot/get-models"
 import { setConfigForTest } from "~/lib/config"
 import { setModelFallbackConfigForTest } from "~/lib/model-fallback-config"
 import { state } from "~/lib/state"
+import {
+  enableDatabaseUsageForTest,
+  getUsageResponse,
+} from "~/lib/usage-tracker"
 import {
   responsesWebSocket,
   tryUpgradeResponsesWebSocket,
@@ -32,12 +36,19 @@ const targetModel = "gpt-5-mini"
 
 interface Frame {
   type: string
+  delta?: string
   item?: Record<string, unknown>
   response?: {
     id: string
     model: string
     output: Array<Record<string, unknown>>
     incomplete_details?: { reason: string }
+    usage?: {
+      input_tokens: number
+      output_tokens: number
+      total_tokens: number
+      input_tokens_details?: { cached_tokens: number }
+    } | null
   }
 }
 
@@ -159,6 +170,155 @@ test("interrupts translated Chat after a completed message and discards unfinish
   )
   expect(ws.frames.at(-1)?.type).toBe("response.completed")
   expect(ws.data.activeTurns.size).toBe(0)
+})
+
+test("retains the latest observed Chat usage when interrupted before the stream terminal and records it once", async () => {
+  enableDatabaseUsageForTest()
+  const ws = await createSocket()
+  const active: {
+    controller?: ReadableStreamDefaultController<Uint8Array>
+    ended: boolean
+  } = { ended: false }
+  const upstream = new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        active.controller = controller
+      },
+      cancel() {
+        active.ended = true
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  )
+  const emit = (value: Record<string, unknown>) => {
+    if (!active.controller) throw new Error("Expected initialized Chat stream")
+    active.controller.enqueue(
+      new TextEncoder().encode(`data: ${JSON.stringify(value)}\n\n`),
+    )
+  }
+  const chunk = {
+    id: "chat_usage_interrupt",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "chat-interrupt",
+  }
+  emit({
+    ...chunk,
+    choices: [
+      {
+        index: 0,
+        delta: { role: "assistant", content: "partial before usage" },
+        finish_reason: null,
+      },
+    ],
+  })
+  emit({
+    ...chunk,
+    choices: [],
+    usage: {
+      prompt_tokens: 13,
+      completion_tokens: 2,
+      total_tokens: 15,
+      prompt_tokens_details: { cached_tokens: 3 },
+    },
+  })
+  emit({
+    ...chunk,
+    choices: [],
+    usage: {
+      prompt_tokens: 29,
+      completion_tokens: 7,
+      total_tokens: 36,
+      prompt_tokens_details: { cached_tokens: 11 },
+      completion_tokens_details: { reasoning_tokens: 2 },
+    },
+  })
+  // Delivery of this later delta proves both usage-only chunks were consumed.
+  emit({
+    ...chunk,
+    choices: [
+      {
+        index: 0,
+        delta: { content: "usage-consumed-sentinel" },
+        finish_reason: null,
+      },
+    ],
+  })
+  replies.push((signal) => {
+    signal?.addEventListener(
+      "abort",
+      () => {
+        if (active.ended) return
+        active.ended = true
+        active.controller?.error(
+          new DOMException("Fixture interrupted", "AbortError"),
+        )
+      },
+      { once: true },
+    )
+    return upstream
+  })
+  const observed = new Promise<void>((resolve) => {
+    ws.onFrame = (frame) => {
+      if (
+        frame.type === "response.output_text.delta"
+        && frame.delta === "usage-consumed-sentinel"
+      )
+        resolve()
+    }
+  })
+  const log = spyOn(console, "info").mockImplementation(() => {})
+  const pending = send(ws, {
+    model: "chat-interrupt",
+    input: "report usage then stall",
+    tools: [],
+  })
+  try {
+    await observed
+    await interrupt(ws, "resp_chat_usage_interrupt")
+    await pending
+    await interrupt(ws, "resp_chat_usage_interrupt")
+    responsesWebSocket.close(ws)
+    expect(requests).toHaveLength(1)
+    expect(requests[0].signal?.aborted).toBe(true)
+    const terminals = ws.frames.filter(
+      (frame) => frame.type === "response.incomplete",
+    )
+    expect(terminals).toHaveLength(1)
+    expect(terminals[0].response?.usage).toEqual({
+      input_tokens: 29,
+      output_tokens: 7,
+      total_tokens: 36,
+      input_tokens_details: { cached_tokens: 11 },
+    })
+    expect((await getUsageResponse()).lifetime).toMatchObject({
+      total_input_tokens: 29,
+      total_output_tokens: 7,
+      total_tokens: 36,
+      total_requests: 1,
+    })
+    expect(
+      ws.frames.some(
+        (frame) =>
+          frame.type === "response.completed" || frame.type === "error",
+      ),
+    ).toBe(false)
+    const lines = log.mock.calls.flat().map(String)
+    expect(lines.filter((line) => line.includes("STARTED"))).toHaveLength(1)
+    expect(lines.filter((line) => line.includes("COMPLETE"))).toHaveLength(1)
+    expect(lines.some((line) => /ABORTED|REJECTED|ERROR/.test(line))).toBe(
+      false,
+    )
+    expect(ws.data.activeTurns.size).toBe(0)
+  } finally {
+    responsesWebSocket.close(ws)
+    if (!active.ended) {
+      active.ended = true
+      active.controller?.close()
+    }
+    await pending
+    log.mockRestore()
+  }
 })
 
 test("interrupts the selected fallback once and resumes its original-model snapshot without retrying cancellation", async () => {

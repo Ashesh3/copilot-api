@@ -2511,6 +2511,8 @@ export interface ChatResponsesStreamTarget {
   readonly model: string
   /** Restores client tool identities on translated tool calls. */
   readonly toolMap?: ResponsesChatToolMap
+  /** Receives reported usage even if the stream stalls before its terminal. */
+  readonly onUsage?: (usage: ResponseUsage | null) => void
 }
 
 export const streamChatCompletionsAsResponses = async (
@@ -2523,12 +2525,13 @@ export const streamChatCompletionsAsResponses = async (
   state: CCStreamState
   terminal?: "response.completed" | "response.incomplete"
 }> => {
-  const { model, toolMap } =
-    typeof target === "string" ? { model: target, toolMap: undefined } : target
+  const { model, toolMap, onUsage } =
+    typeof target === "string" ? { model: target } : target
   return await streamChatCompletionsAsResponsesWithState({
     stream,
     ccStream,
     state: createCCStreamState(model, toolMap),
+    onUsage: (usage) => onUsage?.(mapCCStreamUsage(usage)),
   })
 }
 

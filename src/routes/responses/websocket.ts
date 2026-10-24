@@ -1737,7 +1737,19 @@ async function streamChatCompletionsOverWs(options: {
   await streamChatCompletionsAsResponses(wsStream, ccStream, {
     model: responseContext.model,
     toolMap,
+    onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
   })
+}
+
+function updateWebSocketChatUsage(
+  turn: ResponsesWebSocketTurn,
+  usage: ResponseUsage | null,
+): void {
+  if (turn.abortController.signal.aborted || turn.terminal.state !== "open")
+    return
+  // Chat reports cumulative snapshots, not increments. The turn's existing
+  // terminal owner records them once, retaining managed-round usage precedence.
+  turn.failureState.usage = usage
 }
 
 /** Answer a Codex compaction trigger on Chat Completions with one item. */
@@ -1934,7 +1946,11 @@ async function streamCustomProviderCompletion(options: {
   await streamChatCompletionsAsResponses(
     writer,
     stream as AsyncIterable<{ data?: string; event?: string }>,
-    { model: payload.model, toolMap: candidate.toolMap },
+    {
+      model: payload.model,
+      toolMap: candidate.toolMap,
+      onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
+    },
   )
 }
 
@@ -2027,6 +2043,7 @@ async function streamCustomProviderOverWs(options: {
     {
       model: payload.model,
       toolMap: candidate.toolMap,
+      onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
     },
   )
 }
@@ -2090,7 +2107,11 @@ async function streamChatWebSearchOverWs(options: {
   await streamChatCompletionsAsResponses(
     wsStream,
     chatResponseAsStream(response),
-    { model: responseContext.model, toolMap },
+    {
+      model: responseContext.model,
+      toolMap,
+      onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
+    },
   )
 }
 

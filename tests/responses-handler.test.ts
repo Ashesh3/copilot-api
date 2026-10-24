@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test"
 
-import type { ResponsesPayload } from "../src/services/copilot/create-responses"
+import type {
+  ResponsesPayload,
+  ResponseUsage,
+} from "../src/services/copilot/create-responses"
 
 import { LocalHTTPError } from "../src/lib/error"
 import {
@@ -88,6 +91,69 @@ test("preserves trailing Chat usage before completing a Responses stream", async
       input_tokens_details: { cached_tokens: 3 },
     },
   })
+})
+
+test("reports trailing Chat usage before a stalled stream reaches DONE", async () => {
+  const waiting = Promise.withResolvers<undefined>()
+  const release = Promise.withResolvers<undefined>()
+  const observed: Array<ResponseUsage | null> = []
+  const eventTypes: Array<string | undefined> = []
+  const source = {
+    async *[Symbol.asyncIterator]() {
+      yield {
+        data: JSON.stringify({
+          id: "chat_stalled_usage",
+          choices: [
+            { index: 0, delta: { content: "kept" }, finish_reason: "stop" },
+          ],
+        }),
+      }
+      yield {
+        data: JSON.stringify({
+          choices: [],
+          usage: {
+            prompt_tokens: 11,
+            completion_tokens: 7,
+            total_tokens: 18,
+            prompt_tokens_details: { cached_tokens: 3 },
+          },
+        }),
+      }
+      waiting.resolve(undefined)
+      await release.promise
+      yield { data: "[DONE]" }
+    },
+  }
+  const pending = streamChatCompletionsAsResponses(
+    {
+      writeSSE: (event) => {
+        eventTypes.push(event.event)
+        return Promise.resolve()
+      },
+    },
+    source,
+    {
+      model: "requested-model",
+      onUsage: (usage: ResponseUsage | null) => {
+        observed.push(usage)
+      },
+    },
+  )
+  try {
+    await waiting.promise
+    expect(observed).toEqual([
+      {
+        input_tokens: 11,
+        output_tokens: 7,
+        total_tokens: 18,
+        input_tokens_details: { cached_tokens: 3 },
+      },
+    ])
+    expect(eventTypes).not.toContain("response.completed")
+  } finally {
+    release.resolve(undefined)
+    await pending
+  }
 })
 
 test("ignores Chat output deltas received after its finish chunk", async () => {
