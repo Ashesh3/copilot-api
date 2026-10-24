@@ -59,6 +59,7 @@ export type EmittedWebSocketTerminal =
   | "response.incomplete"
 
 export interface ParsedResponseCreateFrame {
+  type: "response.create"
   attribution: CopilotRequestAttribution
   requestHeaders?: Headers
   initiator?: "agent" | "user"
@@ -67,8 +68,17 @@ export interface ParsedResponseCreateFrame {
   requestedModel?: string
 }
 
+export interface ParsedResponseInterruptFrame {
+  type: "response.interrupt"
+  responseId: string
+  mode: "discard_partial_items"
+}
+
 export type WebSocketFrameParseResult =
-  | { ok: true; value: ParsedResponseCreateFrame }
+  | {
+      ok: true
+      value: ParsedResponseCreateFrame | ParsedResponseInterruptFrame
+    }
   | {
       ok: false
       error: {
@@ -106,6 +116,26 @@ export function parseResponsesWebSocketFrame(
     return parseError("bad_request", "JSON message must be an object")
   }
 
+  if (parsed.type === "response.interrupt") {
+    if (
+      typeof parsed.response_id !== "string"
+      || parsed.response_id.trim().length === 0
+    ) {
+      return parseError("bad_request", "response_id must be a non-empty string")
+    }
+    if (parsed.mode !== "discard_partial_items") {
+      return parseError("bad_request", "mode must be discard_partial_items")
+    }
+    return {
+      ok: true,
+      value: {
+        type: "response.interrupt",
+        responseId: parsed.response_id,
+        mode: parsed.mode,
+      },
+    }
+  }
+
   if (parsed.type !== "response.create") {
     return parseError("bad_request", "Unsupported message type")
   }
@@ -121,6 +151,7 @@ export function parseResponsesWebSocketFrame(
   return {
     ok: true,
     value: {
+      type: "response.create",
       attribution: resolveFrameAttribution(parsed),
       ...(Array.from(requestHeaders.keys()).length > 0 ?
         { requestHeaders }
