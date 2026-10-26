@@ -1500,6 +1500,168 @@ describe("responses websocket message handling", () => {
     expect(lastRequestBody).not.toHaveProperty("service_tier")
   })
 
+  test("sanitizes Codex content item metadata before native WebSocket sends and continuations", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    const developerMetadata = {
+      turn_id: "turn_metadata_parent",
+      create_time: 1793000000.125,
+      content_item_kinds: ["developer_instructions"],
+    }
+    const userMetadata = {
+      turn_id: "turn_metadata_parent",
+      create_time: 1793000001.25,
+      content_item_kinds: ["user_message"],
+    }
+    const contentItemMetadata = [
+      { provenance: { type: "harness", hook: false } },
+    ]
+    const input = [
+      {
+        type: "additional_tools",
+        role: "developer",
+        tools: [
+          {
+            type: "function",
+            name: "lookup",
+            parameters: { type: "object", properties: {} },
+            strict: false,
+          },
+        ],
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "Keep these instructions." }],
+        internal_chat_message_metadata_passthrough: {
+          ...developerMetadata,
+          content_item_metadata: contentItemMetadata,
+        },
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Start the task." }],
+        internal_chat_message_metadata_passthrough: {
+          ...userMetadata,
+          content_item_metadata: contentItemMetadata,
+        },
+      },
+    ]
+    const expectedInput = [
+      input[0],
+      {
+        ...input[1],
+        internal_chat_message_metadata_passthrough: developerMetadata,
+      },
+      {
+        ...input[2],
+        internal_chat_message_metadata_passthrough: userMetadata,
+      },
+    ]
+    const answer = {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "First answer." }],
+    }
+    const sourceInput = structuredClone(input)
+    const providerResponse = (responseId: string) => {
+      const upstreamInput = lastRequestBody?.input
+      const rejectedIndex =
+        Array.isArray(upstreamInput) ?
+          upstreamInput.findIndex((item: unknown) => {
+            if (typeof item !== "object" || item === null) return false
+            const metadata = (item as Record<string, unknown>)
+              .internal_chat_message_metadata_passthrough
+            return (
+              typeof metadata === "object"
+              && metadata !== null
+              && Object.hasOwn(metadata, "content_item_metadata")
+            )
+          })
+        : -1
+      return rejectedIndex === -1 ?
+          createResponsesSseResponse(responseId, [answer])
+        : Response.json(
+            {
+              error: {
+                code: "invalid_request_body",
+                message: `Unknown parameter: 'input[${rejectedIndex}].internal_chat_message_metadata_passthrough.content_item_metadata'.`,
+              },
+            },
+            { status: 400 },
+          )
+    }
+    queuedFetchHandlers.push(
+      () => providerResponse("resp_metadata_parent"),
+      () => providerResponse("resp_metadata_child"),
+    )
+    const ws = createTestWebSocket()
+
+    await seedProtocolDatabase().then(() =>
+      responsesWebSocket.message(
+        ws,
+        JSON.stringify({ type: "response.create", model: "gpt-5.4", input }),
+      ),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "response.completed",
+      response: { id: "resp_metadata_parent" },
+    })
+    expect(lastRequestBody?.input).toEqual(expectedInput)
+    const cached = ws.data.responseSnapshots.get("resp_metadata_parent")
+    expect(cached?.input).toEqual([...sourceInput, answer])
+    const cachedBeforeContinuation = structuredClone(cached)
+    const followupMetadata = {
+      turn_id: "turn_metadata_child",
+      create_time: 1793000002.5,
+      content_item_kinds: ["user_message"],
+    }
+    const followup = {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Continue the task." }],
+      internal_chat_message_metadata_passthrough: {
+        ...followupMetadata,
+        content_item_metadata: contentItemMetadata,
+      },
+    }
+
+    await seedProtocolDatabase().then(() =>
+      responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          previous_response_id: "resp_metadata_parent",
+          input: [followup],
+        }),
+      ),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "response.completed",
+      response: { id: "resp_metadata_child" },
+    })
+    expect(lastRequestBody?.input).toEqual([
+      ...expectedInput,
+      answer,
+      {
+        ...followup,
+        internal_chat_message_metadata_passthrough: followupMetadata,
+      },
+    ])
+    expect(lastRequestBody?.previous_response_id).toBeUndefined()
+    expect(cached).toEqual(cachedBeforeContinuation)
+    expect(ws.data.responseSnapshots.get("resp_metadata_child")?.input).toEqual(
+      [...sourceInput, answer, followup, answer],
+    )
+    expect(input).toEqual(sourceInput)
+  })
+
   test("does not retry a native WebSocket compatibility 400", async () => {
     state.copilotToken = "copilot-token"
     state.models = responsesCapableModels

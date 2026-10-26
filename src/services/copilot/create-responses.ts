@@ -12,6 +12,7 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
+import { stripUnsupportedResponsesInputMetadata } from "~/services/copilot/responses-metadata"
 import {
   claimCompatibilityRetry,
   createRetryBudget,
@@ -589,6 +590,7 @@ const createResponsesCore = async (
         implicitDefault: usesImplicitReasoningDefault(payload.model),
       })
   const body = prepared.body
+  stripUnsupportedResponsesInputMetadata(body)
   omitConfiguredReasoningEffort("responses", body)
 
   // Zero-data retention enforcement
@@ -602,9 +604,7 @@ const createResponsesCore = async (
 
   // Completed evaluated candidates have already performed semantic attachment
   // adaptation; unprepared sources still need the transport normalizer here.
-  if (!options.prepared) {
-    await normalizeResponsesAttachments(body, signal)
-  }
+  if (!options.prepared) await normalizeResponsesAttachments(body, signal)
   signal?.throwIfAborted()
 
   const shouldFitCompactionPayload = shouldFitResponsesCompactionPayload(
