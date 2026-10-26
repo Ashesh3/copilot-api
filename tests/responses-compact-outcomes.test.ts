@@ -5,6 +5,7 @@ import { setModelSettingsForTest } from "~/lib/model-settings"
 import { state } from "~/lib/state"
 import { tokenPool } from "~/lib/token-pool"
 import { server } from "~/server"
+import { COMPACTION_PAYLOAD_MAX_BYTES } from "~/services/copilot/compaction-payload"
 
 import {
   useProtocolDatabase,
@@ -131,6 +132,120 @@ async function readSummary(response: Response): Promise<string> {
     "utf8",
   )
 }
+
+test("native compaction removes unsupported message metadata while retaining conversation history", async () => {
+  const retainedMetadata = {
+    turn_id: "turn_compact_metadata",
+    create_time: 1792987358.4661546,
+    content_item_kinds: ["text"],
+  }
+  const input = [
+    {
+      type: "message",
+      role: "developer",
+      content: [{ type: "input_text", text: "Preserve the pending task." }],
+    },
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Keep the current task state." }],
+      internal_chat_message_metadata_passthrough: {
+        ...retainedMetadata,
+        content_item_metadata: [
+          { provenance: { type: "harness", hook: false } },
+        ],
+      },
+    },
+  ]
+  const snapshot = structuredClone(input)
+  const response = await seedProtocolDatabase().then(() =>
+    server.request("/responses/compact", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "compact-model", input }),
+    }),
+  )
+
+  expect(await readSummary(response)).toBe("Task state preserved.")
+  expect(upstreamPath).toBe("/responses")
+  expect(upstreamBody.input).toEqual([
+    snapshot[0],
+    {
+      ...snapshot[1],
+      internal_chat_message_metadata_passthrough: retainedMetadata,
+    },
+    expect.objectContaining({ type: "message", role: "user" }),
+  ])
+  expect(input).toEqual(snapshot)
+})
+
+test("native compaction discards unsupported metadata before applying the payload budget", async () => {
+  const retainedMetadata = {
+    turn_id: "turn_compact_budget",
+    create_time: 1792987358.4661546,
+    content_item_kinds: ["text"],
+  }
+  const userMessage = {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "Keep the verified build status." }],
+    internal_chat_message_metadata_passthrough: retainedMetadata,
+  }
+  const toolCall = {
+    type: "function_call",
+    call_id: "call_compact_budget",
+    name: "run_build",
+    arguments: "{}",
+  }
+  const toolResult = {
+    type: "function_call_output",
+    call_id: "call_compact_budget",
+    output: "BUILD SUCCEEDED",
+  }
+  const response = await seedProtocolDatabase().then(() =>
+    server.request("/responses/compact", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "compact-model",
+        input: [
+          {
+            ...userMessage,
+            internal_chat_message_metadata_passthrough: {
+              ...retainedMetadata,
+              content_item_metadata: [
+                {
+                  provenance: {
+                    type: "harness",
+                    hook: false,
+                    detail: "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES),
+                  },
+                },
+              ],
+            },
+          },
+          toolCall,
+          toolResult,
+        ],
+      }),
+    }),
+  )
+
+  expect(await readSummary(response)).toBe("Task state preserved.")
+  expect(upstreamPath).toBe("/responses")
+  expect(upstreamBody.input).toEqual([
+    userMessage,
+    toolCall,
+    toolResult,
+    expect.objectContaining({ type: "message", role: "user" }),
+  ])
+})
 
 test("compaction prefers all final-answer text after commentary", async () => {
   result = responsesResult([

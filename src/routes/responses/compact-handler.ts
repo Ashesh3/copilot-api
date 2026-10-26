@@ -59,6 +59,7 @@ import {
   type ResponsesResult,
   createResponses,
 } from "~/services/copilot/create-responses"
+import { stripUnsupportedResponsesInputMetadata } from "~/services/copilot/responses-metadata"
 
 import { getCompactionPrompt } from "./compact-prompt"
 import {
@@ -314,6 +315,7 @@ const handleCompactAttempt = async (c: Context, body: CompactRequestBody) => {
     async () => {
       if (!customReference && support.responses) {
         // Use native Responses API
+        stripUnsupportedResponsesInputMetadata(responsesPayload)
         const fitted = fitResponsesCompactionPayload(responsesPayload)
         const fittedPayload = fitted.payload
         reportCompactionReduction(

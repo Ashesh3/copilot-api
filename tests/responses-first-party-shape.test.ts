@@ -107,74 +107,102 @@ afterAll(() => {
   ;(globalThis as { fetch: typeof fetch }).fetch = originalFetch
 })
 
-test("preserves a first-party Responses shape through the public route without arbitrary headers or caller mutation", async () => {
-  const agentTaskId = `task-${randomUUID()}`
-  const parentAgentId = `parent-${randomUUID()}`
-  const interactionType = `conversation-${randomUUID()}`
-  const turnMetadata = JSON.stringify({
-    turn_id: `turn-${randomUUID()}`,
-    request_kind: "turn",
-  })
-  const payload = {
-    model: "first-party-shape-model",
-    input: [
-      {
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: "Reply with exactly OK." }],
-      },
-    ],
-    tools: [
-      {
-        type: "function",
-        name: "lookup_synthetic_value",
-        description: "Return a synthetic value without side effects.",
-        parameters: {
-          type: "object",
-          properties: {},
-          additionalProperties: false,
+test.each(["/responses", "/v1/responses"])(
+  "preserves a first-party Responses shape through %s while removing unsupported message metadata",
+  async (route) => {
+    const agentTaskId = `task-${randomUUID()}`
+    const parentAgentId = `parent-${randomUUID()}`
+    const interactionType = `conversation-${randomUUID()}`
+    const turnMetadata = JSON.stringify({
+      turn_id: `turn-${randomUUID()}`,
+      request_kind: "turn",
+    })
+    const retainedMetadata = {
+      turn_id: `turn-${randomUUID()}`,
+      create_time: 1792987358.4661546,
+      content_item_kinds: ["text"],
+    }
+    const payload = {
+      model: "first-party-shape-model",
+      input: [
+        {
+          type: "message",
+          role: "developer",
+          content: [
+            { type: "input_text", text: "Keep the conversation intact." },
+          ],
         },
-        strict: true,
-      },
-    ],
-    tool_choice: "none",
-    reasoning: { effort: "low" },
-    include: ["reasoning.encrypted_content"],
-    client_metadata: { "x-codex-turn-metadata": turnMetadata },
-    max_output_tokens: 16,
-    store: false,
-    stream: false,
-  }
-  const snapshot = structuredClone(payload)
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Reply with exactly OK." }],
+          internal_chat_message_metadata_passthrough: {
+            ...retainedMetadata,
+            content_item_metadata: [
+              { provenance: { type: "harness", hook: false } },
+            ],
+          },
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          name: "lookup_synthetic_value",
+          description: "Return a synthetic value without side effects.",
+          parameters: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+          strict: true,
+        },
+      ],
+      tool_choice: "none",
+      reasoning: { effort: "low" },
+      include: ["reasoning.encrypted_content"],
+      client_metadata: { "x-codex-turn-metadata": turnMetadata },
+      max_output_tokens: 16,
+      store: false,
+      stream: false,
+    }
+    const snapshot = structuredClone(payload)
 
-  const response = await seedProtocolDatabase().then(() =>
-    server.request("/v1/responses", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${gatewayKey}`,
-        "content-type": "application/json",
-        "x-agent-task-id": agentTaskId,
-        "x-parent-agent-id": parentAgentId,
-        "x-interaction-type": interactionType,
-        "x-private-probe-secret": "must-not-pass-upstream",
-      },
-      body: JSON.stringify(payload),
-    }),
-  )
+    const response = await seedProtocolDatabase().then(() =>
+      server.request(route, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${gatewayKey}`,
+          "content-type": "application/json",
+          "x-agent-task-id": agentTaskId,
+          "x-parent-agent-id": parentAgentId,
+          "x-interaction-type": interactionType,
+          "x-private-probe-secret": "must-not-pass-upstream",
+        },
+        body: JSON.stringify(payload),
+      }),
+    )
 
-  expect(response.status).toBe(200)
-  expect(fetchMock).toHaveBeenCalledTimes(1)
-  expect(payload).toEqual(snapshot)
-  expect(upstreamBody).toEqual({
-    ...snapshot,
-    reasoning: { effort: "low", summary: "auto" },
-  })
-  expect(upstreamHeaders?.get("x-agent-task-id")).toBe(agentTaskId)
-  expect(upstreamHeaders?.get("x-parent-agent-id")).toBe(parentAgentId)
-  expect(upstreamHeaders?.get("x-interaction-type")).toBe(interactionType)
-  expect(upstreamHeaders?.get("x-private-probe-secret")).toBeNull()
-  expect(upstreamHeaders?.get("authorization")).toBe(`Bearer ${copilotToken}`)
-})
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(payload).toEqual(snapshot)
+    expect(upstreamBody).toEqual({
+      ...snapshot,
+      input: [
+        snapshot.input[0],
+        {
+          ...snapshot.input[1],
+          internal_chat_message_metadata_passthrough: retainedMetadata,
+        },
+      ],
+      reasoning: { effort: "low", summary: "auto" },
+    })
+    expect(upstreamHeaders?.get("x-agent-task-id")).toBe(agentTaskId)
+    expect(upstreamHeaders?.get("x-parent-agent-id")).toBe(parentAgentId)
+    expect(upstreamHeaders?.get("x-interaction-type")).toBe(interactionType)
+    expect(upstreamHeaders?.get("x-private-probe-secret")).toBeNull()
+    expect(upstreamHeaders?.get("authorization")).toBe(`Bearer ${copilotToken}`)
+  },
+)
 
 function createNativeResponsesModel(): Model {
   return {
