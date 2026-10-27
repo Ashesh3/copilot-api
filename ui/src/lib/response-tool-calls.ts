@@ -27,10 +27,16 @@ interface MutableToolCall {
   outputIndex: number
 }
 
+interface MutableResponsesToolCall extends MutableToolCall {
+  hasItem: boolean
+  streamOutputIndex: number | undefined
+}
+
 interface ToolCallIdentity {
   callId: string | null
+  hasItem: boolean
   id: string | null
-  outputIndex: number
+  outputIndex: number | undefined
 }
 
 const TOOL_CALL_ITEM_TYPES = new Set([
@@ -77,10 +83,34 @@ function parseArguments(value: string): JsonValue | null {
   }
 }
 
-function ensureCall(
-  calls: Array<MutableToolCall>,
+function callAtOutputIndex(
+  calls: Array<MutableResponsesToolCall>,
   identity: ToolCallIdentity,
-): MutableToolCall {
+): MutableResponsesToolCall | undefined {
+  if (identity.outputIndex === undefined) return undefined
+
+  // Copilot can rotate item_id on every argument event. Correlate fragments by a
+  // real stream slot while retaining identity conflict checks between full items.
+  const candidates = calls.filter(
+    (call) =>
+      call.streamOutputIndex === identity.outputIndex
+      && (!identity.hasItem
+        || !call.hasItem
+        || identity.id === null
+        || call.id === null
+        || call.id === identity.id)
+      && (identity.callId === null
+        || call.callId === null
+        || call.callId === identity.callId),
+  )
+  return candidates.length === 1 ? candidates[0] : undefined
+}
+
+function ensureCall(
+  calls: Array<MutableResponsesToolCall>,
+  identity: ToolCallIdentity,
+  fallbackIndex: number,
+): MutableResponsesToolCall {
   let call =
     identity.id === null ?
       undefined
@@ -89,14 +119,7 @@ function ensureCall(
     identity.callId === null ?
       undefined
     : calls.find((item) => item.callId === identity.callId)
-  call ??= calls.find(
-    (item) =>
-      item.outputIndex === identity.outputIndex
-      && (identity.id === null || item.id === null || item.id === identity.id)
-      && (identity.callId === null
-        || item.callId === null
-        || item.callId === identity.callId),
-  )
+  call ??= callAtOutputIndex(calls, identity)
 
   if (!call) {
     call = {
@@ -104,17 +127,28 @@ function ensureCall(
       argumentsDone: false,
       callId: identity.callId,
       choiceIndex: 0,
+      hasItem: identity.hasItem,
       id: identity.id,
       name: null,
       order: calls.length,
-      outputIndex: identity.outputIndex,
+      outputIndex: identity.outputIndex ?? fallbackIndex,
+      streamOutputIndex: identity.outputIndex,
     }
     calls.push(call)
     return call
   }
 
+  if (!call.hasItem && identity.hasItem) call.id = identity.id ?? call.id
+  call.hasItem ||= identity.hasItem
   call.id ??= identity.id
   call.callId ??= identity.callId
+  if (
+    call.streamOutputIndex === undefined
+    && identity.outputIndex !== undefined
+  ) {
+    call.outputIndex = identity.outputIndex
+    call.streamOutputIndex = identity.outputIndex
+  }
   return call
 }
 
@@ -223,10 +257,11 @@ function finishCall(call: MutableToolCall): ParsedToolCall {
 function responseItemIdentity(
   data: JsonRecord,
   item: JsonRecord | null,
-  outputIndex: number,
+  outputIndex: number | undefined,
 ): ToolCallIdentity {
   return {
     callId: stringValue(item?.call_id) ?? stringValue(data.call_id) ?? null,
+    hasItem: item !== null,
     id: stringValue(item?.id) ?? stringValue(data.item_id) ?? null,
     outputIndex,
   }
@@ -238,7 +273,7 @@ export function collectResponsesToolCalls(
   response: JsonRecord | null,
   frames: Array<ResponseToolCallFrame>,
 ): Array<ParsedToolCall> {
-  const calls: Array<MutableToolCall> = []
+  const calls: Array<MutableResponsesToolCall> = []
 
   for (const [frameIndex, frame] of frames.entries()) {
     if (!isRecord(frame.data)) continue
@@ -252,12 +287,11 @@ export function collectResponsesToolCalls(
     if (!item && !argumentsEvent) continue
 
     const outputIndex =
-      numberValue(data.output_index)
-      ?? numberValue(item?.output_index)
-      ?? frameIndex
+      numberValue(data.output_index) ?? numberValue(item?.output_index)
     const call = ensureCall(
       calls,
       responseItemIdentity(data, item, outputIndex),
+      frameIndex,
     )
     if (item) {
       mergeItem(call, item, frame.type === "response.output_item.done")
@@ -279,6 +313,7 @@ export function collectResponsesToolCalls(
       const call = ensureCall(
         calls,
         responseItemIdentity(response, candidateItem, itemOutputIndex),
+        outputIndex,
       )
       mergeItem(call, candidateItem, true)
     }
