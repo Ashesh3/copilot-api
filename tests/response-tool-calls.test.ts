@@ -95,7 +95,12 @@ describe("Responses tool calls with rotating upstream item IDs", () => {
     }
     expect(exported.toolCalls).toHaveLength(1)
     expect(exported.toolCalls[0].name).toBe("spawn_agent")
-    expect(buildAssistantOutputMarkdown(parsed)).not.toContain("Unnamed tool")
+    const markdown = buildAssistantOutputMarkdown(parsed)
+    expect(markdown).toContain("Name: spawn_agent")
+    expect(markdown).toContain("Call ID: call_agent")
+    expect(markdown?.match(/^### Tool call \d+$/gm)).toEqual([
+      "### Tool call 1",
+    ])
   })
 
   test("assembles a partial capture without an authoritative done event", () => {
