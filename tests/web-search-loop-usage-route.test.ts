@@ -58,6 +58,16 @@ const chatRequest =
     },
   })
 
+const googleRequest =
+  (model: string) =>
+  (stream: boolean): ClientRequest => ({
+    path: `/v1beta/models/${model}:${stream ? "streamGenerateContent?alt=sse" : "generateContent"}`,
+    body: {
+      contents: [{ role: "user", parts: [{ text: QUESTION }] }],
+      tools: [{ googleSearch: {} }],
+    },
+  })
+
 interface LoopCase {
   loop: string
   client: string
@@ -87,6 +97,49 @@ const CASES: ReadonlyArray<LoopCase> = [
       prompt_tokens_details: { cached_tokens: 98_000 },
       completion_tokens: 50,
       total_tokens: 104_050,
+    },
+  },
+  {
+    loop: "resolveWebSearchCalls",
+    client: "a Chat client on a Chat model",
+    request: chatRequest(CHAT),
+    finalRound: {
+      prompt_tokens: 104_000,
+      prompt_tokens_details: { cached_tokens: 100_000 },
+      completion_tokens: 50,
+      total_tokens: 104_050,
+    },
+  },
+  {
+    loop: "resolveWebSearchCalls",
+    client: "Claude Code on a Chat-only model",
+    request: messagesRequest(CHAT),
+    finalRound: {
+      input_tokens: 4_000,
+      cache_read_input_tokens: 100_000,
+      cache_creation_input_tokens: 0,
+      output_tokens: 50,
+    },
+  },
+  {
+    loop: "resolveResponsesWebSearchCalls",
+    client: "Claude Code on a Responses-only model",
+    request: messagesRequest(RESPONSES),
+    finalRound: {
+      input_tokens: 4_000,
+      cache_read_input_tokens: 100_000,
+      output_tokens: 50,
+    },
+  },
+  {
+    loop: "resolvePreparedGoogleResponsesWebSearch",
+    client: "a Google client on a Responses-only model",
+    request: googleRequest(RESPONSES),
+    finalRound: {
+      promptTokenCount: 104_000,
+      candidatesTokenCount: 50,
+      totalTokenCount: 104_050,
+      cachedContentTokenCount: 100_000,
     },
   },
 ]

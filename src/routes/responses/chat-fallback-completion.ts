@@ -5,7 +5,6 @@ import type {
 } from "~/services/copilot/create-chat-completions"
 
 import { LocalHTTPError } from "~/lib/error"
-import { captureRequestUsageObserver } from "~/lib/request-usage"
 import {
   buildWebSearchQuery,
   executeWebSearch,
@@ -14,7 +13,7 @@ import {
 import { lastRoundContextUsage } from "~/services/web/context-usage"
 import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
 import { assertNoClientWebCalls, sumUsage } from "~/services/web/tool-output"
-import { ManagedWebUsage } from "~/services/web/tool-usage"
+import { SearchLoopUsage } from "~/services/web/tool-usage"
 
 export const MAX_RESPONSES_WEB_SEARCH_USES = 8
 
@@ -87,13 +86,13 @@ export async function resolvePreparedResponsesWebSearchCalls(options: {
       Math.min(Number(options.maxUses), MAX_RESPONSES_WEB_SEARCH_USES)
     : MAX_RESPONSES_WEB_SEARCH_USES
   // Request accounting counts every round, as in the managed loop.
-  const observed = new ManagedWebUsage("chat", captureRequestUsageObserver())
+  const rounds = new SearchLoopUsage("chat")
   let total: Record<string, unknown> | undefined
 
   while (true) {
     const calls = webSearchCalls(current)
+    rounds.round(current, calls.length)
     if (calls.length > 0 || searchUses > 0) {
-      observed.observe(current.usage, calls.length > 0)
       total = sumUsage(total, current.usage)
       assertNoClientWebCalls(
         current as unknown as Record<string, unknown>,
@@ -139,7 +138,7 @@ export async function resolvePreparedResponsesWebSearchCalls(options: {
       stream: false,
       tool_choice: "auto",
     }
-    observed.nextRound()
+    rounds.next()
     const next = await options.completionFactory(nextPayload, {
       allowCompatibilityRetry: false,
       signal: options.signal,
