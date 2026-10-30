@@ -6,11 +6,7 @@
  * refusal expires so an account that gains long-lived caching uses it again.
  */
 const DEFAULT_CACHE_TTL = "5m"
-const MAX_CACHE_CONTROL_DEPTH = 16
 const REFUSAL_MEMORY_MS = 60 * 60 * 1000
-// Tool inputs, tool schemas and structured-output schemas are data the client
-// sent, not request controls.
-const DATA_KEYS = new Set(["input", "input_schema", "schema"])
 
 // When each refusing account scope (see copilotAccountScope) may ask again.
 const refusalExpiry = new Map<string, number>()
@@ -41,6 +37,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+function records(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter((item) => isRecord(item)) : []
+}
+
 function isExtendedCacheControl(value: unknown): value is {
   ttl: unknown
 } {
@@ -51,20 +51,40 @@ function isExtendedCacheControl(value: unknown): value is {
   )
 }
 
+type CacheControlVisitor = (cacheControl: { ttl: unknown }) => void
+
+function visitControl(
+  owner: Record<string, unknown>,
+  visit: CacheControlVisitor,
+) {
+  if (isExtendedCacheControl(owner.cache_control)) visit(owner.cache_control)
+}
+
+/** A content block's breakpoint, and those of a tool result's own blocks. */
+function visitBlock(
+  block: Record<string, unknown>,
+  visit: CacheControlVisitor,
+) {
+  visitControl(block, visit)
+  if (block.type !== "tool_result") return
+  for (const nested of records(block.content)) visitControl(nested, visit)
+}
+
+/**
+ * Visit only the places Messages reads `cache_control`: the request itself,
+ * system blocks, tools, and message content blocks, including a tool
+ * result's blocks. Tool inputs, schemas and examples are client data and are
+ * never touched.
+ */
 function visitCacheControls(
-  value: unknown,
-  visit: (cacheControl: { ttl: unknown }) => void,
-  depth = 0,
+  body: Record<string, unknown>,
+  visit: CacheControlVisitor,
 ): void {
-  if (depth > MAX_CACHE_CONTROL_DEPTH) return
-  if (Array.isArray(value)) {
-    for (const item of value) visitCacheControls(item, visit, depth + 1)
-    return
-  }
-  if (!isRecord(value)) return
-  if (isExtendedCacheControl(value.cache_control)) visit(value.cache_control)
-  for (const [key, nested] of Object.entries(value)) {
-    if (!DATA_KEYS.has(key)) visitCacheControls(nested, visit, depth + 1)
+  visitControl(body, visit)
+  for (const block of records(body.system)) visitBlock(block, visit)
+  for (const tool of records(body.tools)) visitControl(tool, visit)
+  for (const message of records(body.messages)) {
+    for (const block of records(message.content)) visitBlock(block, visit)
   }
 }
 

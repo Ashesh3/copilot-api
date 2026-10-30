@@ -39,6 +39,7 @@ test("leaves cache_control inside tool inputs and schemas alone", () => {
       {
         name: "record",
         input_schema: { type: "object", properties: { note: toolData } },
+        input_examples: [{ note: toolData }],
       },
     ],
     output_config: {
