@@ -5,17 +5,20 @@ import { Hono } from "hono"
 import { authenticateCodexAccountRequest } from "~/lib/codex-account-identity"
 import {
   codexReasoningOverridesSchema,
-  readCodexReasoningPreference,
-  updateCodexReasoningPreference,
+  createCodexReasoningPreferencesRepository,
 } from "~/lib/storage/codex-reasoning-preferences-repository"
+import { getStorageRuntime } from "~/lib/storage/runtime"
 
 const FEATURE = "model_picker_reasoning_effort_visibility"
 
 async function readSettings(c: Context): Promise<Response> {
   const claims = await authenticateCodexAccountRequest(c)
   if (claims instanceof Response) return claims
+  const repository = createCodexReasoningPreferencesRepository(
+    getStorageRuntime().storage,
+  )
   return c.json({
-    settings: { [FEATURE]: await readCodexReasoningPreference(claims) },
+    settings: { [FEATURE]: await repository.read(claims) },
   })
 }
 
@@ -54,7 +57,10 @@ async function updateSettings(c: Context): Promise<Response> {
   }
   const parsed = codexReasoningOverridesSchema.safeParse(value)
   if (!parsed.success) return invalidPreference(c)
-  const preference = await updateCodexReasoningPreference(
+  const repository = createCodexReasoningPreferencesRepository(
+    getStorageRuntime().storage,
+  )
+  const preference = await repository.update(
     claims,
     parsed.data,
     precondition === "*",

@@ -1,10 +1,9 @@
 import { z } from "zod"
 
 import type { AccountClaims } from "~/lib/codex-account-identity"
-import type { SqlSession } from "~/lib/storage/types"
+import type { SqlSession, Storage } from "~/lib/storage/types"
 
 import { StorageSchemaError } from "~/lib/storage/errors"
-import { getStorageRuntime } from "~/lib/storage/runtime"
 
 // Every effort understood by Desktop 26.1027 is available by default. This is
 // a display preference, never a gateway plan or inference capability filter.
@@ -84,35 +83,34 @@ async function loadPreference(
   return decodeStoredCodexReasoningPreference(row)
 }
 
-export function readCodexReasoningPreference(claims: AccountClaims) {
-  return getStorageRuntime().storage.read(async (session) =>
-    displayPreference(await loadPreference(session, claims)),
-  )
-}
-
-export function updateCodexReasoningPreference(
-  claims: AccountClaims,
-  changes: Overrides,
-  migrate: boolean,
-) {
-  return getStorageRuntime().storage.transaction(async (session) => {
-    const previous = await loadPreference(session, claims)
-    if (migrate && previous !== null) return null
-    const stored: StoredPreference = {
-      overrides:
-        Object.keys(changes).length === 0 ?
-          {}
-        : { ...previous?.overrides, ...changes },
-      source: migrate ? "migrated" : "user",
-    }
-    await session.execute({
-      sql: "INSERT INTO capi_codex_reasoning_preferences(account_id,user_id,overrides_json,source) VALUES(?,?,?,?) ON CONFLICT(account_id,user_id) DO UPDATE SET overrides_json=excluded.overrides_json,source=excluded.source",
-      args: [
-        ...identityArgs(claims),
-        JSON.stringify(stored.overrides),
-        stored.source,
-      ],
-    })
-    return displayPreference(stored)
-  })
+export function createCodexReasoningPreferencesRepository(storage: Storage) {
+  return {
+    read(claims: AccountClaims) {
+      return storage.read(async (session) =>
+        displayPreference(await loadPreference(session, claims)),
+      )
+    },
+    update(claims: AccountClaims, changes: Overrides, migrate: boolean) {
+      return storage.transaction(async (session) => {
+        const previous = await loadPreference(session, claims)
+        if (migrate && previous !== null) return null
+        const stored: StoredPreference = {
+          overrides:
+            Object.keys(changes).length === 0 ?
+              {}
+            : { ...previous?.overrides, ...changes },
+          source: migrate ? "migrated" : "user",
+        }
+        await session.execute({
+          sql: "INSERT INTO capi_codex_reasoning_preferences(account_id,user_id,overrides_json,source) VALUES(?,?,?,?) ON CONFLICT(account_id,user_id) DO UPDATE SET overrides_json=excluded.overrides_json,source=excluded.source",
+          args: [
+            ...identityArgs(claims),
+            JSON.stringify(stored.overrides),
+            stored.source,
+          ],
+        })
+        return displayPreference(stored)
+      })
+    },
+  }
 }
