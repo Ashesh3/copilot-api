@@ -43,6 +43,7 @@ import {
   assertEndpointTranslationSupported,
   createEndpointTranslationError,
 } from "~/lib/error"
+import { reportNonDefaultBehavior } from "~/lib/request-logger"
 import { createNativeMessages } from "~/routes/messages/native-handler"
 import { rewriteUnsupportedAnthropicPrefill } from "~/services/copilot/anthropic-prefill"
 import { createWebSearchAnthropicTool } from "~/services/copilot/mcp-web-search"
@@ -829,6 +830,7 @@ export async function executePreparedResponsesMessagesBridge(options: {
     nativeOptions: options.nativeOptions,
     payload: anthropicPayload,
   })
+  reportDroppedThinking(response, anthropicPayload.model)
   const result = anthropicResponseToResponsesResult(
     response,
     options.nativeOptions.requestedModel ?? options.responseContext.model,
@@ -836,6 +838,30 @@ export async function executePreparedResponsesMessagesBridge(options: {
     { progressUpdates },
   )
   return completeCompactionTrigger(options.responseContext, response, result)
+}
+
+/**
+ * Messages drops a replayed thinking block it cannot verify, for example
+ * after the conversation before it changed, and lists the drop in
+ * `input_transformations`. The request still succeeds, so report the lost
+ * reasoning instead of letting it pass unseen.
+ */
+function reportDroppedThinking(response: AnthropicResponse, model: string) {
+  const transformations = (response as Record<string, unknown>)
+    .input_transformations
+  if (!Array.isArray(transformations)) return
+  const reasons = transformations.flatMap((entry) =>
+    isRecord(entry) && entry.type === "thinking_dropped" ?
+      [typeof entry.reason === "string" ? entry.reason : "unspecified"]
+    : [],
+  )
+  if (reasons.length === 0) return
+  const distinct = [...new Set(reasons)].join(", ")
+  reportNonDefaultBehavior({
+    kind: "thinking_dropped",
+    message: `${model} dropped ${reasons.length} replayed thinking block(s): ${distinct}`,
+    data: { model, blocks: reasons.length, reasons: distinct },
+  })
 }
 
 export async function executeResponsesMessagesBridge(options: {
