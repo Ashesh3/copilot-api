@@ -3,6 +3,7 @@ import type {
   RequestUsageObserver,
 } from "~/lib/request-usage"
 
+import { captureRequestUsageObserver } from "~/lib/request-usage"
 import {
   addUsageTokenCount,
   normalizeUsageTokenCount,
@@ -117,5 +118,39 @@ export class ManagedWebUsage {
     this.completed = combinedUsage(this.completed, this.current)
     this.current = undefined
     this.components = {}
+  }
+}
+
+/**
+ * Request accounting for a gateway search loop outside the managed loop, such
+ * as the older MCP web search loops. Once a round searches, every round counts
+ * toward the request's usage, which then replaces the final round's own usage
+ * when the request is recorded. A response that searched nothing is left to
+ * the route's own accounting.
+ */
+export class SearchLoopUsage {
+  private readonly protocol: WebProtocol
+  private readonly usage: ManagedWebUsage
+
+  constructor(protocol: WebProtocol) {
+    this.protocol = protocol
+    this.usage = new ManagedWebUsage(protocol, captureRequestUsageObserver())
+  }
+
+  /** Counts an upstream response, given how many searches it requested. */
+  round(response: unknown, searches: number): void {
+    const failed =
+      this.protocol === "responses"
+      && isRecord(response)
+      && response.status === "failed"
+    this.usage.observe(
+      failed || !isRecord(response) ? undefined : response.usage,
+      searches > 0,
+    )
+  }
+
+  /** Starts the next round, before the loop sends it. */
+  next(): void {
+    this.usage.nextRound()
   }
 }
