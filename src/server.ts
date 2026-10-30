@@ -21,6 +21,7 @@ import {
 } from "./lib/api-key-guard"
 import { forwardError } from "./lib/error"
 import { inferenceCors } from "./lib/inference-cors"
+import { resolveDoubledMessagesPath } from "./lib/messages-path-alias"
 import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import {
@@ -133,6 +134,20 @@ async function runWithRequestRoutingScopes<T>(
 }
 
 // Global middleware — applied to ALL routes including pre-auth ones
+// Anthropic SDK clients configured with an OpenAI-style ".../v1" base URL
+// request /v1/v1/messages. Dispatch the canonical path from the top, so
+// authentication, routing, web tools, logging and debug capture all see the
+// path they would see for /v1/messages itself.
+server.use("*", async (c, next) => {
+  const canonicalPath = resolveDoubledMessagesPath(c.req.path)
+  if (canonicalPath === undefined) {
+    await next()
+    return
+  }
+  const url = new URL(c.req.url)
+  url.pathname = canonicalPath
+  return await server.fetch(new Request(url.href, c.req.raw))
+})
 server.use("*", storageAdmission)
 server.use("*", statsigProxyMiddleware)
 server.use("*", async (c, next) => {

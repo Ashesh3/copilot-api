@@ -175,6 +175,23 @@ server {
     proxy_pass {{UPSTREAM_URL}};
   }
 
+  # Anthropic SDK clients append /v1/messages to their base URL, so a ".../v1"
+  # base (as Factory Droid's custom Anthropic models use) requests these exact
+  # doubled paths. The application serves them as the Messages endpoints.
+  location = /v1/v1/messages {
+    limit_except POST OPTIONS { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_cache off;
+  }
+
+  location = /v1/v1/messages/count_tokens {
+    limit_except POST OPTIONS { deny all; }
+    proxy_pass {{UPSTREAM_URL}};
+  }
+
   location ~ ^/oauth/(?:authorize|code/(?:success|callback))/?$ {
     limit_except GET POST { deny all; }
     proxy_pass {{UPSTREAM_URL}};

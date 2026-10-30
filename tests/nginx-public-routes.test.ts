@@ -113,6 +113,12 @@ nginxTest.each([
   ["OPTIONS", "/v1/chat/completions"],
   ["OPTIONS", "/v1/responses"],
   ["OPTIONS", "/v1/messages"],
+  ["POST", "/v1/messages"],
+  ["POST", "/v1/messages/count_tokens"],
+  // Anthropic SDK clients configured with a ".../v1" base URL.
+  ["POST", "/v1/v1/messages"],
+  ["OPTIONS", "/v1/v1/messages"],
+  ["POST", "/v1/v1/messages/count_tokens"],
   ["OPTIONS", "/v1/audio/transcriptions"],
   ["OPTIONS", "/v1/decisions"],
   ["OPTIONS", "/v1/images/edits"],
@@ -139,6 +145,11 @@ nginxTest.each([
   ["DELETE", "/v1/models/model-name"],
   ["POST", "/models/model-name:deleteEverything"],
   ["POST", "/v1beta/models/model-name:deleteEverything"],
+  ["GET", "/v1/v1/messages"],
+  ["POST", "/v1/v1/messages/"],
+  ["POST", "/v1/v1/messages/batches"],
+  ["POST", "/v1/v1/chat/completions"],
+  ["POST", "/v1/v1/responses"],
   ["OPTIONS", "/unknown"],
 ] as const)("public ingress retains denial of %s %s", async (method, route) => {
   const response = await fetch(origin + route, {

@@ -189,6 +189,7 @@ test("records typed routing affinity sources and unidentified defaults", async (
     [1401, "telemetry-source-copilot", "copilot_session"],
     [1402, "telemetry-source-codex", "codex_session"],
     [1403, "telemetry-source-claude", "claude_metadata"],
+    [1405, "telemetry-source-droid", "droid_session"],
   ] as const
   const defaultModel = "telemetry-source-default"
   try {
@@ -223,6 +224,7 @@ test("records typed routing affinity sources and unidentified defaults", async (
       claude_metadata: 1,
       codex_metadata: 0,
       codex_thread: 0,
+      droid_session: 1,
       unidentified: 1,
     })
     expect(JSON.stringify(usage)).not.toContain("private-session")

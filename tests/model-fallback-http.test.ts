@@ -514,6 +514,25 @@ test("requests without conversation identity retry independently despite prompt 
   ])
 })
 
+test("a Droid session keeps its fallback by its prompt cache key", async () => {
+  const droid = { "user-agent": "factory-cli/1.0.0" }
+  for (let i = 0; i < 2; i++) {
+    expect(
+      (await post({ prompt_cache_key: "droid-session" }, droid)).status,
+    ).toBe(200)
+  }
+  expect(
+    (await post({ prompt_cache_key: "other-session" }, droid)).status,
+  ).toBe(200)
+  expect(calls.map((call) => call.body.model)).toEqual([
+    "source-model",
+    "target-model",
+    "target-model",
+    "source-model",
+    "target-model",
+  ])
+})
+
 test.each([400, 401, 403, 404, 429, 500, 502, 503])(
   "HTTP %i does not change models",
   async (status) => {

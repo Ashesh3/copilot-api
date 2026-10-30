@@ -837,6 +837,12 @@ async function executeStreamingWebSearchRequest(
           { ...finalResponse, model: options.requestedModel }
         : finalResponse
       setChatCompletionSpanResult(span, response)
+      // Like the buffered path; searched rounds replace it with every round.
+      if (response.usage)
+        setRequestContext(c, {
+          inputTokens: response.usage.prompt_tokens,
+          outputTokens: response.usage.completion_tokens,
+        })
       return streamSSE(c, async (stream) => {
         const adapter = createChatStreamTerminalAdapter({ c, stream })
         stream.onAbort(() => {

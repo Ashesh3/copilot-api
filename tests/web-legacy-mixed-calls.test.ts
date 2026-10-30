@@ -221,6 +221,8 @@ interface ResolverFixture {
     next: Record<string, unknown>,
     maxUses?: number,
   ) => Promise<unknown>
+  /** Usage reported after a search round, when not the final round's own. */
+  searchedUsage?: Record<string, unknown>
 }
 const resolvers: Array<ResolverFixture> = [
   {
@@ -260,6 +262,8 @@ const resolvers: Array<ResolverFixture> = [
   {
     name: "Prepared Chat",
     protocol: "chat",
+    // The final round's prompt, with the completions of both rounds.
+    searchedUsage: { prompt_tokens: 2, completion_tokens: 6, total_tokens: 8 },
     run: (initial, next, maxUses) =>
       resolvePreparedResponsesWebSearchCalls({
         initial: {
@@ -379,11 +383,11 @@ test.each(resolvers)(
 
 test.each(resolvers)(
   "$name keeps pure web results private through final synthesis",
-  async ({ protocol, run }) => {
+  async ({ protocol, run, searchedUsage }) => {
     const final = response(protocol, [])
     expect(
       await run(response(protocol, [toolCall(protocol, "web_search")]), final),
-    ).toEqual(final)
+    ).toEqual(searchedUsage ? { ...final, usage: searchedUsage } : final)
     expect(searches).toBe(1)
     expect(continued).toHaveLength(1)
     expect(JSON.stringify(continued[0])).toContain("private-search-evidence")
