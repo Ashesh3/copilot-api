@@ -427,6 +427,31 @@ bunx --bun @ashsec/copilot-api@latest start --host 127.0.0.1 --claude-code
 The generated command always uses `dummy`. Before running it, replace that value
 with a stored gateway or inference credential.
 
+### Claude desktop
+
+Claude desktop's third-party inference mode can use Copilot API as its gateway.
+Set these managed configuration values, as string values under
+`HKCU\SOFTWARE\Policies\Claude` or `HKLM\SOFTWARE\Policies\Claude` on Windows,
+in a configuration profile on macOS, or in
+`/etc/claude-desktop/managed-settings.json` on Linux. Anthropic's
+[Claude desktop third-party documentation](https://claude.com/docs/third-party/claude-desktop)
+describes each value.
+
+| Value | Setting |
+| --- | --- |
+| `inferenceProvider` | `gateway` |
+| `inferenceGatewayBaseUrl` | `http://127.0.0.1:4141`, without `/v1` |
+| `inferenceCredentialKind` | `static` |
+| `inferenceGatewayApiKey` | A stored gateway or inference credential |
+| `inferenceGatewayAuthScheme` | Optional: `bearer`, the default, or `x-api-key` |
+
+Claude desktop reads `GET /v1/models` and offers only Claude models from it.
+Each listed Claude model carries its family in `anthropic_family_tier`, and the
+newest model of each family is marked `is_family_default`. Claude desktop
+starts Claude Code with those models as its Opus, Sonnet, Haiku, and Fable
+defaults. Its connection test sends a one-token Messages request to a Haiku
+model.
+
 ### Google-compatible clients
 
 Use the Google-compatible route and provide the gateway key through
