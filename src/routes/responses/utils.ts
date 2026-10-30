@@ -94,7 +94,15 @@ export const expandCompactionItems = (payload: ResponsesPayload): void => {
       && !isModelFallbackActive()
       && !isReplayableReasoningState(record.encrypted_content, payload.model)
     ) {
-      const { encrypted_content: _, ...rest } = record
+      const { encrypted_content: state, ...rest } = record
+      // The gateway issued an envelope item's ID; without its envelope the
+      // item would be a reference no upstream can resolve.
+      if (
+        typeof state === "string"
+        && state.startsWith(ANTHROPIC_REASONING_ENVELOPE_PREFIX)
+      ) {
+        delete rest.id
+      }
       return rest as ResponseInputItem
     }
 

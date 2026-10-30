@@ -178,7 +178,11 @@ export function finalizeNativeResponsesRequest(
   return { body, normalizationClasses }
 }
 
-/** Gateway envelopes hold another provider's reasoning, never Copilot state. */
+/**
+ * Gateway envelopes hold another provider's reasoning, never Copilot state.
+ * The gateway also issued the item's ID, so without its envelope the item
+ * would be a reference Copilot cannot resolve; both are removed.
+ */
 function stripForeignReasoningEnvelopes(body: ResponsesWireBody): void {
   if (!Array.isArray(body.input)) return
   for (const item of body.input) {
@@ -190,6 +194,7 @@ function stripForeignReasoningEnvelopes(body: ResponsesWireBody): void {
         || isChatReasoningEnvelope(item.encrypted_content))
     ) {
       Reflect.deleteProperty(item, "encrypted_content")
+      Reflect.deleteProperty(item, "id")
     }
   }
 }
