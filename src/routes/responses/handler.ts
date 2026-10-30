@@ -2283,6 +2283,15 @@ const emitTextDelta = async (
       sequence_number: s.seqNum++,
       type: "response.output_item.added",
     })
+    // Clients that index content parts need the part before its first delta.
+    await writeEvent("response.content_part.added", {
+      content_index: 0,
+      item_id: s.messageItemId,
+      output_index: s.textOutputIndex,
+      part: { type: "output_text", text: "", annotations: [] },
+      sequence_number: s.seqNum++,
+      type: "response.content_part.added",
+    })
   }
 
   s.accumulatedText += content
@@ -2438,6 +2447,15 @@ const emitTextDoneEvents = async (
     sequence_number: s.seqNum++,
     text: s.accumulatedText,
     type: "response.output_text.done",
+  })
+
+  await writeEvent("response.content_part.done", {
+    content_index: 0,
+    item_id: s.messageItemId,
+    output_index: s.textOutputIndex ?? 0,
+    part: { type: "output_text", text: s.accumulatedText, annotations: [] },
+    sequence_number: s.seqNum++,
+    type: "response.content_part.done",
   })
 
   await writeEvent("response.output_item.done", {

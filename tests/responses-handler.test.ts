@@ -505,11 +505,13 @@ test("streams Chat reasoning live and binds its state to the upstream model", as
     "response.reasoning_summary_text.delta",
     "response.reasoning_summary_text.delta",
     "response.output_item.added",
+    "response.content_part.added",
     "response.output_text.delta",
     "response.reasoning_summary_text.done",
     "response.reasoning_summary_part.done",
     "response.output_item.done",
     "response.output_text.done",
+    "response.content_part.done",
     "response.output_item.done",
     "response.completed",
   ])
@@ -529,7 +531,7 @@ test("streams Chat reasoning live and binds its state to the upstream model", as
     id: "rs_resp_chat_reasoning",
     summary: [{ type: "summary_text", text: "Weighing the options." }],
   })
-  expect(events[9]).toMatchObject({ item: response.output[0] })
+  expect(events[10]).toMatchObject({ item: response.output[0] })
   expect(
     readChatReasoningEnvelope(response.output[0].encrypted_content),
   ).toEqual({ model: "chat-only", reasoning_opaque: "complete" })
@@ -565,4 +567,39 @@ test("completes Chat reasoning before the output it produced", async () => {
   expect(
     readChatReasoningEnvelope(response.output[0].encrypted_content),
   ).toEqual({ model: "chat-only", reasoning_opaque: "late-state" })
+})
+
+test("opens the Chat text part before its first delta and closes it", async () => {
+  const { events, stream } = collectEvents()
+
+  await streamChatCompletionsAsResponses(
+    stream,
+    chatStream([
+      chatChunk({ role: "assistant", content: "Hel" }),
+      chatChunk({ content: "lo" }, "stop"),
+      "[DONE]",
+    ]),
+    "chat-only",
+  )
+
+  expect(events.map((event) => event.type)).toEqual([
+    "response.created",
+    "response.output_item.added",
+    "response.content_part.added",
+    "response.output_text.delta",
+    "response.output_text.delta",
+    "response.output_text.done",
+    "response.content_part.done",
+    "response.output_item.done",
+    "response.completed",
+  ])
+  const part = { item_id: "msg_cc_001", output_index: 0, content_index: 0 }
+  expect(events[2]).toMatchObject({
+    ...part,
+    part: { type: "output_text", text: "", annotations: [] },
+  })
+  expect(events[6]).toMatchObject({
+    ...part,
+    part: { type: "output_text", text: "Hello", annotations: [] },
+  })
 })
