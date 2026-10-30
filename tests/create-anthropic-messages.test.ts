@@ -216,7 +216,7 @@ test.each([
   },
 )
 
-test("retries exact native thinking signature failure after stripping only thinking", async () => {
+test("retries exact native thinking signature failure with that thinking as text", async () => {
   queuedResponses.push(
     Response.json(
       {
@@ -268,7 +268,13 @@ test("retries exact native thinking signature failure after stripping only think
     ...source,
     messages: [
       { role: "user", content: "hello" },
-      { role: "assistant", content: [{ type: "text", text: "kept" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "<thinking>\nprivate\n</thinking>" },
+          { type: "text", text: "kept" },
+        ],
+      },
     ],
   })
   expect(
