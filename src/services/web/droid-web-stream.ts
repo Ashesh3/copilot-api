@@ -51,6 +51,14 @@ function carrierProtocol(protocol: WebProtocol): CarrierProtocol {
   return protocol
 }
 
+/**
+ * Whether the gateway answers Droid's own web tools in this request. Droid's
+ * tool-less calls get the usual gateway search and the usual loop instead.
+ */
+export function usesDroidCarriers(prepared: PreparedManagedWebTools): boolean {
+  return [...prepared.managed.values()].some((tool) => tool.droid !== undefined)
+}
+
 /** The calls in a finished round that the gateway answers for Droid. */
 function ownedDroidCalls(
   response: JsonRecord,

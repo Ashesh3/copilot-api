@@ -9,7 +9,10 @@ import type {
 import type { ManagedToolResult, WebToolCall } from "./tool-executor"
 import type { CompletedWebCall } from "./tool-output"
 
-import { completeDroidBufferedRequest } from "./droid-web-stream"
+import {
+  completeDroidBufferedRequest,
+  usesDroidCarriers,
+} from "./droid-web-stream"
 import {
   modelAllowsHostedWebSearch,
   modelAllowsWebTools,
@@ -179,7 +182,7 @@ export async function runManagedWebRequest(
       observedUsage,
       dispatch,
     })
-  if (prepared.context?.droid)
+  if (usesDroidCarriers(prepared))
     return await completeDroidBufferedRequest(options, prepared, {
       first: response,
       dispatch,

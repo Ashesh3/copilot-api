@@ -573,3 +573,80 @@ describe("Droid carrier mode on streamed Messages", () => {
     expect(delta.delta).toMatchObject({ stop_reason: "max_tokens" })
   })
 })
+
+describe("Droid's tool-less calls", () => {
+  const gatewaySearch = {
+    type: "tool_use",
+    id: "toolu_gw",
+    name: "_copilot_web_search",
+    input: { query: "bun 1.4" },
+  }
+
+  test("still run the usual gateway search when streamed", async () => {
+    const payload = {
+      model: "claude-fixture",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "Name this chat" }],
+      stream: true,
+    }
+    let sends = 0
+    let executed = 0
+    const output = await droid(payload, "messages", async () =>
+      collect(
+        await runManagedWebRequest({
+          protocol: "messages",
+          payload,
+          send: async () => {
+            sends++
+            return events(
+              sends === 1 ?
+                messagesRound([gatewaySearch], "tool_use")
+              : messagesRound([{ type: "text", text: "Bun 1.4" }], "end_turn"),
+            )
+          },
+          execute: async () => {
+            executed++
+            return { text: RESULT, isError: false }
+          },
+        }),
+      ),
+    )
+    expect([sends, executed]).toEqual([2, 1])
+    expect([...blocksOf(output).values()]).toEqual([
+      { type: "text", text: "Bun 1.4" },
+    ])
+  })
+
+  test("still run the usual gateway search when buffered", async () => {
+    const payload = { model: "gpt-fixture", input: "Name this chat" }
+    let sends = 0
+    const result = (await droid(payload, "responses", async () =>
+      runManagedWebRequest({
+        protocol: "responses",
+        nativeResponses: true,
+        payload,
+        send: async () => {
+          sends++
+          return {
+            id: `resp_${sends}`,
+            status: "completed",
+            output:
+              sends === 1 ?
+                [
+                  {
+                    type: "function_call",
+                    call_id: "call_gw",
+                    name: "_copilot_web_search",
+                    arguments: '{"query":"bun 1.4"}',
+                  },
+                ]
+              : [answer],
+          }
+        },
+        execute: async () => ({ text: RESULT, isError: false }),
+      }),
+    )) as JsonRecord
+    expect(sends).toBe(2)
+    expect(result.output).toEqual([answer])
+  })
+})

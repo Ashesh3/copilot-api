@@ -7,7 +7,7 @@ import type {
 import type { FinishedStreamRound, StreamPosition } from "./tool-stream-events"
 import type { ManagedWebUsage } from "./tool-usage"
 
-import { finishDroidStreamRound } from "./droid-web-stream"
+import { finishDroidStreamRound, usesDroidCarriers } from "./droid-web-stream"
 import { isRecord, webToolError } from "./tool-context"
 import {
   checkWebContinuationLimit,
@@ -50,7 +50,7 @@ export async function* streamManagedWebRequest(
   let usage: Record<string, unknown> | undefined
   const allOutput: Array<Record<string, unknown>> = []
   // Droid replays carriers, so its rounds may hand off to client tools.
-  const carriers = prepared.context?.droid === true
+  const carriers = usesDroidCarriers(prepared)
   const finish = carriers ? finishDroidStreamRound : finishStreamRound
   for (let round = 0; round < MAX_MANAGED_WEB_ROUNDS; round++) {
     position.usage = usage
