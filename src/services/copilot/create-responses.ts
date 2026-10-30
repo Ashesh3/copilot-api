@@ -13,6 +13,7 @@ import {
 } from "~/lib/model-suffix"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
 import { stripUnsupportedResponsesInputMetadata } from "~/services/copilot/responses-metadata"
+import { omitOutputTokenReplay } from "~/services/copilot/responses-output-replay"
 import {
   claimCompatibilityRetry,
   createRetryBudget,
@@ -591,6 +592,7 @@ const createResponsesCore = async (
       })
   const body = prepared.body
   stripUnsupportedResponsesInputMetadata(body)
+  omitOutputTokenReplay(body)
   omitConfiguredReasoningEffort("responses", body)
 
   // Zero-data retention enforcement
