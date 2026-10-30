@@ -222,3 +222,35 @@ test("emits nothing after downstream abort", async () => {
   await adapter.succeed(() => Promise.resolve())
   expect(output.at(-1)?.type).toBe("content_block_delta")
 })
+
+test("restates an upstream prompt token limit once inside a stream", async () => {
+  const { adapter, output } = createRecordingMessagesAdapter(() => [])
+  const error = new HTTPError(
+    "private status text",
+    Response.json(
+      {
+        error: {
+          message: "prompt token count of 130001 exceeds the limit of 128000",
+          code: "model_max_prompt_tokens_exceeded",
+        },
+      },
+      { status: 400 },
+    ),
+  )
+  await adapter.fail({
+    kind: "thrown",
+    error,
+    inspection: await inspectHttpError(error),
+  })
+
+  expect(output).toEqual([
+    {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "prompt is too long: 130001 tokens > 128000 maximum",
+        code: "model_max_prompt_tokens_exceeded",
+      },
+    },
+  ])
+})

@@ -802,3 +802,34 @@ test("shows a streamed refusal as text", () => {
     },
   ])
 })
+
+test("restates a Responses context overflow failure as prompt-too-long", () => {
+  const state = createResponsesStreamState()
+  const result = translateResponsesStreamEvent(
+    {
+      type: "response.failed",
+      sequence_number: 1,
+      response: {
+        ...createdResponse,
+        status: "failed",
+        error: {
+          code: "context_length_exceeded",
+          message:
+            "Your input exceeds the context window of this model. Please reduce your input and try again.",
+        },
+      },
+    },
+    state,
+  )
+
+  if (result.kind !== "failure") throw new Error("Expected a failure")
+  expect(result.error).toEqual({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message:
+        "prompt is too long: Your input exceeds the context window of this model. Please reduce your input and try again.",
+      code: "context_length_exceeded",
+    },
+  })
+})

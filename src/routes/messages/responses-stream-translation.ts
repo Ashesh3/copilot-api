@@ -15,6 +15,7 @@ import {
   type AnthropicErrorEvent,
   type AnthropicStreamEventData,
 } from "./anthropic-types"
+import { createPromptTooLongError } from "./prompt-too-long"
 import {
   type ResponseRefusalDeltaEvent,
   type TranslatableResponsesStreamEvent,
@@ -755,6 +756,8 @@ function buildReceivedResponsesError(
   if (!error || typeof error.message !== "string") {
     return buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE)
   }
+  const promptTooLong = createPromptTooLongError(error)
+  if (promptTooLong) return promptTooLong
   return {
     type: "error",
     error: {
