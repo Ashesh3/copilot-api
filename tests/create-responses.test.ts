@@ -1974,6 +1974,76 @@ test("returns the prompt limit refusal for a request that is not memory extracti
   expect(requestBodies).toHaveLength(1)
 })
 
+async function postCodexStream(options: {
+  clientMetadata?: Record<string, string>
+}): Promise<Response> {
+  await seedProtocolDatabase()
+  return await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      stream: true,
+      ...(options.clientMetadata ?
+        { client_metadata: options.clientMetadata }
+      : {}),
+      input: [{ type: "message", role: "user", content: "Continue." }],
+    }),
+  })
+}
+
+const CODEX_CLIENT_METADATA = {
+  "x-codex-installation-id": "installation",
+  session_id: "codex-session",
+  thread_id: "codex-thread",
+}
+
+test("answers a Codex stream over the prompt limit with context_length_exceeded", async () => {
+  state.models = responsesCapableModels
+  queuedResponses.push(promptLimitRejection())
+
+  const response = await postCodexStream({
+    clientMetadata: CODEX_CLIENT_METADATA,
+  })
+
+  expect(response.status).toBe(200)
+  expect(response.headers.get("content-type")).toContain("text/event-stream")
+  const body = await response.text()
+  expect(body).toContain("event: response.failed")
+  const data = body
+    .split("\n")
+    .find((line) => line.startsWith("data: "))
+    ?.slice("data: ".length)
+  expect(
+    (JSON.parse(data ?? "{}") as { response?: { error?: unknown } }).response
+      ?.error,
+  ).toEqual({
+    code: "context_length_exceeded",
+    message: "prompt token count of 922500 exceeds the limit of 922000",
+  })
+})
+
+test("keeps other prompt limit refusals and other Codex errors as HTTP errors", async () => {
+  state.models = responsesCapableModels
+  queuedResponses.push(
+    promptLimitRejection(),
+    Response.json(
+      { error: { code: "invalid_request_body", message: "Invalid input" } },
+      { status: 400 },
+    ),
+  )
+
+  const other = await postCodexStream({})
+  const codex = await postCodexStream({ clientMetadata: CODEX_CLIENT_METADATA })
+
+  expect(other.status).toBe(400)
+  expect(codex.status).toBe(400)
+  expect(requestBodies).toHaveLength(2)
+})
+
 test("installs Responses client metadata affinity before provider dispatch", async () => {
   state.models = responsesCapableModels
   for (const clientMetadata of [

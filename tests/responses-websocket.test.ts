@@ -4966,6 +4966,48 @@ describe("responses websocket upstream handling", () => {
     expect(errorFrame.error?.upstream_content_type).toBe("application/json")
   })
 
+  test("answers a Codex turn over the prompt limit with context_length_exceeded", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    const refusal = {
+      error: {
+        code: "model_max_prompt_tokens_exceeded",
+        message: "prompt token count of 272500 exceeds the limit of 272000",
+      },
+    }
+    queuedResponses.push(
+      Response.json(refusal, { status: 400 }),
+      Response.json(refusal, { status: 400 }),
+    )
+    const ws = createTestWebSocket()
+
+    await seedProtocolDatabase()
+    await responsesWebSocket.message(
+      ws,
+      continueTurnFrame({
+        "x-codex-window-id": "thread:0",
+        session_id: "s",
+        thread_id: "t",
+      }),
+    )
+    await responsesWebSocket.message(ws, continueTurnFrame())
+
+    const [codexFrame, otherFrame] = ws.sent.map(
+      (frame) =>
+        JSON.parse(frame) as {
+          type?: string
+          response?: { error?: { code?: string; message?: string } }
+        },
+    )
+    expect(codexFrame.type).toBe("response.failed")
+    expect(codexFrame.response?.error).toEqual({
+      code: "context_length_exceeded",
+      message: refusal.error.message,
+    })
+    expect(otherFrame.type).toBe("error")
+  })
+
   test("emits one Responses failure family when a native source ends after a delta", async () => {
     state.models = responsesCapableModels
     queuedResponses.push(
@@ -6104,6 +6146,22 @@ function createInvalidRequestBodyResponse(message: string): Response {
     { error: { code: "invalid_request_body", message } },
     { status: 400 },
   )
+}
+
+function continueTurnFrame(clientMetadata?: Record<string, string>): string {
+  return JSON.stringify({
+    type: "response.create",
+    model: "gpt-5.4",
+    ...(clientMetadata ? { client_metadata: clientMetadata } : {}),
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Continue." }],
+      },
+    ],
+    tools: [],
+  })
 }
 
 function createResponsesSseResponse(

@@ -38,6 +38,7 @@ import {
   isAbortError,
   isHTTPError,
   inspectHttpError,
+  reportHttpError,
 } from "~/lib/error"
 import { forceResponsesSystemPrompt } from "~/lib/forced-system-prompt"
 import { createHandlerLogger } from "~/lib/logger"
@@ -145,6 +146,11 @@ import {
   hasCompactionTrigger,
   toRemoteCompactionResult,
 } from "./compaction-trigger"
+import {
+  createContextOverflowFailedEvent,
+  isCodexResponsesRequest,
+  readCodexContextOverflow,
+} from "./context-overflow-response"
 import {
   prepareResponsesCandidates,
   selectResponsesCandidate,
@@ -835,29 +841,49 @@ export const handleResponses = async (c: Context) => {
 
   const model = parseModelSuffix(sourcePayload.model).baseModel
 
-  return await Sentry.startSpan(
-    createSentryInvokeAgentSpanOptions(model, conversationId),
-    async () => {
-      return await runWithModelFallback(
-        {
-          headers: c.req.raw.headers,
-          payload: sourcePayload,
-          signal: c.req.raw.signal,
-        },
-        async () => {
-          const response = await handleResponsesInner(c, {
-            legacyPayload: structuredClone(payload),
-            nativeOptions,
-            preparedSource: structuredClone(preparedSource),
-          })
-          return applyResponsesModelFallbackNotice(
-            response,
-            captureModelFallbackNotice(),
-          )
-        },
-      )
-    },
-  )
+  try {
+    return await Sentry.startSpan(
+      createSentryInvokeAgentSpanOptions(model, conversationId),
+      async () => {
+        return await runWithModelFallback(
+          {
+            headers: c.req.raw.headers,
+            payload: sourcePayload,
+            signal: c.req.raw.signal,
+          },
+          async () => {
+            const response = await handleResponsesInner(c, {
+              legacyPayload: structuredClone(payload),
+              nativeOptions,
+              preparedSource: structuredClone(preparedSource),
+            })
+            return applyResponsesModelFallbackNotice(
+              response,
+              captureModelFallbackNotice(),
+            )
+          },
+        )
+      },
+    )
+  } catch (error) {
+    const overflow =
+      sourcePayload.stream === true && isCodexResponsesRequest(sourcePayload) ?
+        await readCodexContextOverflow(error)
+      : undefined
+    if (!overflow) throw error
+    reportHttpError(c, overflow.inspection)
+    return streamSSE(c, async (stream) => {
+      await stream.writeSSE({
+        event: "response.failed",
+        data: JSON.stringify(
+          createContextOverflowFailedEvent({
+            message: overflow.message,
+            model: sourcePayload.model,
+          }),
+        ),
+      })
+    })
+  }
 }
 
 async function parseResponsesRequestBody(c: Context): Promise<unknown> {

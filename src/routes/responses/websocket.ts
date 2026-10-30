@@ -108,6 +108,11 @@ import {
 } from "./chat-fallback-completion"
 import { hasCompactionTrigger } from "./compaction-trigger"
 import {
+  createContextOverflowFailedEvent,
+  isCodexResponsesRequest,
+  readCodexContextOverflow,
+} from "./context-overflow-response"
+import {
   prepareResponsesCandidates,
   type ResponsesEndpointCandidate,
   selectResponsesCandidate,
@@ -424,15 +429,19 @@ async function handleResponsesWebSocketMessage(
       await failWebSocketTurn(ws, turn, { kind: "source_ended" })
     }
   } catch (error) {
-    await handleResponsesWebSocketError(ws, turn, error)
+    await handleResponsesWebSocketError(ws, turn, {
+      error,
+      codex: isCodexResponsesRequest(parsedPayload),
+    })
   }
 }
 
 async function handleResponsesWebSocketError(
   ws: ResponsesWebSocketState,
   turn: ResponsesWebSocketTurn,
-  error: unknown,
+  failure: { error: unknown; codex: boolean },
 ) {
+  const { error } = failure
   const terminal = await classifyWebSocketTerminal(error, turn)
   const errorInspection = terminal.errorInspection
   if (
@@ -474,8 +483,22 @@ async function handleResponsesWebSocketError(
     code: normalized.code,
     status: terminal.status,
   })
+  // Codex compacts only on a failed response, not on an error frame.
+  const overflow =
+    failure.codex ? await readCodexContextOverflow(error) : undefined
   try {
-    sendWebSocketError(ws, normalized)
+    if (overflow) {
+      ws.send(
+        JSON.stringify(
+          createContextOverflowFailedEvent({
+            message: overflow.message,
+            model: turn.requestedModel,
+          }),
+        ),
+      )
+    } else {
+      sendWebSocketError(ws, normalized)
+    }
   } catch {
     // Client already disconnected, nothing to do
   }
