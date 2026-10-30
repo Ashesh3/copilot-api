@@ -593,7 +593,11 @@ test("opens the Chat text part before its first delta and closes it", async () =
     "response.output_item.done",
     "response.completed",
   ])
-  const part = { item_id: "msg_cc_001", output_index: 0, content_index: 0 }
+  const part = {
+    item_id: "msg_chat_reasoning",
+    output_index: 0,
+    content_index: 0,
+  }
   expect(events[2]).toMatchObject({
     ...part,
     part: { type: "output_text", text: "", annotations: [] },
@@ -734,4 +738,24 @@ test("holds interleaved Chat thinking once the answer started", async () => {
     type: "message",
     content: [{ type: "output_text", text: "Answer part. More." }],
   })
+})
+
+test("gives each streamed Chat message its own ID", async () => {
+  const messageIds: Array<unknown> = []
+  for (const id of ["chat_first", "chat_second", undefined, undefined]) {
+    const { events, stream } = collectEvents()
+    await streamChatCompletionsAsResponses(
+      stream,
+      chatStream([{ ...chatChunk({ content: "Hi" }, "stop"), id }, "[DONE]"]),
+      "chat-only",
+    )
+    const response = events.at(-1)?.response as {
+      output: Array<{ id: string }>
+    }
+    messageIds.push(response.output[0]?.id)
+  }
+
+  expect(messageIds.slice(0, 2)).toEqual(["msg_chat_first", "msg_chat_second"])
+  expect(new Set(messageIds).size).toBe(4)
+  for (const id of messageIds) expect(String(id)).toMatch(/^msg_[^_]/u)
 })

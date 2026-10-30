@@ -3,6 +3,7 @@ import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
+import { randomUUID } from "node:crypto"
 
 import type { Model } from "~/services/copilot/get-models"
 
@@ -1722,22 +1723,34 @@ const createCCStreamState = (options: {
   readonly model: string
   readonly reasoningModel: string
   readonly toolMap?: ResponsesChatToolMap
-}): CCStreamState => ({
-  seqNum: 0,
-  responseId: "resp_cc",
-  createdAt: Math.floor(Date.now() / 1000),
-  resolvedModel: options.model,
-  accumulatedText: "",
-  textItemAdded: false,
-  messageItemId: "msg_cc_001",
-  functionCalls: new Map(),
-  nextOutputIndex: 0,
-  usage: {},
-  responseCreated: false,
-  outputStarted: false,
-  reasoningModel: options.reasoningModel,
-  ...(options.toolMap ? { toolMap: options.toolMap } : {}),
-})
+}): CCStreamState => {
+  // Chat chunks carry an ID; without one, each response still gets its own.
+  const responseId = `resp_cc_${randomUUID().replaceAll("-", "")}`
+  return {
+    seqNum: 0,
+    responseId,
+    createdAt: Math.floor(Date.now() / 1000),
+    resolvedModel: options.model,
+    accumulatedText: "",
+    textItemAdded: false,
+    messageItemId: ccMessageItemId(responseId),
+    functionCalls: new Map(),
+    nextOutputIndex: 0,
+    usage: {},
+    responseCreated: false,
+    outputStarted: false,
+    reasoningModel: options.reasoningModel,
+    ...(options.toolMap ? { toolMap: options.toolMap } : {}),
+  }
+}
+
+/**
+ * Like the buffered `msg_<chat id>`: a message ID that repeated on every turn
+ * would replay as duplicate input IDs once a thread moves to native Responses.
+ */
+function ccMessageItemId(responseId: string): string {
+  return `msg_${responseId.replace(/^resp_/u, "")}`
+}
 
 /** Restore a translated Chat tool call to the identity the client declared. */
 function restoreCCToolCall(
@@ -2278,6 +2291,7 @@ const emitTextDelta = async (
   if (!s.textItemAdded) {
     s.textItemAdded = true
     s.outputStarted = true
+    s.messageItemId = ccMessageItemId(s.responseId)
     s.textOutputIndex = s.nextOutputIndex++
     await writeEvent("response.output_item.added", {
       item: {

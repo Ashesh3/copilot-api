@@ -909,10 +909,18 @@ describe("Codex tool calls in translated Chat responses", () => {
     })
     const events = parseSse(await response.text())
 
+    const messageId = (
+      events.find(
+        (event) =>
+          event.type === "response.output_item.added"
+          && (event.item as OutputItem | undefined)?.type === "message",
+      )?.item as OutputItem | undefined
+    )?.id
+    expect(messageId).toStartWith("msg_")
     const messageIndexes = events
       .filter(
         (event) =>
-          event.item_id === "msg_cc_001"
+          event.item_id === messageId
           || (event.item as OutputItem | undefined)?.type === "message",
       )
       .map((event) => event.output_index)
