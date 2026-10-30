@@ -34,6 +34,14 @@ export function isListedModel(model: string): boolean {
   return listed.has(model) || listed.has(normalizeModelName(model))
 }
 
+/** Whether a failed response is Copilot refusing the requested model. */
+export function rejectsModelAsUnsupported(
+  status: number,
+  body: string,
+): boolean {
+  return status >= 400 && NOT_SUPPORTED.test(body)
+}
+
 function requestedModel(path: string, body: unknown): string | undefined {
   if (typeof body === "string") {
     try {

@@ -6,6 +6,7 @@ import { state } from "~/lib/state"
 
 import {
   recordLiveModelResponse,
+  rejectsModelAsUnsupported,
   reportSkippedLiveTests,
   runLiveTest,
   skipUnlessListed,
@@ -242,4 +243,24 @@ test("reports nothing when no test was skipped", async () => {
   reportSkippedLiveTests()
   expect(warnings).toEqual([])
   expect(annotations).toEqual([])
+})
+
+test("tells a refused model apart from other failures", () => {
+  const refusal = JSON.stringify({
+    error: {
+      code: "model_not_supported",
+      message: "The requested model is not supported.",
+    },
+  })
+
+  expect(rejectsModelAsUnsupported(400, refusal)).toBe(true)
+  expect(rejectsModelAsUnsupported(200, refusal)).toBe(false)
+  expect(
+    rejectsModelAsUnsupported(
+      400,
+      JSON.stringify({
+        error: { message: "prompt_cache_options is not supported" },
+      }),
+    ),
+  ).toBe(false)
 })

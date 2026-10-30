@@ -6,8 +6,14 @@ import { state } from "~/lib/state"
 import { executeWebSearch } from "~/services/copilot/mcp-web-search"
 
 import { isGithubOrigin } from "../helpers/github-origin"
-import { test } from "./live-models"
+import { rejectsModelAsUnsupported, test } from "./live-models"
+import { rankToolCapableResponsesModels } from "./model-candidates"
 import { initializeTestState, postJSON, useIntegrationFixture } from "./setup"
+
+// Tried before the rest of the catalog. Copilot can list a model it then
+// refuses, so a refused model gives way to the next candidate.
+const PREFERRED_RESPONSES_MODELS = ["gpt-5.3-codex"]
+const RESPONSES_MODEL_ATTEMPTS = 3
 
 const originalFetch = globalThis.fetch
 const destinations: Array<{ host: string; path: string; status: number }> = []
@@ -109,27 +115,29 @@ test("live default web search searches and opens pages entirely on GitHub", asyn
 }, 180_000)
 
 test("live Responses clients open pages on GitHub without client configuration", async () => {
-  const candidates =
-    state.models?.data.filter(
-      (entry) =>
-        entry.supported_endpoints?.includes("/responses")
-        && entry.capabilities.supports.tool_calls === true,
-    ) ?? []
-  const selected =
-    candidates.find((entry) => entry.id === "gpt-5.5") ?? candidates.at(0)
-  if (!selected)
+  const candidates = rankToolCapableResponsesModels(
+    state.models?.data ?? [],
+    PREFERRED_RESPONSES_MODELS,
+  ).slice(0, RESPONSES_MODEL_ATTEMPTS)
+  if (candidates.length === 0)
     throw new Error(
       "Live default-web-tools verification requires a tool-capable Responses model",
     )
-  const response = await postJSON("/v1/responses", {
-    model: selected.id,
-    input:
-      "Use the provided web search function to open https://example.com/ now. Report its title and opening sentence based on the opened page. Do not answer from memory. Keep your answer under 60 words.",
-    max_output_tokens: 2048,
-    stream: false,
-  })
-  const body = await response.text()
-  expect(response.status).toBe(200)
+  let status = 0
+  let body = ""
+  for (const candidate of candidates) {
+    const response = await postJSON("/v1/responses", {
+      model: candidate.id,
+      input:
+        "Use the provided web search function to open https://example.com/ now. Report its title and opening sentence based on the opened page. Do not answer from memory. Keep your answer under 60 words.",
+      max_output_tokens: 2048,
+      stream: false,
+    })
+    status = response.status
+    body = await response.text()
+    if (!rejectsModelAsUnsupported(status, body)) break
+  }
+  expect(status).toBe(200)
   expect(
     destinations.some(
       (item) => item.path === "/responses" && item.status === 200,
