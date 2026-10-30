@@ -1,11 +1,12 @@
 import "./data-dir"
 
-import { afterEach, beforeEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect } from "bun:test"
 
 import { state } from "~/lib/state"
 import { executeWebSearch } from "~/services/copilot/mcp-web-search"
 
 import { isGithubOrigin } from "../helpers/github-origin"
+import { test } from "./live-models"
 import { initializeTestState, postJSON, useIntegrationFixture } from "./setup"
 
 const originalFetch = globalThis.fetch

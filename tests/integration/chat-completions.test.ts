@@ -1,7 +1,8 @@
 import "./data-dir"
 
-import { describe, test, expect, beforeAll } from "bun:test"
+import { describe, expect, beforeAll } from "bun:test"
 
+import { test } from "./live-models"
 import {
   useIntegrationFixture,
   initializeTestState,
