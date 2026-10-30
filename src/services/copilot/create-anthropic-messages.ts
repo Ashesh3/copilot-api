@@ -33,6 +33,12 @@ import {
   rememberDisabledThinkingRejection,
 } from "./disabled-thinking-support"
 import {
+  hasExtendedCacheTtl,
+  refusesExtendedCacheTtl,
+  rememberExtendedCacheTtlRefusal,
+  removeExtendedCacheTtl,
+} from "./extended-cache-ttl"
+import {
   createMissingAnthropicMessagesMaxTokensError,
   normalizeAnthropicMessagesRequest,
   prepareAnthropicMessagesRequest,
@@ -278,6 +284,9 @@ async function retryAnthropicCompatibility(
   if (decision.kind === "unsupported_disabled_thinking") {
     rememberDisabledThinkingRejection(options.modelId)
   }
+  if (decision.kind === "unsupported_extended_cache_ttl") {
+    rememberExtendedCacheTtlRefusal()
+  }
   if (
     decision.kind === "none"
     || options.options?.allowCompatibilityRetry === false
@@ -314,6 +323,16 @@ function omitLearnedDisabledThinking(
   return adapted
 }
 
+function omitRefusedExtendedCacheTtl(
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!refusesExtendedCacheTtl() || !hasExtendedCacheTtl(body)) return body
+  const adapted = structuredClone(body)
+  removeExtendedCacheTtl(adapted)
+  consola.debug("Sent the default prompt cache lifetime after a refusal")
+  return adapted
+}
+
 async function dispatchAnthropicMessages(
   options: AnthropicDispatchOptions,
   reportProcessedPayload: (payload: Record<string, unknown>) => void,
@@ -324,9 +343,11 @@ async function dispatchAnthropicMessages(
     options.options?.compaction ?
       fitAnthropicCompactionPayload(preparedBody)
     : null
-  const body = omitLearnedDisabledThinking(
-    fitted?.payload ?? preparedBody,
-    options.modelId,
+  const body = omitRefusedExtendedCacheTtl(
+    omitLearnedDisabledThinking(
+      fitted?.payload ?? preparedBody,
+      options.modelId,
+    ),
   )
   omitConfiguredReasoningEffort("messages", body, [options.modelId])
   if (fitted?.reduced) {

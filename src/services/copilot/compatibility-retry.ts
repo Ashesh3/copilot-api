@@ -1,3 +1,8 @@
+import {
+  hasExtendedCacheTtl,
+  removeExtendedCacheTtl,
+} from "./extended-cache-ttl"
+
 export type CompatibilityRetryEndpoint =
   | "/chat/completions"
   | "/responses"
@@ -12,6 +17,7 @@ export type CompatibilityRetryKind =
   | "unsupported_forced_tool_choice"
   | "unsupported_disabled_thinking"
   | "unsupported_fallbacks"
+  | "unsupported_extended_cache_ttl"
 
 export type CompatibilityRetryDecision =
   | { kind: "none" }
@@ -32,6 +38,7 @@ const UNSUPPORTED_DISABLED_THINKING_MESSAGE =
   '"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
 const UNSUPPORTED_FALLBACKS_MESSAGE =
   "fallbacks: Extra inputs are not permitted"
+const UNSUPPORTED_EXTENDED_CACHE_TTL_PREFIX = "Long-lived prompt caching"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -204,6 +211,46 @@ function isUnsupportedFallbacksError(
   )
 }
 
+function isUnsupportedExtendedCacheTtlError(
+  error: Record<string, unknown>,
+): boolean {
+  return (
+    typeof error.message === "string"
+    && error.message.startsWith(UNSUPPORTED_EXTENDED_CACHE_TTL_PREFIX)
+  )
+}
+
+/** Native Messages controls that a retry can drop without changing content. */
+function classifyNativeControlRetry(
+  options: {
+    body: Record<string, unknown>
+    endpoint: CompatibilityRetryEndpoint
+    parsed: Record<string, unknown>
+  },
+  error: Record<string, unknown>,
+): CompatibilityRetryDecision | undefined {
+  if (options.endpoint !== "/v1/messages") return undefined
+  if (
+    isUnsupportedFallbacksError(options.parsed, error)
+    && hasOwn(options.body, "fallbacks")
+  ) {
+    return {
+      kind: "unsupported_fallbacks",
+      normalize: removeUnsupportedFallbacks,
+    }
+  }
+  if (
+    isUnsupportedExtendedCacheTtlError(error)
+    && hasExtendedCacheTtl(options.body)
+  ) {
+    return {
+      kind: "unsupported_extended_cache_ttl",
+      normalize: removeExtendedCacheTtl,
+    }
+  }
+  return undefined
+}
+
 // Closed decision tables naturally branch once per permitted retry class.
 // eslint-disable-next-line complexity
 function classifyParsedCompatibilityRetry(options: {
@@ -213,16 +260,8 @@ function classifyParsedCompatibilityRetry(options: {
 }): CompatibilityRetryDecision {
   if (!isRecord(options.parsed.error)) return { kind: "none" }
   const error = options.parsed.error
-  if (
-    options.endpoint === "/v1/messages"
-    && isUnsupportedFallbacksError(options.parsed, error)
-    && hasOwn(options.body, "fallbacks")
-  ) {
-    return {
-      kind: "unsupported_fallbacks",
-      normalize: removeUnsupportedFallbacks,
-    }
-  }
+  const nativeControl = classifyNativeControlRetry(options, error)
+  if (nativeControl) return nativeControl
   if (
     options.endpoint === "/v1/messages"
     && error.type === "invalid_request_error"
