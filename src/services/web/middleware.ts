@@ -1,8 +1,17 @@
 import type { MiddlewareHandler } from "hono"
 
+import { isDroidRequest } from "~/lib/droid-client"
 import { readResponsesRequestJson } from "~/routes/responses/request-json"
 
+import type { WebProtocol } from "./tool-context"
+
 import { isRecord, runWithWebTools } from "./tool-context"
+
+function clientProtocol(path: string): WebProtocol | undefined {
+  if (/^\/(?:v1\/)?responses\/?$/.test(path)) return "responses"
+  if (/^\/(?:v1\/)?messages\/?$/.test(path)) return "messages"
+  return /^\/(?:v1\/)?chat\/completions\/?$/.test(path) ? "chat" : undefined
+}
 
 export const webToolsMiddleware: MiddlewareHandler = async (c, next) => {
   const path = new URL(c.req.url).pathname
@@ -25,5 +34,8 @@ export const webToolsMiddleware: MiddlewareHandler = async (c, next) => {
     await next()
     return
   }
-  await runWithWebTools(payload, next)
+  await runWithWebTools(payload, next, {
+    droid: isDroidRequest(c.req.raw.headers),
+    protocol: clientProtocol(path),
+  })
 }

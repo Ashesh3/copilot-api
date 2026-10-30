@@ -519,6 +519,7 @@ const EMPTY_AFFINITY_SOURCES: RoutingAffinitySources = {
   claude_metadata: 0,
   codex_metadata: 0,
   codex_thread: 0,
+  droid_session: 0,
   unidentified: 0,
 }
 
@@ -537,6 +538,7 @@ function AccountBalance({ data }: { data: RoutingTelemetrySnapshot }) {
     ["claude_metadata", "Claude metadata"],
     ["codex_metadata", "Codex metadata"],
     ["codex_thread", "Codex thread"],
+    ["droid_session", "Droid session"],
     ["unidentified", "Unidentified"],
   ] as const
   return (

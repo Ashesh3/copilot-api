@@ -60,17 +60,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+function isReasoningStateItem(item: unknown): item is ReasoningStateItem {
+  return (
+    isRecord(item)
+    && item.type === "reasoning"
+    && typeof item.encrypted_content === "string"
+    && item.encrypted_content.length > 0
+  )
+}
+
 function reasoningStateItems(
   body: Record<string, unknown>,
 ): Array<ReasoningStateItem> {
   if (!Array.isArray(body.input)) return []
-  return body.input.filter(
-    (item): item is ReasoningStateItem =>
-      isRecord(item)
-      && item.type === "reasoning"
-      && typeof item.encrypted_content === "string"
-      && item.encrypted_content.length > 0,
-  )
+  return body.input.filter((item) => isReasoningStateItem(item))
 }
 
 function fingerprint(state: string): string {
@@ -173,15 +176,53 @@ export function rememberRejectedReasoningState(
   }
 }
 
+function rememberVerifiableState(account: string, state: string): void {
+  const key = accountStateKey(account, fingerprint(state))
+  rejectedReasoningState.delete(key)
+  remember(acceptedReasoningState, MAX_REMEMBERED_ACCEPTANCES, key)
+}
+
 /** Note the state an account accepted, so a later refusal does not blame it. */
 export function rememberAcceptedReasoningState(
   body: Record<string, unknown>,
   account: string,
 ): void {
-  for (const item of reasoningStateItems(body)) {
-    const key = accountStateKey(account, fingerprint(item.encrypted_content))
-    rejectedReasoningState.delete(key)
-    remember(acceptedReasoningState, MAX_REMEMBERED_ACCEPTANCES, key)
+  for (const item of reasoningStateItems(body))
+    rememberVerifiableState(account, item.encrypted_content)
+}
+
+/**
+ * Note the state an account issued in its output. That account can verify it
+ * when the state is replayed, so the refusal of other state replayed beside it
+ * neither removes nor blames it, even on its first replay.
+ */
+export function rememberIssuedReasoningState(
+  output: unknown,
+  account: string,
+): void {
+  if (!Array.isArray(output)) return
+  for (const item of output)
+    if (isReasoningStateItem(item))
+      rememberVerifiableState(account, item.encrypted_content)
+}
+
+/** Note the state an account issued in one streamed Responses event. */
+export function rememberIssuedReasoningStateEvent(
+  data: string | undefined,
+  account: string,
+): void {
+  if (!data?.includes('"encrypted_content"')) return
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(data) as unknown
+  } catch {
+    return
+  }
+  if (!isRecord(parsed)) return
+  if (parsed.type === "response.output_item.done") {
+    rememberIssuedReasoningState([parsed.item], account)
+  } else if (isRecord(parsed.response)) {
+    rememberIssuedReasoningState(parsed.response.output, account)
   }
 }
 

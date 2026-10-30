@@ -111,7 +111,7 @@ import { hasCompactionTrigger } from "./compaction-trigger"
 import {
   createContextOverflowFailedEvent,
   isCodexResponsesRequest,
-  readCodexContextOverflow,
+  readUpstreamContextOverflow,
 } from "./context-overflow-response"
 import {
   prepareResponsesCandidates,
@@ -428,6 +428,7 @@ async function handleResponsesWebSocketMessage(
                 ...(reviewModel ? { model: "codex-auto-review" } : {}),
               },
               execute,
+              { protocol: "responses" },
             ),
         )
       }),
@@ -492,7 +493,7 @@ async function handleResponsesWebSocketError(
   })
   // Codex compacts only on a failed response, not on an error frame.
   const overflow =
-    failure.codex ? await readCodexContextOverflow(error) : undefined
+    failure.codex ? await readUpstreamContextOverflow(error) : undefined
   try {
     if (overflow) {
       ws.send(

@@ -13,6 +13,7 @@ import {
 } from "~/lib/plain-data-snapshot"
 import { isChatReasoningEnvelope } from "~/routes/responses/chat-reasoning-provenance"
 import { ANTHROPIC_REASONING_ENVELOPE_PREFIX } from "~/routes/responses/messages-reasoning-provenance"
+import { expandDroidResponsesCarriers } from "~/services/web/droid-web-protocol"
 import { withoutLegacyWebResults } from "~/services/web/legacy-history"
 
 import type { ResponseInputMessage, ResponsesPayload } from "./create-responses"
@@ -106,7 +107,9 @@ export function finalizeResponsesRequest(
 ): PreparedResponsesRequest {
   const prepared = prepareLegacyResponsesRequest(payload)
   if (Array.isArray(prepared.body.input))
-    prepared.body.input = withoutLegacyWebResults(prepared.body.input)
+    prepared.body.input = expandDroidResponsesCarriers(
+      withoutLegacyWebResults(prepared.body.input),
+    )
   stripForeignReasoningEnvelopes(prepared.body)
   if (
     shouldFinalizeResponsesReasoning(prepared.body, options)
@@ -139,7 +142,9 @@ export function finalizeNativeResponsesRequest(
   }
   const body = structuredClone(sourceSnapshot) as ResponsesWireBody
   if (Array.isArray(body.input))
-    body.input = withoutLegacyWebResults(body.input)
+    body.input = expandDroidResponsesCarriers(
+      withoutLegacyWebResults(body.input),
+    )
   const normalizationClasses = [...prepared.normalizationClasses]
   body.model = options.model
   body.store = false
@@ -294,7 +299,9 @@ export function prepareResponsesRequest(
   }
   const source = structuredClone(sourceSnapshot)
   if (Array.isArray(source.input))
-    source.input = withoutLegacyWebResults(source.input)
+    source.input = expandDroidResponsesCarriers(
+      withoutLegacyWebResults(source.input),
+    )
   source.store = false
   return { source, normalizationClasses }
 }

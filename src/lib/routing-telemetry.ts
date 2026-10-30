@@ -163,6 +163,7 @@ export interface RoutingAffinitySources {
   claude_metadata: number
   codex_metadata: number
   codex_thread: number
+  droid_session: number
   unidentified: number
 }
 
@@ -292,6 +293,7 @@ function emptyAffinitySources(): RoutingAffinitySources {
     claude_metadata: 0,
     codex_metadata: 0,
     codex_thread: 0,
+    droid_session: 0,
     unidentified: 0,
   }
 }
@@ -303,6 +305,7 @@ const VALID_AFFINITY_SOURCES = new Set<RoutingAffinitySource>([
   "claude_metadata",
   "codex_metadata",
   "codex_thread",
+  "droid_session",
 ])
 
 function emptyOutcomes(): RoutingOutcomeCounts {
@@ -776,6 +779,7 @@ function aggregateBuckets(source: ReadonlyArray<MinuteBucket>): MinuteBucket {
       "claude_metadata",
       "codex_metadata",
       "codex_thread",
+      "droid_session",
       "unidentified",
     ] as const) {
       aggregate.affinitySources[source] += bucket.affinitySources[source]

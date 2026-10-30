@@ -385,7 +385,7 @@ describe("compatibility retry classifier", () => {
     expect(await response.text()).toContain("opaque")
   })
 
-  test("strips only assistant thinking blocks for exact native Messages errors", async () => {
+  test("rewrites unverified assistant thinking as text for exact native Messages errors", async () => {
     const body = {
       model: "claude",
       messages: [
@@ -426,6 +426,7 @@ describe("compatibility retry classifier", () => {
         {
           role: "assistant",
           content: [
+            { type: "text", text: "<thinking>\nsecret\n</thinking>" },
             {
               type: "text",
               text: "kept",
