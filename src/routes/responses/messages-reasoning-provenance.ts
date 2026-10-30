@@ -5,6 +5,7 @@ import type {
 
 export const ANTHROPIC_REASONING_ENVELOPE_PREFIX = "capi_anthropic_v1:"
 const MAX_ENVELOPE_LENGTH = 1024 * 1024
+const CLAUDE_VARIANT_SUFFIX = /-(?:fast|1m|\d{8})$/u
 
 type ReasoningBlock = AnthropicThinkingBlock | AnthropicRedactedThinkingBlock
 
@@ -16,6 +17,34 @@ export interface AnthropicReasoningEnvelope {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/**
+ * The Anthropic model behind a model ID. Thinking is bound to the model that
+ * produced it, but one Claude model has several IDs: Anthropic's dashed
+ * version, a dated snapshot, and the fast-mode and 1M-context variants all
+ * run the same model, so each can verify the others' thinking. Other IDs are
+ * compared as given.
+ */
+export function anthropicReasoningModelIdentity(model: string): string {
+  let identity = model.trim().toLowerCase()
+  if (!identity.startsWith("claude-")) return model
+  while (CLAUDE_VARIANT_SUFFIX.test(identity)) {
+    identity = identity.replace(CLAUDE_VARIANT_SUFFIX, "")
+  }
+  return identity.replaceAll(/(?<!\d)(\d)-(\d)(?!\d)/gu, "$1.$2")
+}
+
+/** Whether thinking produced by one model can be replayed to another. */
+export function sharesAnthropicReasoningModel(
+  producer: string,
+  consumer: string,
+): boolean {
+  return (
+    producer === consumer
+    || anthropicReasoningModelIdentity(producer)
+      === anthropicReasoningModelIdentity(consumer)
+  )
 }
 
 function readBlock(value: unknown): ReasoningBlock | undefined {
@@ -91,7 +120,8 @@ export function readAnthropicReasoningEnvelope(
     !isRecord(parsed)
     || typeof parsed.model !== "string"
     || !parsed.model
-    || (model !== undefined && parsed.model !== model)
+    || (model !== undefined
+      && !sharesAnthropicReasoningModel(parsed.model, model))
     || !Array.isArray(parsed.blocks)
     || parsed.blocks.length === 0
   ) {
