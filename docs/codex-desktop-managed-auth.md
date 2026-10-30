@@ -60,6 +60,33 @@ describe the absence of a hosted billing subscription; `account.plan_type`
 still comes from the managed identity. Omitting the objects can produce
 "ChatGPT hit a snag" on startup even though "Try again" appears to recover.
 
+## Reasoning preferences in Desktop 26.1027
+
+Desktop 26.1027 reads `settings.model_picker_reasoning_effort_visibility`
+from `GET /settings/user`. If this request fails, its signed-in picker falls
+back to Low through Extra High and disables the preference control even when
+`config.toml` and the model catalog include Max and Ultra.
+
+The gateway supports this read and `PATCH /settings/account_user_setting`,
+including exact `/backend-api` aliases. The PATCH query has
+`feature=model_picker_reasoning_effort_visibility` and a JSON `value` mapping
+effort names to booleans. An empty object resets defaults. A partial mapping
+changes only those display choices; `If-None-Match: *` allows legacy migration
+only when no choice is saved, returning 412 otherwise.
+
+Every client effort is enabled by default: `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, `max`, `ultra`, and `persistent`. There is no plan or model cap
+in this preference. Desktop still determines which efforts its selected model
+supports. Choices are scoped to the authenticated account and user, saved in
+the gateway SQLite database, and never forwarded to ChatGPT. These routes do
+not change inference reasoning handling or provide other hosted user settings.
+
+Deploy both the application and the four exact settings locations from the
+public and Codex spoof Nginx templates. `update.sh` does not update host Nginx.
+After validating and reloading Nginx, restart Desktop (or reopen Settings) to
+retry the account-settings read. Verify a 200 settings response, an enabled
+reasoning dropdown, and Max/Ultra for a model whose catalog supports them.
+
 ## 1. Deploy the gateway and edge route
 
 Deploy a reviewed `copilot-api` revision containing the managed refresh route.

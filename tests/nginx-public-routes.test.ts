@@ -158,6 +158,63 @@ const discoveryRoutes = [
 ]
 
 for (const host of ["localhost", "codex.test"]) {
+  for (const prefix of ["", "/backend-api"]) {
+    nginxTest.each([
+      ["GET", `${prefix}/settings/user`],
+      [
+        "PATCH",
+        `${prefix}/settings/account_user_setting?feature=model_picker_reasoning_effort_visibility&value=%7B%7D`,
+      ],
+    ])(
+      `${host} forwards authenticated reasoning preferences %s %s`,
+      async (method, route) => {
+        const response = await fetch(origin + route, {
+          method,
+          headers: {
+            host,
+            authorization: "Bearer routing-test",
+            "chatgpt-account-id": "routing-account",
+          },
+        })
+        expect(response.status).toBe(204)
+        expect(response.headers.get("x-test-upstream")).toBe("reached")
+        expect(response.headers.get("x-test-account-id")).toBe(
+          "routing-account",
+        )
+      },
+    )
+
+    nginxTest.each([
+      ["HEAD", `${prefix}/settings/user`],
+      ["POST", `${prefix}/settings/user`],
+      ["GET", `${prefix}/settings/account_user_setting`],
+      ["POST", `${prefix}/settings/account_user_setting`],
+      ["GET", `${prefix}/settings/user/extra`],
+      ["PATCH", `${prefix}/settings/other`],
+    ])(`${host} denies unsupported settings %s %s`, async (method, route) => {
+      const response = await fetch(origin + route, {
+        method,
+        headers: { host, authorization: "Bearer routing-test" },
+      })
+      expect(response.status).toBe(404)
+      expect(response.headers.get("x-test-upstream")).toBeNull()
+    })
+
+    nginxTest.each([
+      ["GET", `${prefix}/settings/user`],
+      ["PATCH", `${prefix}/settings/account_user_setting`],
+    ])(
+      `${host} denies settings without bearer %s %s`,
+      async (method, route) => {
+        const response = await fetch(origin + route, {
+          method,
+          headers: { host },
+        })
+        expect(response.status).toBe(404)
+        expect(response.headers.get("x-test-upstream")).toBeNull()
+      },
+    )
+  }
   nginxTest.each(discoveryRoutes)(
     `${host} forwards authenticated discovery GET %s`,
     async (route) => {

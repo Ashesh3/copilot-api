@@ -7,6 +7,7 @@ import type {
   Storage,
 } from "~/lib/storage/types"
 
+import { decodeStoredCodexReasoningPreference } from "~/lib/storage/codex-reasoning-preferences-repository"
 import { decodeStoredConversationModel } from "~/lib/storage/conversation-models-repository"
 import { StorageSchemaError } from "~/lib/storage/errors"
 import { decodeArchivedCollectionStatus } from "~/lib/storage/history-bookkeeping"
@@ -222,6 +223,8 @@ export function validateTransferRecord(
     decodeHistoryReset(value.value)
   if (record.table === "capi_conversation_models")
     decodeStoredConversationModel(decoded)
+  if (record.table === "capi_codex_reasoning_preferences")
+    decodeStoredCodexReasoningPreference(decoded)
   return decoded
 }
 
