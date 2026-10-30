@@ -906,3 +906,63 @@ test("lists Copilot Decisions models without chat long-context aliases", async (
     "gpt-6-luna-decisions[1m]",
   )
 })
+
+function claudeModel(id: string): Model {
+  return {
+    ...currentModel,
+    id,
+    name: id,
+    vendor: "Anthropic",
+    version: id,
+    capabilities: { ...currentCapabilities, family: id },
+    supported_endpoints: ["/v1/messages"],
+  }
+}
+
+test("tags Claude families and their newest models for Anthropic clients", async () => {
+  state.models = {
+    object: "list",
+    data: [
+      claudeModel("claude-opus-4.8"),
+      claudeModel("claude-opus-5.5"),
+      claudeModel("claude-opus-5.5-fast"),
+      claudeModel("claude-sonnet-5.5"),
+      claudeModel("claude-3.7-sonnet"),
+      claudeModel("claude-haiku-4.5"),
+      currentModel,
+    ],
+  }
+  state.copilotToken = "copilot-token"
+
+  // Claude desktop's gateway mode discovers models this way.
+  const response = await seedProtocolDatabase().then(() =>
+    server.request("/v1/models?limit=1000", {
+      headers: {
+        authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+        "anthropic-version": "2023-06-01",
+      },
+    }),
+  )
+  const { data } = (await response.json()) as {
+    data: Array<Record<string, unknown>>
+  }
+  const families: Record<string, Array<unknown>> = {}
+  for (const entry of data) {
+    families[String(entry.id)] = [
+      entry.anthropic_family_tier,
+      entry.is_family_default,
+    ]
+  }
+
+  expect(response.status).toBe(200)
+  expect(families).toMatchObject({
+    "claude-opus-4.8": ["opus", undefined],
+    "claude-opus-5.5": ["opus", true],
+    "claude-opus-5-5": ["opus", undefined],
+    "claude-opus-5.5-fast": ["opus", undefined],
+    "claude-sonnet-5.5": ["sonnet", true],
+    "claude-3.7-sonnet": ["sonnet", undefined],
+    "claude-haiku-4.5": ["haiku", true],
+    "gpt-current": [undefined, undefined],
+  })
+})

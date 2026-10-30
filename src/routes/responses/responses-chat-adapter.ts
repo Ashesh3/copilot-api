@@ -13,7 +13,6 @@ import type { ResponsesWireBody } from "~/services/copilot/responses-contract"
 
 import { fetchUrlAsDataUri } from "~/lib/attachments"
 import { createEvaluatedTranslationCheck } from "~/lib/endpoint-routing"
-import { isModelFallbackActive } from "~/lib/model-fallback"
 import {
   fitChatCompletionsCompactionPayload,
   isResponsesCompactionRequest,
@@ -23,6 +22,11 @@ import { createWebSearchFunctionTool } from "~/services/copilot/mcp-web-search"
 import type { ResponsesAttachmentCache } from "./attachment-cache"
 
 import { normalizeResponsesAgentMessage } from "./agent-message"
+import {
+  chatReasoningMessageFields,
+  readChatReasoningEnvelope,
+  sharesChatReasoningModel,
+} from "./chat-reasoning-provenance"
 import { toCompactionSummaryRequest } from "./compaction-trigger"
 import {
   createResponsesChatToolTranslation,
@@ -69,6 +73,8 @@ export function getResponsesChatWebSearchMaxUses(
 
 interface AdapterState {
   readonly findings: Array<TranslationFinding>
+  /** Messages opened by replayed Chat reasoning state; its turn joins them. */
+  readonly reasoningCarriers: WeakSet<Message>
 }
 
 const FUTURE_ITEM_CONTEXT = "[Future Responses item]"
@@ -103,7 +109,7 @@ function addFinding(
 }
 
 function createState(_source: ResponsesWireBody): AdapterState {
-  return { findings: [] }
+  return { findings: [], reasoningCarriers: new WeakSet() }
 }
 
 function stringifyArguments(value: unknown): string {
@@ -262,13 +268,21 @@ function pushContextMessage(
  * that made the calls. Assistant text recorded between those calls and their
  * results belongs to the same model turn, so it joins that message.
  */
-function pushAssistantText(messages: Array<Message>, content: string): void {
+function pushAssistantText(
+  messages: Array<Message>,
+  content: string,
+  carriers: WeakSet<Message>,
+): void {
   const previous = messages.at(-1)
   if (previous?.role === "assistant" && previous.tool_calls?.length) {
     previous.content =
       typeof previous.content === "string" && previous.content ?
         `${previous.content}\n\n${content}`
       : content
+    return
+  }
+  if (previous && carriers.has(previous) && !previous.content) {
+    previous.content = content
     return
   }
   messages.push({ role: "assistant", content })
@@ -338,6 +352,8 @@ async function convertInput(
       // results that follow answer every call before the next message.
       if (previous?.role === "assistant" && previous.tool_calls?.length) {
         previous.tool_calls.push(call)
+      } else if (previous && state.reasoningCarriers.has(previous)) {
+        previous.tool_calls = [call]
       } else {
         messages.push({ role: "assistant", content: null, tool_calls: [call] })
       }
@@ -367,38 +383,26 @@ async function convertInput(
     }
     if (type === "reasoning") {
       const summary = Array.isArray(raw.summary) ? raw.summary : []
-      if (isModelFallbackActive()) {
-        const reasoningText = summary
-          .flatMap((entry) =>
-            isRecord(entry) && typeof entry.text === "string" ?
-              [entry.text]
-            : [],
-          )
-          .join("")
-        const reasoningOpaque =
-          typeof raw.id === "string" && !raw.id.startsWith("rs_") ?
-            raw.id
-          : undefined
-        const encryptedContent =
-          typeof raw.encrypted_content === "string" ?
-            raw.encrypted_content
-          : undefined
-        if (reasoningOpaque || encryptedContent) {
-          messages.push({
+      const envelope = readChatReasoningEnvelope(raw.encrypted_content)
+      if (envelope && sharesChatReasoningModel(envelope.model, source.model)) {
+        // The model's own reasoning: its state returns with the text and
+        // calls it produced. Without state there is nothing to replay, as on
+        // Responses.
+        const fields = chatReasoningMessageFields(envelope, summary)
+        if (fields) {
+          const carrier: Message = {
             role: "assistant",
             content: null,
-            ...(reasoningText ? { reasoning_text: reasoningText } : {}),
-            ...(reasoningOpaque ? { reasoning_opaque: reasoningOpaque } : {}),
-            ...(encryptedContent ?
-              { encrypted_content: encryptedContent }
-            : {}),
-          })
-          continue
+            ...fields,
+          }
+          state.reasoningCarriers.add(carrier)
+          messages.push(carrier)
         }
+        continue
       }
       for (const entry of summary) {
         if (isRecord(entry) && typeof entry.text === "string" && entry.text) {
-          pushAssistantText(messages, entry.text)
+          pushAssistantText(messages, entry.text, state.reasoningCarriers)
         }
       }
       if (
@@ -410,7 +414,7 @@ async function convertInput(
           class: "reasoning_state",
           severity: "adapted",
         })
-        pushAssistantText(messages, REASONING_CONTEXT)
+        pushAssistantText(messages, REASONING_CONTEXT, state.reasoningCarriers)
       }
       continue
     }
@@ -439,6 +443,7 @@ async function convertInput(
         pushAssistantText(
           messages,
           `[Custom tool call ${callId}: ${name}(${stringifyUseful(raw.input)})]`,
+          state.reasoningCarriers,
         )
       }
       continue
@@ -468,7 +473,7 @@ async function convertInput(
       )
       if ((typeof content === "string" && content) || Array.isArray(content)) {
         if (role === "assistant" && typeof content === "string") {
-          pushAssistantText(messages, content)
+          pushAssistantText(messages, content, state.reasoningCarriers)
         } else {
           messages.push({ role, content })
         }

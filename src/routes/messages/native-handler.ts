@@ -6,6 +6,7 @@ import { streamSSE } from "hono/streaming"
 import type { RoutedAccountPin } from "~/lib/account-router"
 import type { AnthropicRequestHeaderOptions } from "~/services/copilot/messages-contract"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
+import type { ManagedWebRound } from "~/services/web/tool-loop"
 
 import { getLastUsedAccountId } from "~/lib/account-router"
 import {
@@ -84,6 +85,8 @@ type NativeMessagesDispatchOptions = {
   allowCompatibilityRetry?: boolean
   alreadyAdapted?: boolean
   compaction?: boolean
+  /** Receives each gateway-managed web round answered before the result. */
+  onManagedWebRound?: (round: ManagedWebRound) => void
   preserveValidatedControls?: boolean
   routedAccountPin?: RoutedAccountPin
   retryBudget?: RetryBudget
@@ -120,6 +123,7 @@ export async function createNativeMessages(
     copilotSessionToken: nativeOptions.copilotSessionToken,
     initiator: nativeOptions.initiatorOverride,
     modelProviderPreference: nativeOptions.modelProviderPreference,
+    onManagedWebRound: dispatchOptions?.onManagedWebRound,
     preserveValidatedControls: dispatchOptions?.preserveValidatedControls,
     routedAccountPin:
       dispatchOptions?.routedAccountPin ?? nativeOptions.routedAccountPin,

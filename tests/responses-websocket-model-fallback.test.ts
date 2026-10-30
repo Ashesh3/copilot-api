@@ -11,6 +11,7 @@ import {
 import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { state } from "~/lib/state"
+import { readChatReasoningEnvelope } from "~/routes/responses/chat-reasoning-provenance"
 import {
   responsesWebSocket,
   tryUpgradeResponsesWebSocket,
@@ -451,13 +452,14 @@ test.each([undefined, "encrypted-only-target-signature"])(
     const result = completed?.response as Record<string, unknown> | undefined
     expect(result?.model).toBe(sourceModel)
     if (signature) {
-      expect(result?.output).toContainEqual(
-        expect.objectContaining({
-          type: "reasoning",
-          encrypted_content: signature,
-          summary: [],
-        }),
+      const reasoning = (result?.output as Array<Record<string, unknown>>).find(
+        (item) => item.type === "reasoning",
       )
+      expect(reasoning).toMatchObject({ type: "reasoning", summary: [] })
+      expect(readChatReasoningEnvelope(reasoning?.encrypted_content)).toEqual({
+        model: "custom-target",
+        encrypted_content: signature,
+      })
     }
     await sendTurn(ws, { input: "second", previous_response_id: result?.id })
     expect(requests.map((entry) => entry.model)).toEqual([
@@ -469,6 +471,44 @@ test.each([undefined, "encrypted-only-target-signature"])(
     if (signature) expect(JSON.stringify(requests[2])).toContain(signature)
   },
 )
+
+test("keeps Chat reasoning state on a continuation of a Chat-only alternate", async () => {
+  if (!state.models) throw new Error("Expected test models")
+  state.models.data[1].supported_endpoints = ["/chat/completions"]
+  const ws = await createSocket()
+  responses.push(
+    new Response("unprocessable", { status: 422 }),
+    chatStreamResponse("chat_first", {
+      role: "assistant",
+      content: "fallback answer",
+      reasoning_text: "fallback thinking",
+      reasoning_opaque: "opaque-signature-from-chat",
+    }),
+    chatStreamResponse("chat_next", { role: "assistant", content: "next" }),
+  )
+
+  await sendTurn(ws, { input: "first" })
+  const completed = ws.sent.find((frame) => frame.type === "response.completed")
+  const result = completed?.response as { id: string } | undefined
+  await sendTurn(ws, { previous_response_id: result?.id, input: "second" })
+
+  expect(requests.map((request) => request.model)).toEqual([
+    sourceModel,
+    targetModel,
+    targetModel,
+  ])
+  expect(requests[2].messages).toEqual([
+    { role: "user", content: "first" },
+    {
+      role: "assistant",
+      content: "fallback answer",
+      reasoning_text: "fallback thinking",
+      reasoning_opaque: "opaque-signature-from-chat",
+    },
+    { role: "user", content: "second" },
+  ])
+  expect(ws.sent.filter((frame) => frame.type === "error")).toHaveLength(0)
+})
 
 test("rebuilds a Messages-only alternate and retains its thinking on the next turn", async () => {
   if (!state.models) throw new Error("Expected test models")
@@ -619,5 +659,22 @@ function chatResponse(id: string, encryptedContent?: string): Response {
       },
     ],
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  })
+}
+
+function chatStreamResponse(
+  id: string,
+  delta: Record<string, unknown>,
+): Response {
+  const chunk = {
+    id,
+    object: "chat.completion.chunk",
+    created: 1,
+    model: targetModel,
+    choices: [{ index: 0, delta, finish_reason: "stop" }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }
+  return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+    headers: { "content-type": "text/event-stream" },
   })
 }

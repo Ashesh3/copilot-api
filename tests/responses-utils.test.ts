@@ -3,6 +3,7 @@ import { afterAll, expect, test } from "bun:test"
 import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 
 import { setModelSettingsForTest } from "../src/lib/model-settings"
+import { encodeChatReasoningEnvelope } from "../src/routes/responses/chat-reasoning-provenance"
 import { encodeAnthropicReasoningEnvelope } from "../src/routes/responses/messages-reasoning-provenance"
 import { expandCompactionItems } from "../src/routes/responses/utils"
 import {
@@ -40,12 +41,20 @@ test("does not replay foreign reasoning into another model after a model switch"
   ])
   const payload: ResponsesPayload = {
     model: "gpt-5.5",
-    input: [{ type: "reasoning", summary: [], encrypted_content: encrypted }],
+    input: [
+      {
+        type: "reasoning",
+        id: "rs_claude_turn",
+        summary: [],
+        encrypted_content: encrypted,
+      },
+    ],
   }
 
   expandCompactionItems(payload)
 
-  expect(payload).not.toHaveProperty("input.0.encrypted_content")
+  // The gateway issued the ID too, so the item is not left as a reference.
+  expect(payload.input).toEqual([{ type: "reasoning", summary: [] }])
 })
 
 test("replays Copilot reasoning state so the model keeps its reasoning", () => {
@@ -85,6 +94,7 @@ test("strips bridge-owned Claude envelopes from the native Responses candidate",
     input: [
       {
         type: "reasoning",
+        id: "rs_bridge_turn",
         summary: [
           { type: "summary_text", text: "Visible reasoning stays available." },
         ],
@@ -101,9 +111,41 @@ test("strips bridge-owned Claude envelopes from the native Responses candidate",
   )
 
   expect(candidate.body).not.toHaveProperty("input.0.encrypted_content")
+  expect(candidate.body).not.toHaveProperty("input.0.id")
   expect(candidate.body).toHaveProperty(
     "input.0.summary.0.text",
     "Visible reasoning stays available.",
+  )
+  expect(source).toHaveProperty("input.0.encrypted_content", encrypted)
+})
+
+test("strips gateway-owned Chat reasoning from the native Responses candidate", () => {
+  const encrypted = encodeChatReasoningEnvelope("chat-only-model", {
+    reasoning_opaque: "chat-reasoning-state",
+  })
+  const source: ResponsesPayload = {
+    model: "gpt-5.5",
+    input: [
+      {
+        type: "reasoning",
+        id: "rs_chat_turn",
+        summary: [{ type: "summary_text", text: "Chat model reasoning." }],
+        encrypted_content: encrypted,
+      },
+    ],
+  }
+
+  expandCompactionItems(source)
+  const candidate = finalizeNativeResponsesRequest(
+    prepareResponsesRequest(source),
+    { model: "gpt-5.5", implicitDefault: false },
+  )
+
+  expect(candidate.body).not.toHaveProperty("input.0.encrypted_content")
+  expect(candidate.body).not.toHaveProperty("input.0.id")
+  expect(candidate.body).toHaveProperty(
+    "input.0.summary.0.text",
+    "Chat model reasoning.",
   )
   expect(source).toHaveProperty("input.0.encrypted_content", encrypted)
 })

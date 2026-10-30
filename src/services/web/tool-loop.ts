@@ -37,6 +37,13 @@ export interface WebEvent {
   retry?: number
 }
 export type WebResponse = Record<string, unknown> | AsyncIterable<WebEvent>
+/** A buffered round whose managed calls the loop answered before continuing. */
+export interface ManagedWebRound {
+  /** The upstream response that requested the managed calls. */
+  readonly response: Record<string, unknown>
+  /** Each managed call with the result sent back to the model. */
+  readonly completed: ReadonlyArray<CompletedWebCall>
+}
 export interface ManagedWebRequest {
   protocol: WebProtocol
   payload: Record<string, unknown>
@@ -44,6 +51,11 @@ export interface ManagedWebRequest {
   disabled?: boolean
   nativeResponses?: boolean
   accountId?: number
+  /**
+   * Receives every buffered round the loop answers privately, in order. The
+   * request still resolves to the final round, whose usage covers them all.
+   */
+  onRound?: (round: ManagedWebRound) => void
   send: (
     payload: Record<string, unknown>,
     managed: ReadonlyMap<string, ManagedWebTool>,
@@ -193,6 +205,7 @@ export async function runManagedWebRequest(
     if (completed.length === 0)
       return { ...response, ...(usage ? { usage } : {}) }
     checkWebContinuationLimit(round)
+    options.onRound?.({ response, completed })
     const payload = continuationPayload(dispatch.processedPayload(), response, {
       completed,
       protocol: options.protocol,

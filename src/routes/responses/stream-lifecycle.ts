@@ -9,6 +9,7 @@ import type {
 
 import { isHTTPError, reportHttpError } from "~/lib/error"
 import { createStreamTerminalLifecycle } from "~/lib/stream-terminal-lifecycle"
+import { classifyResponsesFailure } from "~/services/copilot/responses-failure-code"
 
 export type ResponsesTerminalKind =
   | "response.completed"
@@ -286,16 +287,25 @@ function updateOutputItem(
 type ResponsesStreamFailureError = NonNullable<ResponsesResult["error"]> & {
   body_bytes?: Array<number>
   content_type?: string
+  /** Read by Codex for the delay before it retries. */
+  headers?: Record<string, string>
   status?: number
 }
 
 function createResponsesStreamFailureError(
   inspection?: HttpErrorInspection,
 ): ResponsesStreamFailureError {
-  if (inspection?.kind !== "upstream") {
-    return { message: "Upstream request failed" }
+  if (!inspection) return { message: "Upstream request failed" }
+  const retryAfter = inspection.responseHeaders["retry-after"]
+  const classified = {
+    code: classifyResponsesFailure(inspection),
+    ...(retryAfter ? { headers: { "retry-after": retryAfter } } : {}),
+  }
+  if (inspection.kind !== "upstream") {
+    return { ...classified, message: "Upstream request failed" }
   }
   return {
+    ...classified,
     ...(inspection.bodyText === undefined ?
       { body_bytes: Array.from(inspection.bodyBytes), message: "" }
     : { message: inspection.bodyText }),

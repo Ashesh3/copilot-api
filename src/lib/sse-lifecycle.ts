@@ -206,7 +206,25 @@ export const withHeartbeatWhilePending = async <T>(
   pending: Promise<T>,
   sink: SseHeartbeatSink,
   intervalMs = SSE_HEARTBEAT_INTERVAL_MS,
+): Promise<T> =>
+  await withProgressWhilePending(pending, sink, {
+    beat: writeSseHeartbeat,
+    intervalMs,
+  })
+
+/**
+ * Like `withHeartbeatWhilePending`, with `beat` in place of the comment frame
+ * for clients that only count events they can parse.
+ */
+export const withProgressWhilePending = async <T>(
+  pending: Promise<T>,
+  sink: SseHeartbeatSink,
+  options: {
+    readonly beat: (sink: SseHeartbeatSink) => Promise<void>
+    readonly intervalMs?: number
+  },
 ): Promise<T> => {
+  const intervalMs = options.intervalMs ?? SSE_HEARTBEAT_INTERVAL_MS
   const sinkAbort = createSinkAbortPromise(sink)
   while (!sink.aborted && !sink.closed) {
     const timer = createHeartbeatTimer(intervalMs)
@@ -215,7 +233,7 @@ export const withHeartbeatWhilePending = async <T>(
       const winner = await Promise.race([pending, timer.promise, sinkAbort])
       if (winner === HEARTBEAT_ABORT) throw createAbortError()
       if (winner !== HEARTBEAT_TIMER) return winner
-      await writeSseHeartbeat(sink)
+      await options.beat(sink)
     } finally {
       timer.cancel()
     }

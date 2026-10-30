@@ -358,7 +358,95 @@ export async function buildModelDiscoveryListings(
     (model) => model.alias || !copilotModelIds.has(model.id),
   )
 
-  return [...discoveryModels, ...customModels]
+  const listings = [...discoveryModels, ...customModels]
+  tagClaudeFamilies(listings)
+  return listings
+}
+
+const CLAUDE_FAMILY_TIERS = [
+  "opus",
+  "sonnet",
+  "haiku",
+  "fable",
+  "mythos",
+] as const
+type ClaudeFamilyTier = (typeof CLAUDE_FAMILY_TIERS)[number]
+type ClaudeIdGroups = Partial<Record<"after" | "before" | "tier", string>>
+const CLAUDE_TIERS = CLAUDE_FAMILY_TIERS.join("|")
+// A plain model ID such as claude-opus-5.5 or claude-3.7-sonnet.
+const PLAIN_CLAUDE_ID = new RegExp(
+  String.raw`^claude-(?:(?<before>\d+(?:\.\d+)*)-)?(?<tier>${CLAUDE_TIERS})(?:-(?<after>\d+(?:\.\d+)*))?$`,
+  "u",
+)
+// Any model ID of a family, such as claude-opus-5.5-fast.
+const CLAUDE_FAMILY_ID = new RegExp(
+  String.raw`^claude-(?:[\d.]+-)?(?<tier>${CLAUDE_TIERS})(?![a-z])`,
+  "u",
+)
+
+/** The tier and version of a Claude model ID, ignoring effort and 1M suffixes. */
+function claudeFamilyOf(id: string):
+  | {
+      readonly plain: boolean
+      readonly tier: ClaudeFamilyTier
+      readonly version: Array<number>
+    }
+  | undefined {
+  const base = id.split(":", 1)[0].replace(/\[1m\]$/u, "")
+  const plain =
+    base === id ?
+      (PLAIN_CLAUDE_ID.exec(base)?.groups as ClaudeIdGroups | undefined)
+    : undefined
+  const tier =
+    plain?.tier
+    ?? (CLAUDE_FAMILY_ID.exec(base)?.groups as ClaudeIdGroups | undefined)?.tier
+  if (!tier) return undefined
+  const version = plain?.after ?? plain?.before ?? ""
+  return {
+    plain: plain !== undefined,
+    tier: tier as ClaudeFamilyTier,
+    version: version ? version.split(".").map(Number) : [],
+  }
+}
+
+function compareVersions(left: Array<number>, right: Array<number>): number {
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0)
+    if (difference !== 0) return difference
+  }
+  return 0
+}
+
+/**
+ * Anthropic clients group Claude models by family. Claude desktop's gateway
+ * mode drops models without a recognised family and pins each family's
+ * default, the newest plain Copilot model of that family, for Claude Code.
+ */
+function tagClaudeFamilies(listings: Array<ModelDiscoveryListing>): void {
+  const defaults = new Map<
+    ClaudeFamilyTier,
+    { listing: ModelDiscoveryListing; version: Array<number> }
+  >()
+  for (const listing of listings) {
+    const family = claudeFamilyOf(listing.canonical_id ?? listing.id)
+    if (!family) continue
+    listing.anthropic_family_tier = family.tier
+    if (
+      !family.plain
+      || listing.alias
+      || listing.canonical_id !== undefined
+      || listing.provider_id !== undefined
+    ) {
+      continue
+    }
+    const current = defaults.get(family.tier)
+    if (!current || compareVersions(family.version, current.version) > 0) {
+      defaults.set(family.tier, { listing, version: family.version })
+    }
+  }
+  for (const { listing } of defaults.values()) {
+    listing.is_family_default = true
+  }
 }
 
 function wantsCopilotCatalog(c: Context): boolean {

@@ -9,8 +9,9 @@ import type {
   AnthropicResponse,
 } from "~/routes/messages/anthropic-types"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
+import type { ManagedWebRound } from "~/services/web/tool-loop"
 
-import { routedFetch } from "~/lib/account-router"
+import { getSelectedRoutedAccountId, routedFetch } from "~/lib/account-router"
 import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { HTTPError } from "~/lib/error"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
@@ -22,6 +23,7 @@ import {
 } from "~/services/copilot/transport-retry"
 import { runManagedWebRequest } from "~/services/web/tool-loop"
 
+import { copilotAccountScope } from "./account-scope"
 import { fitAnthropicCompactionPayload } from "./compaction-payload"
 import {
   classifyCompatibilityRetry,
@@ -32,6 +34,12 @@ import {
   rejectsDisabledThinking,
   rememberDisabledThinkingRejection,
 } from "./disabled-thinking-support"
+import {
+  hasExtendedCacheTtl,
+  refusesExtendedCacheTtl,
+  rememberExtendedCacheTtlRefusal,
+  removeExtendedCacheTtl,
+} from "./extended-cache-ttl"
 import {
   createMissingAnthropicMessagesMaxTokensError,
   normalizeAnthropicMessagesRequest,
@@ -106,6 +114,8 @@ export const createAnthropicMessages = async (
     initiator?: "agent" | "user"
     modelProviderPreference?: string
     alreadyAdapted?: boolean
+    /** Receives each gateway-managed web round answered before the result. */
+    onManagedWebRound?: (round: ManagedWebRound) => void
     preserveValidatedControls?: boolean
     routedAccountPin?: RoutedAccountPin
     retryBudget?: RetryBudget
@@ -182,6 +192,7 @@ export const createAnthropicMessages = async (
     disabled: options?.compaction,
     accountId: operationOptions.routedAccountPin.accountId,
     signal: options?.signal,
+    onRound: options?.onManagedWebRound,
     send: async (body, _managed, reportProcessedPayload) =>
       await dispatchAnthropicMessages(
         { ...dispatchOptions, preparedBody: body },
@@ -228,6 +239,8 @@ interface AnthropicDispatchOptions {
 }
 
 interface AnthropicAttempt {
+  /** The account that answered, as the router reports it. */
+  accountId: number | undefined
   body: Record<string, unknown>
   response: Response
 }
@@ -236,32 +249,31 @@ async function dispatchAnthropicAttempt(
   options: AnthropicDispatchOptions,
   body: Record<string, unknown>,
   retry: boolean,
-): Promise<Response> {
-  return (
-    await routedFetch(
-      ANTHROPIC_MESSAGES_ENDPOINT,
-      {
-        method: "POST",
-        body: serializeAnthropicMessagesRequest(body),
-        signal: options.options?.signal,
+): Promise<Omit<AnthropicAttempt, "body">> {
+  const { account, response } = await routedFetch(
+    ANTHROPIC_MESSAGES_ENDPOINT,
+    {
+      method: "POST",
+      body: serializeAnthropicMessagesRequest(body),
+      signal: options.options?.signal,
+    },
+    {
+      modelId: options.modelId,
+      headerOptions: {
+        copilotSessionToken: options.options?.copilotSessionToken,
+        vision: options.vision,
+        initiator: options.initiator,
+        ...options.preparedHeaders,
       },
-      {
-        modelId: options.modelId,
-        headerOptions: {
-          copilotSessionToken: options.options?.copilotSessionToken,
-          vision: options.vision,
-          initiator: options.initiator,
-          ...options.preparedHeaders,
-        },
-        maxHttpRetryDelaySeconds:
-          options.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
-        ...(retry ? { reason: "compatibility_retry" as const } : {}),
-        ...(retry ? { recordSelection: false } : {}),
-        routedAccountPin: options.options?.routedAccountPin,
-        retryBudget: options.options?.retryBudget,
-      },
-    )
-  ).response
+      maxHttpRetryDelaySeconds:
+        options.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+      ...(retry ? { reason: "compatibility_retry" as const } : {}),
+      ...(retry ? { recordSelection: false } : {}),
+      routedAccountPin: options.options?.routedAccountPin,
+      retryBudget: options.options?.retryBudget,
+    },
+  )
+  return { accountId: account?.id, response }
 }
 
 async function retryAnthropicCompatibility(
@@ -277,6 +289,11 @@ async function retryAnthropicCompatibility(
   // (including later web-search iterations) avoid the rejected control.
   if (decision.kind === "unsupported_disabled_thinking") {
     rememberDisabledThinkingRejection(options.modelId)
+  }
+  // The refusal names the control, so the refusing account is remembered
+  // even when this call may not resend.
+  if (decision.kind === "unsupported_extended_cache_ttl") {
+    rememberExtendedCacheTtlRefusal(copilotAccountScope(attempt.accountId))
   }
   if (
     decision.kind === "none"
@@ -294,7 +311,7 @@ async function retryAnthropicCompatibility(
   }
   return {
     body: retryBody,
-    response: await dispatchAnthropicAttempt(options, retryBody, true),
+    ...(await dispatchAnthropicAttempt(options, retryBody, true)),
   }
 }
 
@@ -314,6 +331,19 @@ function omitLearnedDisabledThinking(
   return adapted
 }
 
+function omitRefusedExtendedCacheTtl(
+  body: Record<string, unknown>,
+  accountScope: string,
+): Record<string, unknown> {
+  if (!refusesExtendedCacheTtl(accountScope) || !hasExtendedCacheTtl(body)) {
+    return body
+  }
+  const adapted = structuredClone(body)
+  removeExtendedCacheTtl(adapted)
+  consola.debug("Sent the default prompt cache lifetime after a refusal")
+  return adapted
+}
+
 async function dispatchAnthropicMessages(
   options: AnthropicDispatchOptions,
   reportProcessedPayload: (payload: Record<string, unknown>) => void,
@@ -324,9 +354,15 @@ async function dispatchAnthropicMessages(
     options.options?.compaction ?
       fitAnthropicCompactionPayload(preparedBody)
     : null
-  const body = omitLearnedDisabledThinking(
-    fitted?.payload ?? preparedBody,
-    options.modelId,
+  const body = omitRefusedExtendedCacheTtl(
+    omitLearnedDisabledThinking(
+      fitted?.payload ?? preparedBody,
+      options.modelId,
+    ),
+    copilotAccountScope(
+      options.options?.routedAccountPin?.accountId
+        ?? getSelectedRoutedAccountId(),
+    ),
   )
   omitConfiguredReasoningEffort("messages", body, [options.modelId])
   if (fitted?.reduced) {
@@ -340,7 +376,7 @@ async function dispatchAnthropicMessages(
 
   const attempt = await retryAnthropicCompatibility(options, {
     body,
-    response: await dispatchAnthropicAttempt(options, body, false),
+    ...(await dispatchAnthropicAttempt(options, body, false)),
   })
   const { body: activeBody, response } = attempt
 

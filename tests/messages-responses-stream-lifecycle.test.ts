@@ -35,6 +35,7 @@ let streamMode:
   | "text"
   | "binary"
   | "unsigned-reasoning"
+  | "keepalive"
   | "terminal-first" = "received-direct"
 
 const models: ModelsResponse = {
@@ -204,6 +205,73 @@ function terminalFirstResponse(): Response {
   )
 }
 
+// Copilot relays provider keep-alive frames while a reasoning model is silent.
+function keepaliveResponse(): Response {
+  const reasoning = {
+    id: "rs_quiet",
+    type: "reasoning",
+    summary: [{ type: "summary_text", text: "Thought it through." }],
+    encrypted_content: "quiet-state",
+  }
+  const message = {
+    id: "msg_quiet",
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text: "done", annotations: [] }],
+  }
+  const completed = {
+    ...responseSnapshot,
+    status: "completed",
+    output: [reasoning, message],
+    output_text: "done",
+    usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+  }
+  const keepalive = (sequence: number) =>
+    `event: keepalive\ndata: ${JSON.stringify({
+      type: "keepalive",
+      sequence_number: sequence,
+    })}`
+  return new Response(
+    [
+      `event: response.created\ndata: ${JSON.stringify({
+        type: "response.created",
+        sequence_number: 0,
+        response: responseSnapshot,
+      })}`,
+      keepalive(1),
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        type: "response.output_item.added",
+        sequence_number: 2,
+        output_index: 0,
+        item: { id: "rs_quiet", type: "reasoning", summary: [] },
+      })}`,
+      keepalive(3),
+      keepalive(4),
+      `event: response.output_item.done\ndata: ${JSON.stringify({
+        type: "response.output_item.done",
+        sequence_number: 5,
+        output_index: 0,
+        item: reasoning,
+      })}`,
+      `event: response.output_text.delta\ndata: ${JSON.stringify({
+        type: "response.output_text.delta",
+        sequence_number: 6,
+        item_id: "msg_quiet",
+        output_index: 1,
+        content_index: 0,
+        delta: "done",
+      })}`,
+      `event: response.completed\ndata: ${JSON.stringify({
+        type: "response.completed",
+        sequence_number: 7,
+        response: completed,
+      })}`,
+    ].join("\n\n") + "\n\n",
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
 function malformedRecoveryResponse(terminal: boolean): Response {
   const completed = {
     ...responseSnapshot,
@@ -230,6 +298,7 @@ const fetchMock = mock(() => {
   if (streamMode === "malformed-terminal")
     return malformedRecoveryResponse(true)
   if (streamMode === "unsigned-reasoning") return unsignedReasoningResponse()
+  if (streamMode === "keepalive") return keepaliveResponse()
   if (streamMode === "terminal-first") return terminalFirstResponse()
   if (streamMode === "received-direct" || streamMode === "received-buffered") {
     return receivedFailureResponse()
@@ -317,6 +386,47 @@ test("mounts a terminal-first Responses stream with one complete lifecycle", asy
     "message_stop",
   ])
   expect(body).toContain('"id":"resp_messages_lifecycle"')
+})
+
+test("keeps a silent reasoning phase visible to Messages stream watchdogs", async () => {
+  streamMode = "keepalive"
+  const response = await seedProtocolDatabase().then(() =>
+    server.request("/v1/messages", createRequest(false)),
+  )
+  const body = await response.text()
+
+  expect(eventTypes(body)).toEqual([
+    "message_start",
+    "ping",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_delta",
+    "content_block_delta",
+    "content_block_delta",
+    "content_block_stop",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "message_delta",
+    "message_stop",
+  ])
+  expect(body.match(/"thinking":""\}/g)).toHaveLength(3)
+  expect(body).toContain('"thinking":"Thought it through."')
+  expect(body).toContain('"signature":"quiet-state@rs_quiet"')
+})
+
+test("relays keep-alives while buffering a web search Responses stream", async () => {
+  streamMode = "keepalive"
+  const response = await seedProtocolDatabase().then(() =>
+    server.request("/v1/messages", createRequest(true)),
+  )
+  const body = await response.text()
+  const types = eventTypes(body)
+
+  expect(types.slice(0, 3)).toEqual(["ping", "ping", "ping"])
+  expect(types.slice(3)).not.toContain("ping")
+  expect(types.at(-1)).toBe("message_stop")
+  expect(body).toContain('"thinking":"Thought it through."')
 })
 
 test("skips a malformed Responses delta before one Messages terminal", async () => {

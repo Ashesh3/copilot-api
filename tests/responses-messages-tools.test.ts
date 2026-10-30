@@ -16,6 +16,8 @@ import {
 } from "~/routes/responses/messages-bridge"
 import { decodeAnthropicReasoningEnvelope } from "~/routes/responses/messages-reasoning-provenance"
 
+import { withoutPromptCache } from "./helpers/prompt-cache"
+
 // The bridge reads model settings; these tests run without the storage runtime.
 setModelSettingsForTest([])
 
@@ -36,8 +38,10 @@ function response(
 }
 
 function blocks(payload: AnthropicMessagesPayload) {
-  return payload.messages.flatMap((message) =>
-    Array.isArray(message.content) ? message.content : [],
+  return withoutPromptCache(
+    payload.messages.flatMap((message) =>
+      Array.isArray(message.content) ? message.content : [],
+    ),
   )
 }
 

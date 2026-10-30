@@ -75,6 +75,7 @@ import {
   resolveResponsesRequestRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
 } from "~/lib/routing-affinity"
+import { withProgressWhilePending } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
 import { withRequestSnapshot } from "~/lib/storage/request-snapshot"
 import { admitWebSocketTurn } from "~/lib/storage/websocket-admission"
@@ -97,6 +98,7 @@ import {
   finalizeNativeResponsesRequest,
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
+import { omitUnprefixedItemIds } from "~/services/copilot/responses-item-ids"
 import { withoutLegacyWebResults } from "~/services/web/legacy-history"
 import { runWithWebTools } from "~/services/web/tool-context"
 
@@ -106,6 +108,11 @@ import {
   type ResponsesChatCompletionFactory,
 } from "./chat-fallback-completion"
 import { hasCompactionTrigger } from "./compaction-trigger"
+import {
+  createContextOverflowFailedEvent,
+  isCodexResponsesRequest,
+  readCodexContextOverflow,
+} from "./context-overflow-response"
 import {
   prepareResponsesCandidates,
   type ResponsesEndpointCandidate,
@@ -121,6 +128,10 @@ import {
 } from "./handler"
 import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
 import { type ResponsesChatToolMap } from "./messages-tool-map"
+import {
+  getResponseProgressIntervalMs,
+  RESPONSE_PROGRESS_FRAME,
+} from "./pending-response"
 import {
   adaptResponsesToChatCandidate,
   getResponsesChatWebSearchMaxUses,
@@ -199,6 +210,8 @@ export interface WebSocketErrorFrameOptions {
   code: string
   message: string
   status: number
+  /** Response headers the client acts on, such as `retry-after`. */
+  headers?: Record<string, string>
   param?: string
   requestId?: string
   type?: string
@@ -423,15 +436,19 @@ async function handleResponsesWebSocketMessage(
       await failWebSocketTurn(ws, turn, { kind: "source_ended" })
     }
   } catch (error) {
-    await handleResponsesWebSocketError(ws, turn, error)
+    await handleResponsesWebSocketError(ws, turn, {
+      error,
+      codex: isCodexResponsesRequest(parsedPayload),
+    })
   }
 }
 
 async function handleResponsesWebSocketError(
   ws: ResponsesWebSocketState,
   turn: ResponsesWebSocketTurn,
-  error: unknown,
+  failure: { error: unknown; codex: boolean },
 ) {
+  const { error } = failure
   const terminal = await classifyWebSocketTerminal(error, turn)
   const errorInspection = terminal.errorInspection
   if (
@@ -473,8 +490,22 @@ async function handleResponsesWebSocketError(
     code: normalized.code,
     status: terminal.status,
   })
+  // Codex compacts only on a failed response, not on an error frame.
+  const overflow =
+    failure.codex ? await readCodexContextOverflow(error) : undefined
   try {
-    sendWebSocketError(ws, normalized)
+    if (overflow) {
+      ws.send(
+        JSON.stringify(
+          createContextOverflowFailedEvent({
+            message: overflow.message,
+            model: turn.requestedModel,
+          }),
+        ),
+      )
+    } else {
+      sendWebSocketError(ws, normalized)
+    }
   } catch {
     // Client already disconnected, nothing to do
   }
@@ -1022,6 +1053,46 @@ async function waitForWebSocketTurn<T>(
   } finally {
     if (abortListener) signal.removeEventListener("abort", abortListener)
   }
+}
+
+/**
+ * Codex abandons a WebSocket response after five minutes without a frame,
+ * and pings do not count, so a long buffered upstream call would be resent
+ * from the start. While it is pending, send `response.in_progress` frames.
+ * They name no response, so fallback, interruption and continuation see the
+ * turn as before.
+ */
+async function waitForBufferedWebSocketTurn<T>(
+  promise: Promise<T>,
+  ws: ResponsesWebSocketState,
+  turn: ResponsesWebSocketTurn,
+): Promise<T> {
+  const signal = turn.abortController.signal
+  const sink = {
+    get aborted() {
+      return signal.aborted
+    },
+    get closed() {
+      return ws.data.closed
+    },
+    onAbort: (listener: () => void) => {
+      signal.addEventListener("abort", listener, { once: true })
+    },
+    write: (frame: string) => {
+      if (!ws.data.closed && !signal.aborted && turn.terminal.state === "open")
+        ws.send(frame)
+      return Promise.resolve()
+    },
+  }
+  return await waitForWebSocketTurn(
+    withProgressWhilePending(promise, sink, {
+      intervalMs: getResponseProgressIntervalMs(),
+      beat: async (target) => {
+        await target.write(RESPONSE_PROGRESS_FRAME)
+      },
+    }),
+    turn,
+  )
 }
 
 async function failWebSocketTurn(
@@ -1630,7 +1701,7 @@ async function streamAnthropicMessagesOverWs(options: {
   ws: ResponsesWebSocketState
 }): Promise<void> {
   const { nativeOptions, payload, responseContext, turn, ws } = options
-  const result = await waitForWebSocketTurn(
+  const result = await waitForBufferedWebSocketTurn(
     executePreparedResponsesMessagesBridge({
       compaction: isResponsesCompactionRequest(responseContext),
       nativeOptions,
@@ -1638,6 +1709,7 @@ async function streamAnthropicMessagesOverWs(options: {
       responseContext,
       signal: turn.abortController.signal,
     }),
+    ws,
     turn,
   )
   throwIfWebSocketTurnAborted(turn)
@@ -1736,6 +1808,7 @@ async function streamChatCompletionsOverWs(options: {
 
   await streamChatCompletionsAsResponses(wsStream, ccStream, {
     model: responseContext.model,
+    reasoningModel: ccPayload.model,
     toolMap,
     onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
   })
@@ -1768,7 +1841,7 @@ async function streamChatCompactionOverWs(options: {
     options
   ccPayload.stream = false
   delete ccPayload.stream_options
-  const response = await waitForWebSocketTurn(
+  const response = await waitForBufferedWebSocketTurn(
     createChatCompletions(ccPayload, {
       allowCompatibilityRetry: false,
       candidatePrepared: true,
@@ -1776,6 +1849,7 @@ async function streamChatCompactionOverWs(options: {
       initiator,
       signal: turn.abortController.signal,
     }),
+    ws,
     turn,
   )
   throwIfWebSocketTurnAborted(turn)
@@ -1948,6 +2022,7 @@ async function streamCustomProviderCompletion(options: {
     stream as AsyncIterable<{ data?: string; event?: string }>,
     {
       model: payload.model,
+      reasoningModel: candidate.payload.model,
       toolMap: candidate.toolMap,
       onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
     },
@@ -2010,10 +2085,11 @@ async function streamCustomProviderOverWs(options: {
       },
     ),
   })
-  const initial = await waitForWebSocketTurn(
+  const initial = await waitForBufferedWebSocketTurn(
     completionFactory(candidate.payload, {
       signal: turn.abortController.signal,
     }),
+    ws,
     turn,
   )
   if (hasCompactionTrigger(payload)) {
@@ -2027,7 +2103,7 @@ async function streamCustomProviderOverWs(options: {
     })
     return
   }
-  const response = await waitForWebSocketTurn(
+  const response = await waitForBufferedWebSocketTurn(
     resolvePreparedResponsesWebSearchCalls({
       completionFactory,
       initial,
@@ -2035,6 +2111,7 @@ async function streamCustomProviderOverWs(options: {
       signal: turn.abortController.signal,
       webSearch: responsesWebSocketDependencies.webSearch,
     }),
+    ws,
     turn,
   )
   await streamChatCompletionsAsResponses(
@@ -2042,6 +2119,7 @@ async function streamCustomProviderOverWs(options: {
     chatResponseAsStream(response),
     {
       model: payload.model,
+      reasoningModel: candidate.payload.model,
       toolMap: candidate.toolMap,
       onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
     },
@@ -2084,20 +2162,25 @@ async function streamChatWebSearchOverWs(options: {
       initiator,
       signal: factoryOptions.signal,
     })
-  const initial = await waitForWebSocketTurn(
+  const initial = await waitForBufferedWebSocketTurn(
     completionFactory(ccPayload, {
       allowCompatibilityRetry: false,
       signal: turn.abortController.signal,
     }),
+    ws,
     turn,
   )
-  const response = await resolvePreparedResponsesWebSearchCalls({
-    completionFactory,
-    initial,
-    maxUses,
-    signal: turn.abortController.signal,
-    webSearch: responsesWebSocketDependencies.webSearch,
-  })
+  const response = await waitForBufferedWebSocketTurn(
+    resolvePreparedResponsesWebSearchCalls({
+      completionFactory,
+      initial,
+      maxUses,
+      signal: turn.abortController.signal,
+      webSearch: responsesWebSocketDependencies.webSearch,
+    }),
+    ws,
+    turn,
+  )
   const wsStream = {
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
@@ -2109,6 +2192,7 @@ async function streamChatWebSearchOverWs(options: {
     chatResponseAsStream(response),
     {
       model: responseContext.model,
+      reasoningModel: ccPayload.model,
       toolMap,
       onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
     },
@@ -2187,10 +2271,15 @@ function createCompletedResponseSnapshot(
 ): ResponsesPayload {
   const output = frame.response?.output
   const snapshotPayload = structuredClone(payload)
+  const outputItems = Array.isArray(output) ? structuredClone(output) : output
+  // Copilot binds output item IDs to the account and time that issued them.
+  // Codex drops such IDs before replaying history, so the rehydrated turn
+  // does the same and a later turn on another account is not refused.
+  if (Array.isArray(outputItems)) omitUnprefixedItemIds(outputItems)
   const completedInput =
-    Array.isArray(output) ?
+    Array.isArray(outputItems) ?
       withoutLegacyWebResults(
-        mergeContinuationInput(snapshotPayload.input, structuredClone(output)),
+        mergeContinuationInput(snapshotPayload.input, outputItems),
       )
     : withoutLegacyWebResults(snapshotPayload.input)
 
@@ -2211,6 +2300,7 @@ export function sendWebSocketError(
     JSON.stringify({
       type: "error",
       status: options.status,
+      ...(options.headers ? { headers: options.headers } : {}),
       error: {
         code: options.code,
         message: options.message,
@@ -2241,11 +2331,13 @@ function normalizeWebSocketError(
       type: error.errorType,
     }
   }
+  const headers = retryHeaders(inspection)
   if (inspection?.localError) {
     const local = inspection.localError
     const code = mapLocalWebSocketErrorCode(local, inspection.status)
     return {
       code,
+      ...headers,
       message: local.message,
       ...(local.param ? { param: local.param } : {}),
       status: inspection.status,
@@ -2257,6 +2349,7 @@ function normalizeWebSocketError(
       code:
         inspection.clientError?.code
         ?? mapHttpStatusToWebSocketErrorCode(inspection.status),
+      ...headers,
       message: "Upstream request failed",
       status: inspection.status,
       type: "websocket_error",
@@ -2269,6 +2362,7 @@ function normalizeWebSocketError(
   if (inspection) {
     return {
       code: mapHttpStatusToWebSocketErrorCode(inspection.status),
+      ...headers,
       message: "Upstream request failed",
       status: inspection.status,
       type: "websocket_error",
@@ -2281,6 +2375,15 @@ function normalizeWebSocketError(
     status: 500,
     type: "websocket_error",
   }
+}
+
+// Codex waits out a frame's `retry-after` before it retries; without one it
+// treats a rate limit as final.
+function retryHeaders(inspection: HttpErrorInspection | undefined): {
+  headers?: Record<string, string>
+} {
+  const retryAfter = inspection?.responseHeaders["retry-after"]
+  return retryAfter ? { headers: { "retry-after": retryAfter } } : {}
 }
 
 function mapLocalWebSocketErrorCode(

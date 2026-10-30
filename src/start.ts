@@ -10,6 +10,7 @@ import { resolveApiKeyAuth } from "~/lib/api-key-auth-config"
 import packageJson from "../package.json" with { type: "json" }
 import { getAccountsService } from "./lib/accounts-service"
 import { initializeAdminAuth } from "./lib/admin-auth"
+import { buildClaudeCodeEnvironment } from "./lib/claude-code-env"
 import { mergeConfigWithDefaults } from "./lib/config"
 import { resolveRequestCredential } from "./lib/credential-resolver"
 import { ensureModelRoutingOverridesLoaded } from "./lib/model-routing"
@@ -102,15 +103,12 @@ async function promptClaudeCodeSetup(
   )
 
   const command = generateEnvScript(
-    {
-      ANTHROPIC_BASE_URL: serverUrl,
-      ANTHROPIC_AUTH_TOKEN: "dummy",
-      ANTHROPIC_MODEL: selectedModel,
-      ANTHROPIC_DEFAULT_SONNET_MODEL: selectedModel,
-      ANTHROPIC_SMALL_FAST_MODEL: selectedSmallModel,
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: selectedSmallModel,
-      DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
-    },
+    buildClaudeCodeEnvironment({
+      serverUrl,
+      model: selectedModel,
+      smallModel: selectedSmallModel,
+      models: state.models.data,
+    }),
     "claude",
   )
 

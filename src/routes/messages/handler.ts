@@ -1619,6 +1619,12 @@ const bufferResponsesStream = async (
       terminal: isResponsesTerminalEventName(chunk.event),
     }) as ResponseStreamEvent | undefined
     if (parsed === undefined) continue
+    // Buffered output reaches the client only at the end, so relay upstream
+    // liveness now instead of letting it reset the comment heartbeat.
+    if (isResponsesKeepalive(parsed)) {
+      await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
+      continue
+    }
     events.push(parsed)
 
     if (isWebSearchFunctionCall(parsed)) hasWebSearch = true
@@ -1631,6 +1637,11 @@ const bufferResponsesStream = async (
 
   return { events, hasWebSearch, completedResult }
 }
+
+const isResponsesKeepalive = (parsed: unknown): boolean =>
+  typeof parsed === "object"
+  && parsed !== null
+  && (parsed as { type?: unknown }).type === "keepalive"
 
 const replayBufferedEvents = async (
   stream: SSEStream,

@@ -158,6 +158,16 @@ parse, or cache them, and has no local-fetch fallback.**
   only exact legacy gateway `web_result_*` artifacts, not genuine messages.
   Gateway tool use is bounded to eight calls per request, with tighter
   caller limits honored.
+- On the Responses-to-Messages bridge (Codex with a Claude model), every
+  managed round is returned the way native hosted search is: the round's
+  reasoning and narration (as `commentary`), then a `web_search_call` per
+  search. Its opaque `encrypted_content` carries the private tool call and
+  result, so the next turn replays the exact history Claude answered after.
+  Codex keeps that state only with its built-in OpenAI provider, which
+  `openai_base_url` configures; a custom `[model_providers]` entry clears it,
+  so later turns lose the search results and the reasoning that followed them.
+  Hosted `web_search` offered without client tools runs through the gateway
+  there, instead of reaching the client as a function call it cannot run.
 - Observed model usage is retained across managed rounds, including cancelled
   HTTP streams and WebSocket turns. Failed Responses usage is excluded, while
   completed rounds remain counted; invalid counts retain known subtotals and
@@ -426,6 +436,39 @@ bunx --bun @ashsec/copilot-api@latest start --host 127.0.0.1 --claude-code
 
 The generated command always uses `dummy`. Before running it, replace that value
 with a stored gateway or inference credential.
+
+Claude Code knows the context window of Claude models only. For any other
+model, such as a GPT model, it assumes 200,000 tokens and compacts at that
+size unless `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is set. The helper sets it from
+the selected model's Copilot prompt limit; set it yourself when you configure
+Claude Code by hand. When a model's prompt is over Copilot's limit, the gateway
+answers in Anthropic's "prompt is too long" form, which makes Claude Code
+compact and continue.
+
+### Claude desktop
+
+Claude desktop's third-party inference mode can use Copilot API as its gateway.
+Set these managed configuration values, as string values under
+`HKCU\SOFTWARE\Policies\Claude` or `HKLM\SOFTWARE\Policies\Claude` on Windows,
+in a configuration profile on macOS, or in
+`/etc/claude-desktop/managed-settings.json` on Linux. Anthropic's
+[Claude desktop third-party documentation](https://claude.com/docs/third-party/claude-desktop)
+describes each value.
+
+| Value | Setting |
+| --- | --- |
+| `inferenceProvider` | `gateway` |
+| `inferenceGatewayBaseUrl` | `http://127.0.0.1:4141`, without `/v1` |
+| `inferenceCredentialKind` | `static` |
+| `inferenceGatewayApiKey` | A stored gateway or inference credential |
+| `inferenceGatewayAuthScheme` | Optional: `bearer`, the default, or `x-api-key` |
+
+Claude desktop reads `GET /v1/models` and offers only Claude models from it.
+Each listed Claude model carries its family in `anthropic_family_tier`, and the
+newest model of each family is marked `is_family_default`. Claude desktop
+starts Claude Code with those models as its default for each family, such as
+Opus, Sonnet, Haiku, Fable, and Mythos. Its connection test sends a one-token
+Messages request to a Haiku model.
 
 ### Google-compatible clients
 

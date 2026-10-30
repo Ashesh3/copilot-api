@@ -21,6 +21,7 @@ import { readResponsesRequestJson } from "~/routes/responses/request-json"
 import { server } from "~/server"
 
 import { clientToolsPayload } from "./helpers/client-tools-payload"
+import { withoutPromptCache } from "./helpers/prompt-cache"
 import {
   PROTOCOL_GATEWAY_KEY,
   seedProtocolDatabase,
@@ -1661,11 +1662,14 @@ test("preserves custom tool history in Messages during Responses compaction", as
     name: "exec",
     input: { input: "run compact diagnostic" },
   })
-  expect(lastUpstreamPayload).toHaveProperty("messages.1.content.0", {
-    type: "tool_result",
-    tool_use_id: "call_compact",
-    content: "done",
-  })
+  expect(withoutPromptCache(lastUpstreamPayload)).toHaveProperty(
+    "messages.1.content.0",
+    {
+      type: "tool_result",
+      tool_use_id: "call_compact",
+      content: "done",
+    },
+  )
 })
 
 test("approves an adapted Responses translation before dispatch", async () => {

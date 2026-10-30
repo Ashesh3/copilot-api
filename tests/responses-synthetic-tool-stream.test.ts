@@ -16,6 +16,7 @@ interface EmittedFrame {
   delta?: string
   arguments?: string
   input?: string
+  part?: unknown
   response?: ResponsesResult
 }
 
@@ -56,6 +57,102 @@ async function collectFrames(
   )
   return frames
 }
+
+function textParts(value: unknown): Array<{ text?: unknown }> {
+  return Array.isArray(value) ? (value as Array<{ text?: unknown }>) : []
+}
+
+function itemText(item: Record<string, unknown>): string {
+  return [...textParts(item.content), ...textParts(item.summary)]
+    .map((part) => (typeof part.text === "string" ? part.text : ""))
+    .join("")
+}
+
+describe("synthetic Responses text streams", () => {
+  test("streams message text and reasoning summaries once", async () => {
+    const reasoning: ResponseOutputItem = {
+      id: "rs_think",
+      type: "reasoning",
+      summary: [
+        { type: "summary_text", text: "Checking the file." },
+        { type: "summary_text", text: "Comparing totals." },
+      ],
+      encrypted_content: "opaque-state",
+    }
+    const message: ResponseOutputItem = {
+      id: "msg_update",
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      phase: "commentary",
+      content: [
+        { type: "output_text", text: "Reading the config.", annotations: [] },
+      ],
+    }
+    const frames = await collectFrames(resultWith([reasoning, message]))
+
+    const summaryPart = [
+      "response.reasoning_summary_part.added",
+      "response.reasoning_summary_text.delta",
+      "response.reasoning_summary_text.done",
+      "response.reasoning_summary_part.done",
+    ]
+    expect(frames.map((frame) => frame.type)).toEqual([
+      "response.created",
+      "response.output_item.added",
+      ...summaryPart,
+      ...summaryPart,
+      "response.output_item.done",
+      "response.output_item.added",
+      "response.content_part.added",
+      "response.output_text.delta",
+      "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    expect(frames.map((frame) => frame.sequence_number)).toEqual(
+      frames.map((_, index) => index),
+    )
+    expect(
+      frames
+        .filter((frame) => frame.type.startsWith("response.content_part."))
+        .map((frame) => frame.part),
+    ).toEqual([
+      { type: "output_text", text: "", annotations: [] },
+      { type: "output_text", text: "Reading the config.", annotations: [] },
+    ])
+
+    // Clients render the started item, then append every delta to it.
+    const rendered = new Map<string, string>()
+    for (const frame of frames) {
+      if (frame.type === "response.output_item.added" && frame.item) {
+        rendered.set(String(frame.item.id), itemText(frame.item))
+      } else if (frame.type.endsWith(".delta") && frame.item_id) {
+        const previous = rendered.get(frame.item_id) ?? ""
+        rendered.set(frame.item_id, previous + (frame.delta ?? ""))
+      }
+    }
+    expect(rendered.get("rs_think")).toBe("Checking the file.Comparing totals.")
+    expect(rendered.get("msg_update")).toBe("Reading the config.")
+
+    const added = frames.filter(
+      (frame) => frame.type === "response.output_item.added",
+    )
+    expect(added.map((frame) => frame.item)).toEqual([
+      { ...reasoning, summary: [], status: "in_progress" },
+      { ...message, content: [], status: "in_progress" },
+    ])
+    const done = frames.filter(
+      (frame) => frame.type === "response.output_item.done",
+    )
+    expect(done.map((frame) => frame.item)).toEqual([
+      { ...reasoning },
+      { ...message },
+    ])
+    expect(frames.at(-1)?.response?.output).toEqual([reasoning, message])
+  })
+})
 
 describe("synthetic Responses tool streams", () => {
   test("streams namespaced function arguments once before completing the call", async () => {

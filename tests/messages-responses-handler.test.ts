@@ -313,11 +313,15 @@ test("preserves output_config.format on the Anthropic responses path", async () 
   )
 
   expect(response.status).toBe(200)
+  // Responses requires a schema name; strict mode would reject optional
+  // properties, so a client that did not ask for it gets non-strict output.
   expect(
     (lastResponsesPayload as Record<string, unknown> | undefined)?.text,
   ).toEqual({
     format: {
       type: "json_schema",
+      name: "output",
+      strict: false,
       schema: {
         type: "object",
         properties: {

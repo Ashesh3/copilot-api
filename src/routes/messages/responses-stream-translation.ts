@@ -8,19 +8,25 @@ import {
   type ResponseReasoningSummaryTextDeltaEvent,
   type ResponseReasoningSummaryTextDoneEvent,
   type ResponsesResult,
-  type ResponseStreamEvent,
   type ResponseTextDeltaEvent,
-  type ResponseTextDoneEvent,
 } from "~/services/copilot/create-responses"
 
 import {
   type AnthropicErrorEvent,
   type AnthropicStreamEventData,
 } from "./anthropic-types"
+import { createPromptTooLongError } from "./prompt-too-long"
 import {
+  type ResponseRefusalDeltaEvent,
+  type TranslatableResponsesStreamEvent,
+} from "./responses-stream-events"
+import {
+  joinReasoningText,
   THINKING_TEXT,
   translateResponsesResultToAnthropic,
 } from "./responses-translation"
+
+export type { TranslatableResponsesStreamEvent } from "./responses-stream-events"
 
 export interface ResponsesStreamState {
   messageStartSent: boolean
@@ -30,6 +36,12 @@ export interface ResponsesStreamState {
   openBlocks: Set<number>
   blockHasDelta: Set<number>
   functionCallStateByOutputIndex: Map<number, FunctionCallStreamState>
+  /** Reasoning items that were added and are not done yet. */
+  reasoningInProgress: Set<number>
+  /** Last reasoning summary part that wrote text into each thinking block. */
+  summaryIndexByBlock: Map<number, number>
+  /** Summary parts (`block:summary`) whose text was already written. */
+  summaryPartsWithText: Set<string>
   pendingFailure?: AnthropicErrorEvent
 }
 
@@ -49,6 +61,9 @@ export const createResponsesStreamState = (): ResponsesStreamState => ({
   openBlocks: new Set(),
   blockHasDelta: new Set(),
   functionCallStateByOutputIndex: new Map(),
+  reasoningInProgress: new Set(),
+  summaryIndexByBlock: new Map(),
+  summaryPartsWithText: new Set(),
 })
 
 export type ResponsesTranslationResult =
@@ -57,10 +72,20 @@ export type ResponsesTranslationResult =
   | { kind: "failure"; error: AnthropicErrorEvent }
 
 export const translateResponsesStreamEvent = (
-  rawEvent: ResponseStreamEvent,
+  rawEvent: TranslatableResponsesStreamEvent,
   state: ResponsesStreamState,
 ): ResponsesTranslationResult => {
   if (state.terminal !== "open") return { kind: "events", events: [] }
+  return (
+    translateSupplementalEvent(rawEvent, state)
+    ?? translateCoreEvent(rawEvent, state)
+  )
+}
+
+const translateCoreEvent = (
+  rawEvent: TranslatableResponsesStreamEvent,
+  state: ResponsesStreamState,
+): ResponsesTranslationResult => {
   const eventType = rawEvent.type
   switch (eventType) {
     case "response.created": {
@@ -88,7 +113,16 @@ export const translateResponsesStreamEvent = (
     }
 
     case "response.output_text.done": {
-      return translatedEvents(handleOutputTextDone(rawEvent, state))
+      return translatedEvents(
+        handleOutputTextDone(
+          {
+            outputIndex: rawEvent.output_index,
+            contentIndex: rawEvent.content_index,
+            text: rawEvent.text,
+          },
+          state,
+        ),
+      )
     }
     case "response.output_item.done": {
       return translatedEvents(handleOutputItemDone(rawEvent, state))
@@ -133,6 +167,37 @@ export const translateResponsesStreamEvent = (
   }
 }
 
+/** Frames outside the shared Responses event types. */
+const translateSupplementalEvent = (
+  rawEvent: TranslatableResponsesStreamEvent,
+  state: ResponsesStreamState,
+): ResponsesTranslationResult | undefined => {
+  switch (rawEvent.type) {
+    case "keepalive": {
+      return translatedEvents(handleKeepalive(state))
+    }
+    // A refusal is the model's visible answer; show it as text.
+    case "response.refusal.delta": {
+      return translatedEvents(handleOutputTextDelta(rawEvent, state))
+    }
+    case "response.refusal.done": {
+      return translatedEvents(
+        handleOutputTextDone(
+          {
+            outputIndex: rawEvent.output_index,
+            contentIndex: rawEvent.content_index,
+            text: rawEvent.refusal,
+          },
+          state,
+        ),
+      )
+    }
+    default: {
+      return undefined
+    }
+  }
+}
+
 const translatedEvents = (
   events: Array<AnthropicStreamEventData>,
 ): ResponsesTranslationResult => ({ kind: "events", events })
@@ -153,11 +218,36 @@ const handleResponseCreated = (
   return messageStart(state, rawEvent.response)
 }
 
+/**
+ * Keep-alive frames prove the upstream is still working. Clients that time
+ * out idle streams count only a limited run of pings, so while a reasoning
+ * item is in progress the frame becomes an empty thinking delta instead.
+ */
+const handleKeepalive = (
+  state: ResponsesStreamState,
+): Array<AnthropicStreamEventData> => {
+  const outputIndex = Math.max(-1, ...state.reasoningInProgress)
+  if (!state.messageStartSent || outputIndex < 0) return [{ type: "ping" }]
+
+  const events = new Array<AnthropicStreamEventData>()
+  const blockIndex = openThinkingBlockIfNeeded(state, outputIndex, events)
+  events.push({
+    type: "content_block_delta",
+    index: blockIndex,
+    delta: { type: "thinking_delta", thinking: "" },
+  })
+  return events
+}
+
 const handleOutputItemAdded = (
   rawEvent: ResponseOutputItemAddedEvent,
   state: ResponsesStreamState,
 ): Array<AnthropicStreamEventData> => {
   const events = new Array<AnthropicStreamEventData>()
+  if (rawEvent.item.type === "reasoning") {
+    state.reasoningInProgress.add(rawEvent.output_index)
+    return events
+  }
   const functionCallDetails = extractFunctionCallDetails(rawEvent)
   if (!functionCallDetails) {
     return events
@@ -196,9 +286,12 @@ const handleOutputItemDone = (
   }
 
   const outputIndex = rawEvent.output_index
+  state.reasoningInProgress.delete(outputIndex)
   const reasoningText = extractReasoningText(item)
   const encryptedContent = item.encrypted_content
-  if (!reasoningText && !encryptedContent) {
+  // A keep-alive may already have opened the block; it must not stay empty.
+  const blockOpen = isThinkingBlockOpen(state, outputIndex)
+  if (!reasoningText && !encryptedContent && !blockOpen) {
     return events
   }
 
@@ -233,12 +326,33 @@ const handleOutputItemDone = (
 
 const extractReasoningText = (
   item: Extract<ResponseOutputItemDoneEvent["item"], { type: "reasoning" }>,
+): string => joinReasoningText(item.summary, item.content)
+
+const REASONING_PART_SEPARATOR = "\n\n"
+
+const isThinkingBlockOpen = (
+  state: ResponsesStreamState,
+  outputIndex: number,
+): boolean => {
+  const blockIndex = state.blockIndexByKey.get(
+    `thinking:${getBlockKey(outputIndex, 0)}`,
+  )
+  return blockIndex !== undefined && state.openBlocks.has(blockIndex)
+}
+
+/** Separate reasoning summary parts the way the Responses API renders them. */
+const withSummaryPartSeparator = (
+  state: ResponsesStreamState,
+  part: { blockIndex: number; summaryIndex: number | undefined; text: string },
 ): string => {
-  const blocks = [...(item.summary ?? []), ...(item.content ?? [])]
-  return blocks
-    .map((block) => (typeof block.text === "string" ? block.text : ""))
-    .join("")
-    .trim()
+  const { blockIndex, summaryIndex, text } = part
+  if (!text || summaryIndex === undefined) return text
+  const previous = state.summaryIndexByBlock.get(blockIndex)
+  state.summaryIndexByBlock.set(blockIndex, summaryIndex)
+  state.summaryPartsWithText.add(`${blockIndex}:${summaryIndex}`)
+  return previous === undefined || previous === summaryIndex ?
+      text
+    : `${REASONING_PART_SEPARATOR}${text}`
 }
 
 const handleFunctionCallArgumentsDelta = (
@@ -309,7 +423,7 @@ const handleFunctionCallArgumentsDone = (
 }
 
 const handleOutputTextDelta = (
-  rawEvent: ResponseTextDeltaEvent,
+  rawEvent: ResponseTextDeltaEvent | ResponseRefusalDeltaEvent,
   state: ResponsesStreamState,
 ): Array<AnthropicStreamEventData> => {
   const events = new Array<AnthropicStreamEventData>()
@@ -348,13 +462,19 @@ const handleReasoningSummaryTextDelta = (
   const deltaText = rawEvent.delta
   const events = new Array<AnthropicStreamEventData>()
   const blockIndex = openThinkingBlockIfNeeded(state, outputIndex, events)
+  const thinking = withSummaryPartSeparator(state, {
+    blockIndex,
+    summaryIndex: rawEvent.summary_index,
+    text: deltaText,
+  })
+  if (!thinking) return events
 
   events.push({
     type: "content_block_delta",
     index: blockIndex,
     delta: {
       type: "thinking_delta",
-      thinking: deltaText,
+      thinking,
     },
   })
   state.blockHasDelta.add(blockIndex)
@@ -392,14 +512,23 @@ const handleReasoningSummaryTextDone = (
   const text = rawEvent.text
   const events = new Array<AnthropicStreamEventData>()
   const blockIndex = openThinkingBlockIfNeeded(state, outputIndex, events)
+  const partKey = `${blockIndex}:${rawEvent.summary_index}`
+  const partWritten =
+    state.summaryPartsWithText.has(partKey)
+    || (state.blockHasDelta.has(blockIndex)
+      && !state.summaryIndexByBlock.has(blockIndex))
 
-  if (text && !state.blockHasDelta.has(blockIndex)) {
+  if (text && !partWritten) {
     events.push({
       type: "content_block_delta",
       index: blockIndex,
       delta: {
         type: "thinking_delta",
-        thinking: text,
+        thinking: withSummaryPartSeparator(state, {
+          blockIndex,
+          summaryIndex: rawEvent.summary_index,
+          text,
+        }),
       },
     })
     state.blockHasDelta.add(blockIndex)
@@ -409,13 +538,11 @@ const handleReasoningSummaryTextDone = (
 }
 
 const handleOutputTextDone = (
-  rawEvent: ResponseTextDoneEvent,
+  done: { outputIndex: number; contentIndex: number; text: string },
   state: ResponsesStreamState,
 ): Array<AnthropicStreamEventData> => {
   const events = new Array<AnthropicStreamEventData>()
-  const outputIndex = rawEvent.output_index
-  const contentIndex = rawEvent.content_index
-  const text = rawEvent.text
+  const { outputIndex, contentIndex, text } = done
 
   const blockIndex = openTextBlockIfNeeded(state, {
     outputIndex,
@@ -630,6 +757,8 @@ function buildReceivedResponsesError(
   if (!error || typeof error.message !== "string") {
     return buildErrorEvent(SAFE_RESPONSES_STREAM_ERROR_MESSAGE)
   }
+  const promptTooLong = createPromptTooLongError(error)
+  if (promptTooLong) return promptTooLong
   return {
     type: "error",
     error: {

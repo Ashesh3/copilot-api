@@ -7,6 +7,13 @@ export interface SafeCandidateFailure {
   status: number
 }
 
+function isToolCapableResponsesModel(model: Model): boolean {
+  return (
+    model.supported_endpoints?.includes("/responses") === true
+    && model.capabilities.supports.tool_calls === true
+  )
+}
+
 export function selectToolCapableResponsesCandidates(
   models: ReadonlyArray<Model>,
   limit: number,
@@ -15,8 +22,7 @@ export function selectToolCapableResponsesCandidates(
   const providers = new Set<string>()
 
   for (const model of models) {
-    if (!model.supported_endpoints?.includes("/responses")) continue
-    if (model.capabilities.supports.tool_calls !== true) continue
+    if (!isToolCapableResponsesModel(model)) continue
 
     const provider = providerIdentity(model)
     if (providers.has(provider)) continue
@@ -26,6 +32,24 @@ export function selectToolCapableResponsesCandidates(
   }
 
   return candidates
+}
+
+/**
+ * Tool-capable Responses models in catalog order, the preferred IDs first in
+ * the order given. A listed model can still be refused, so callers try the
+ * next one when Copilot rejects a model as not supported.
+ */
+export function rankToolCapableResponsesModels(
+  models: ReadonlyArray<Model>,
+  preferred: ReadonlyArray<string>,
+): Array<Model> {
+  const rank = (model: Model): number => {
+    const index = preferred.indexOf(model.id)
+    return index === -1 ? preferred.length : index
+  }
+  return models
+    .filter((model) => isToolCapableResponsesModel(model))
+    .toSorted((left, right) => rank(left) - rank(right))
 }
 
 function providerIdentity(model: Model): string {

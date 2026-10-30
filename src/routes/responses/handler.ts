@@ -3,6 +3,7 @@ import type { Context } from "hono"
 
 import * as Sentry from "@sentry/bun"
 import { streamSSE } from "hono/streaming"
+import { randomUUID } from "node:crypto"
 
 import type { Model } from "~/services/copilot/get-models"
 
@@ -38,6 +39,7 @@ import {
   isAbortError,
   isHTTPError,
   inspectHttpError,
+  reportHttpError,
 } from "~/lib/error"
 import { forceResponsesSystemPrompt } from "~/lib/forced-system-prompt"
 import { createHandlerLogger } from "~/lib/logger"
@@ -45,7 +47,6 @@ import {
   applyModelFallbackToPayload,
   getModelFallbackRedirect,
   captureModelFallbackNotice,
-  isModelFallbackActive,
   runWithModelFallback,
 } from "~/lib/model-fallback"
 import { applyResponsesModelFallbackNotice } from "~/lib/model-fallback-notice"
@@ -89,7 +90,6 @@ import {
   unwrapSsePreflushSettlement,
   withHeartbeatWhilePending,
   withSseHeartbeat,
-  writeSseHeartbeat,
 } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
 import { normalizeUsageTokenCount } from "~/lib/storage/usage-counters"
@@ -140,11 +140,17 @@ import {
   resolvePreparedResponsesWebSearchCalls,
   type ResponsesChatCompletionFactory,
 } from "./chat-fallback-completion"
+import { encodeChatReasoningEnvelope } from "./chat-reasoning-provenance"
 import { chatCompactionSummary } from "./compact-summary"
 import {
   hasCompactionTrigger,
   toRemoteCompactionResult,
 } from "./compaction-trigger"
+import {
+  createContextOverflowFailedEvent,
+  isCodexResponsesRequest,
+  readCodexContextOverflow,
+} from "./context-overflow-response"
 import {
   prepareResponsesCandidates,
   selectResponsesCandidate,
@@ -154,6 +160,7 @@ import {
   type ResponsesChatToolMap,
   type RestoredChatToolCall,
 } from "./messages-tool-map"
+import { PendingResponseProgress } from "./pending-response"
 import { readResponsesRequestJson } from "./request-json"
 import { adaptResponsesToChatCandidate } from "./responses-chat-adapter"
 import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
@@ -835,29 +842,49 @@ export const handleResponses = async (c: Context) => {
 
   const model = parseModelSuffix(sourcePayload.model).baseModel
 
-  return await Sentry.startSpan(
-    createSentryInvokeAgentSpanOptions(model, conversationId),
-    async () => {
-      return await runWithModelFallback(
-        {
-          headers: c.req.raw.headers,
-          payload: sourcePayload,
-          signal: c.req.raw.signal,
-        },
-        async () => {
-          const response = await handleResponsesInner(c, {
-            legacyPayload: structuredClone(payload),
-            nativeOptions,
-            preparedSource: structuredClone(preparedSource),
-          })
-          return applyResponsesModelFallbackNotice(
-            response,
-            captureModelFallbackNotice(),
-          )
-        },
-      )
-    },
-  )
+  try {
+    return await Sentry.startSpan(
+      createSentryInvokeAgentSpanOptions(model, conversationId),
+      async () => {
+        return await runWithModelFallback(
+          {
+            headers: c.req.raw.headers,
+            payload: sourcePayload,
+            signal: c.req.raw.signal,
+          },
+          async () => {
+            const response = await handleResponsesInner(c, {
+              legacyPayload: structuredClone(payload),
+              nativeOptions,
+              preparedSource: structuredClone(preparedSource),
+            })
+            return applyResponsesModelFallbackNotice(
+              response,
+              captureModelFallbackNotice(),
+            )
+          },
+        )
+      },
+    )
+  } catch (error) {
+    const overflow =
+      sourcePayload.stream === true && isCodexResponsesRequest(sourcePayload) ?
+        await readCodexContextOverflow(error)
+      : undefined
+    if (!overflow) throw error
+    reportHttpError(c, overflow.inspection)
+    return streamSSE(c, async (stream) => {
+      await stream.writeSSE({
+        event: "response.failed",
+        data: JSON.stringify(
+          createContextOverflowFailedEvent({
+            message: overflow.message,
+            model: sourcePayload.model,
+          }),
+        ),
+      })
+    })
+  }
 }
 
 async function parseResponsesRequestBody(c: Context): Promise<unknown> {
@@ -1667,34 +1694,63 @@ interface CCStreamState {
   usage: { inputTokens?: number; outputTokens?: number; cachedTokens?: number }
   responseCreated: boolean
   pendingFinishReason?: string
-  preserveFallbackThinking: boolean
-  reasoningText: string
-  reasoningOpaque?: string
-  encryptedContent?: string
+  /**
+   * A message or tool call was announced. Clients apply text and summary
+   * deltas to the item added last, so reasoning that arrives afterwards is
+   * held for its item's final event.
+   */
+  outputStarted: boolean
+  /** Present once the upstream model reasons. */
+  reasoning?: CCReasoningState
+  /** The upstream Chat model, which binds the reasoning state it returns. */
+  reasoningModel: string
   toolMap?: ResponsesChatToolMap
+}
+
+interface CCReasoningState {
+  /** Set once the client has seen `response.output_item.added`. */
+  announced?: { readonly itemId: string; readonly outputIndex: number }
+  text: string
+  /** The client has seen `response.reasoning_summary_part.added`. */
+  summaryPartAdded: boolean
+  opaque?: string
+  encryptedContent?: string
 }
 
 type WriteEventFn = (event: string, data: unknown) => Promise<void>
 
-const createCCStreamState = (
-  model: string,
-  toolMap?: ResponsesChatToolMap,
-): CCStreamState => ({
-  seqNum: 0,
-  responseId: "resp_cc",
-  createdAt: Math.floor(Date.now() / 1000),
-  resolvedModel: model,
-  accumulatedText: "",
-  textItemAdded: false,
-  messageItemId: "msg_cc_001",
-  functionCalls: new Map(),
-  nextOutputIndex: 0,
-  usage: {},
-  responseCreated: false,
-  preserveFallbackThinking: isModelFallbackActive(),
-  reasoningText: "",
-  ...(toolMap ? { toolMap } : {}),
-})
+const createCCStreamState = (options: {
+  readonly model: string
+  readonly reasoningModel: string
+  readonly toolMap?: ResponsesChatToolMap
+}): CCStreamState => {
+  // Chat chunks carry an ID; without one, each response still gets its own.
+  const responseId = `resp_cc_${randomUUID().replaceAll("-", "")}`
+  return {
+    seqNum: 0,
+    responseId,
+    createdAt: Math.floor(Date.now() / 1000),
+    resolvedModel: options.model,
+    accumulatedText: "",
+    textItemAdded: false,
+    messageItemId: ccMessageItemId(responseId),
+    functionCalls: new Map(),
+    nextOutputIndex: 0,
+    usage: {},
+    responseCreated: false,
+    outputStarted: false,
+    reasoningModel: options.reasoningModel,
+    ...(options.toolMap ? { toolMap: options.toolMap } : {}),
+  }
+}
+
+/**
+ * Like the buffered `msg_<chat id>`: a message ID that repeated on every turn
+ * would replay as duplicate input IDs once a thread moves to native Responses.
+ */
+function ccMessageItemId(responseId: string): string {
+  return `msg_${responseId.replace(/^resp_/u, "")}`
+}
 
 /** Restore a translated Chat tool call to the identity the client declared. */
 function restoreCCToolCall(
@@ -2045,28 +2101,55 @@ function mapResponsesControlsToChat(
   }
 }
 
+/**
+ * A Chat turn's reasoning. Its Chat state travels in `encrypted_content`,
+ * bound to the upstream model, never in the item ID: clients drop IDs they
+ * cannot replay.
+ */
+function createChatReasoningOutput(options: {
+  readonly id: string
+  readonly model: string
+  readonly text: string | null | undefined
+  readonly opaque: string | null | undefined
+  readonly encryptedContent: string | null | undefined
+}): ResponseOutputReasoning | undefined {
+  const { encryptedContent, opaque, text } = options
+  if (!text && !opaque && !encryptedContent) return undefined
+  const envelope = encodeChatReasoningEnvelope(options.model, {
+    ...(opaque ? { reasoning_opaque: opaque } : {}),
+    ...(encryptedContent ? { encrypted_content: encryptedContent } : {}),
+  })
+  return {
+    id: options.id,
+    type: "reasoning",
+    summary: text ? [{ type: "summary_text", text }] : [],
+    status: "completed",
+    ...(envelope ? { encrypted_content: envelope } : {}),
+  }
+}
+
 const chatCompletionToResponsesResult = (
   response: ChatCompletionResponse,
-  model: string,
-  toolMap?: ResponsesChatToolMap,
+  options: {
+    readonly model: string
+    /** The upstream Chat model, which binds the reasoning state it returned. */
+    readonly reasoningModel: string
+    readonly toolMap?: ResponsesChatToolMap
+  },
 ): ResponsesResult => {
+  const { model, toolMap } = options
   const choice = response.choices[0]
   const output: Array<ResponseOutputItem> = []
   let outputText = ""
 
-  if (choice.message.reasoning_opaque || choice.message.encrypted_content) {
-    output.push({
-      id: choice.message.reasoning_opaque ?? `rs_${response.id}`,
-      type: "reasoning",
-      summary:
-        choice.message.reasoning_text ?
-          [{ type: "summary_text", text: choice.message.reasoning_text }]
-        : [],
-      ...(choice.message.encrypted_content ?
-        { encrypted_content: choice.message.encrypted_content }
-      : {}),
-    } satisfies ResponseOutputReasoning)
-  }
+  const reasoning = createChatReasoningOutput({
+    id: `rs_${response.id}`,
+    model: options.reasoningModel,
+    text: choice.message.reasoning_text,
+    opaque: choice.message.reasoning_opaque,
+    encryptedContent: choice.message.encrypted_content,
+  })
+  if (reasoning) output.push(reasoning)
 
   // Map text content
   if (choice.message.content) {
@@ -2207,6 +2290,8 @@ const emitTextDelta = async (
 ): Promise<void> => {
   if (!s.textItemAdded) {
     s.textItemAdded = true
+    s.outputStarted = true
+    s.messageItemId = ccMessageItemId(s.responseId)
     s.textOutputIndex = s.nextOutputIndex++
     await writeEvent("response.output_item.added", {
       item: {
@@ -2219,6 +2304,15 @@ const emitTextDelta = async (
       output_index: s.textOutputIndex,
       sequence_number: s.seqNum++,
       type: "response.output_item.added",
+    })
+    // Clients that index content parts need the part before its first delta.
+    await writeEvent("response.content_part.added", {
+      content_index: 0,
+      item_id: s.messageItemId,
+      output_index: s.textOutputIndex,
+      part: { type: "output_text", text: "", annotations: [] },
+      sequence_number: s.seqNum++,
+      type: "response.content_part.added",
     })
   }
 
@@ -2288,6 +2382,7 @@ async function announceToolCall(
     return
   }
   fcState.itemId = item.id ?? fcState.itemId
+  s.outputStarted = true
   await writeEvent("response.output_item.added", {
     item: { ...item, id: fcState.itemId, arguments: "" },
     output_index: fcState.outputIndex,
@@ -2309,6 +2404,9 @@ const emitDoneEvents = async (
   finishReason: string,
   writeEvent: WriteEventFn,
 ): Promise<"response.completed" | "response.incomplete"> => {
+  // Clients record items in the order they complete. Reasoning comes before
+  // the text and calls it produced, even when its state arrived after them.
+  await emitReasoningDoneEvents(s, writeEvent)
   const pending: Array<{ index: number; emit: () => Promise<void> }> = []
   if (s.accumulatedText) {
     pending.push({
@@ -2325,24 +2423,44 @@ const emitDoneEvents = async (
   pending.sort((left, right) => left.index - right.index)
   for (const entry of pending) await entry.emit()
 
-  const reasoning = fallbackStreamReasoning(s)
-  if (reasoning) {
-    const outputIndex = s.nextOutputIndex++
-    await writeEvent("response.output_item.added", {
-      item: { ...reasoning, status: "in_progress" },
-      output_index: outputIndex,
+  return await emitResponseCompleted(s, finishReason, writeEvent)
+}
+
+async function emitReasoningDoneEvents(
+  s: CCStreamState,
+  writeEvent: WriteEventFn,
+): Promise<void> {
+  const { reasoning } = s
+  if (!reasoning) return
+  // Reasoning first seen after the output started is added only now.
+  const announced =
+    reasoning.announced ?? (await announceReasoning(s, reasoning, writeEvent))
+  const item = ccReasoningOutput(s)
+  if (!item) return
+  if (reasoning.summaryPartAdded) {
+    await writeEvent("response.reasoning_summary_text.done", {
+      item_id: announced.itemId,
+      output_index: announced.outputIndex,
       sequence_number: s.seqNum++,
-      type: "response.output_item.added",
+      summary_index: 0,
+      text: reasoning.text,
+      type: "response.reasoning_summary_text.done",
     })
-    await writeEvent("response.output_item.done", {
-      item: reasoning,
-      output_index: outputIndex,
+    await writeEvent("response.reasoning_summary_part.done", {
+      item_id: announced.itemId,
+      output_index: announced.outputIndex,
+      part: { type: "summary_text", text: reasoning.text },
       sequence_number: s.seqNum++,
-      type: "response.output_item.done",
+      summary_index: 0,
+      type: "response.reasoning_summary_part.done",
     })
   }
-
-  return await emitResponseCompleted(s, finishReason, writeEvent)
+  await writeEvent("response.output_item.done", {
+    item,
+    output_index: announced.outputIndex,
+    sequence_number: s.seqNum++,
+    type: "response.output_item.done",
+  })
 }
 
 const emitTextDoneEvents = async (
@@ -2356,6 +2474,15 @@ const emitTextDoneEvents = async (
     sequence_number: s.seqNum++,
     text: s.accumulatedText,
     type: "response.output_text.done",
+  })
+
+  await writeEvent("response.content_part.done", {
+    content_index: 0,
+    item_id: s.messageItemId,
+    output_index: s.textOutputIndex ?? 0,
+    part: { type: "output_text", text: s.accumulatedText, annotations: [] },
+    sequence_number: s.seqNum++,
+    type: "response.content_part.done",
   })
 
   await writeEvent("response.output_item.done", {
@@ -2480,9 +2607,11 @@ const emitResponseCompleted = async (
     })
   }
 
-  const finalOutput = inOutputOrder(indexed)
-  const reasoning = fallbackStreamReasoning(s)
-  if (reasoning) finalOutput.push(reasoning)
+  const reasoning = ccReasoningOutput(s)
+  const finalOutput = [
+    ...(reasoning ? [reasoning] : []),
+    ...inOutputOrder(indexed),
+  ]
 
   let finalStatus = "completed"
   let incompleteDetails: ResponsesResult["incomplete_details"] = null
@@ -2509,6 +2638,11 @@ const emitResponseCompleted = async (
 
 export interface ChatResponsesStreamTarget {
   readonly model: string
+  /**
+   * The upstream Chat model, which binds the reasoning state it returns.
+   * Defaults to `model`.
+   */
+  readonly reasoningModel?: string
   /** Restores client tool identities on translated tool calls. */
   readonly toolMap?: ResponsesChatToolMap
   /** Receives reported usage even if the stream stalls before its terminal. */
@@ -2525,12 +2659,16 @@ export const streamChatCompletionsAsResponses = async (
   state: CCStreamState
   terminal?: "response.completed" | "response.incomplete"
 }> => {
-  const { model, toolMap, onUsage } =
+  const { model, reasoningModel, toolMap, onUsage } =
     typeof target === "string" ? { model: target } : target
   return await streamChatCompletionsAsResponsesWithState({
     stream,
     ccStream,
-    state: createCCStreamState(model, toolMap),
+    state: createCCStreamState({
+      model,
+      reasoningModel: reasoningModel ?? model,
+      toolMap,
+    }),
     onUsage: (usage) => onUsage?.(mapCCStreamUsage(usage)),
   })
 }
@@ -2607,14 +2745,8 @@ async function processChatCompletionsChunk(
   }
   const choice = chunk.choices.at(0)
   if (choice?.delta) {
-    if (state.preserveFallbackThinking) {
-      if (choice.delta.reasoning_text)
-        state.reasoningText += choice.delta.reasoning_text
-      if (choice.delta.reasoning_opaque)
-        state.reasoningOpaque = choice.delta.reasoning_opaque
-      if (choice.delta.encrypted_content)
-        state.encryptedContent = choice.delta.encrypted_content
-    }
+    // Reasoning precedes the output a chunk carries with it.
+    await emitReasoningDelta(state, choice.delta, writeEvent)
     const content = choice.delta.content as string | undefined
     if (content) await emitTextDelta(state, content, writeEvent)
     for (const toolCall of choice.delta.tool_calls ?? []) {
@@ -2626,28 +2758,87 @@ async function processChatCompletionsChunk(
   if (finishReason) state.pendingFinishReason = finishReason
 }
 
-function fallbackStreamReasoning(
+/**
+ * Stream the summary live until the output starts; the state is complete
+ * only when the turn is. Clients apply text and summary deltas to the item
+ * they saw added last, so later reasoning goes out with the item's final
+ * event instead, and none of it is dropped.
+ */
+async function emitReasoningDelta(
+  s: CCStreamState,
+  delta: ChatCompletionChunk["choices"][number]["delta"],
+  writeEvent: WriteEventFn,
+): Promise<void> {
+  const text = delta.reasoning_text ?? ""
+  if (!text && !delta.reasoning_opaque && !delta.encrypted_content) return
+  s.reasoning ??= { text: "", summaryPartAdded: false }
+  const reasoning = s.reasoning
+  // Each chunk's state supersedes the previous one.
+  if (delta.reasoning_opaque) reasoning.opaque = delta.reasoning_opaque
+  if (delta.encrypted_content)
+    reasoning.encryptedContent = delta.encrypted_content
+  reasoning.text += text
+  if (s.outputStarted) return
+  const announced =
+    reasoning.announced ?? (await announceReasoning(s, reasoning, writeEvent))
+  if (!text) return
+  if (!reasoning.summaryPartAdded) {
+    reasoning.summaryPartAdded = true
+    await writeEvent("response.reasoning_summary_part.added", {
+      item_id: announced.itemId,
+      output_index: announced.outputIndex,
+      part: { type: "summary_text", text: "" },
+      sequence_number: s.seqNum++,
+      summary_index: 0,
+      type: "response.reasoning_summary_part.added",
+    })
+  }
+  await writeEvent("response.reasoning_summary_text.delta", {
+    delta: text,
+    item_id: announced.itemId,
+    output_index: announced.outputIndex,
+    sequence_number: s.seqNum++,
+    summary_index: 0,
+    type: "response.reasoning_summary_text.delta",
+  })
+}
+
+async function announceReasoning(
+  s: CCStreamState,
+  reasoning: CCReasoningState,
+  writeEvent: WriteEventFn,
+): Promise<NonNullable<CCReasoningState["announced"]>> {
+  const announced = {
+    itemId: `rs_${s.responseId}`,
+    outputIndex: s.nextOutputIndex++,
+  }
+  reasoning.announced = announced
+  await writeEvent("response.output_item.added", {
+    item: {
+      id: announced.itemId,
+      type: "reasoning",
+      summary: [],
+      status: "in_progress",
+    },
+    output_index: announced.outputIndex,
+    sequence_number: s.seqNum++,
+    type: "response.output_item.added",
+  })
+  return announced
+}
+
+function ccReasoningOutput(
   state: CCStreamState,
 ): ResponseOutputReasoning | undefined {
-  if (
-    !state.preserveFallbackThinking
-    || (!state.reasoningOpaque
-      && !state.reasoningText
-      && !state.encryptedContent)
-  )
-    return undefined
-  return {
-    id: state.reasoningOpaque ?? `rs_${state.responseId}`,
-    type: "reasoning",
-    summary:
-      state.reasoningText ?
-        [{ type: "summary_text", text: state.reasoningText }]
-      : [],
-    status: "completed",
-    ...(state.encryptedContent ?
-      { encrypted_content: state.encryptedContent }
-    : {}),
-  }
+  const { reasoning } = state
+  if (!reasoning?.announced) return undefined
+  return createChatReasoningOutput({
+    id: reasoning.announced.itemId,
+    model: state.reasoningModel,
+    text: reasoning.text,
+    opaque: reasoning.opaque,
+    encryptedContent: reasoning.encryptedContent,
+  })
 }
 
 const handleWithAnthropicMessages = async (options: {
@@ -2711,17 +2902,16 @@ async function respondWithBufferedResponsesResult(
     stream.onAbort(() => {
       lifecycle.abort()
     })
+    const progress = new PendingResponseProgress(stream, failureState)
     try {
-      if (preflush.kind === "pending") await writeSseHeartbeat(stream)
+      if (preflush.kind === "pending") await progress.announce()
       const result =
         preflush.kind === "settled" ?
           preflush.value
-        : unwrapSsePreflushSettlement(
-            await withHeartbeatWhilePending(preflush.pending, stream),
-          )
+        : unwrapSsePreflushSettlement(await progress.wait(preflush.pending))
       if (stream.aborted || stream.closed) return
       setResponsesResultContext(c, result)
-      await emitResponsesResultAsStream(stream, result)
+      await progress.emit(result)
       await lifecycle.succeed("synthetic")
     } catch (error) {
       if (isAbortError(error) || stream.aborted || stream.closed) {
@@ -2866,11 +3056,11 @@ export const handleWithChatCompletions = async (
           ccResponse.choices[0]?.message?.content ?? "",
         )
 
-        const result = chatCompletionToResponsesResult(
-          ccResponse,
-          responseModel,
-          options.toolMap,
-        )
+        const result = chatCompletionToResponsesResult(ccResponse, {
+          model: responseModel,
+          reasoningModel: ccPayload.model,
+          toolMap: options.toolMap,
+        })
         return c.json(result)
       },
     )
@@ -2937,16 +3127,20 @@ export const handleWithChatCompletions = async (
           )
           finishSpan()
 
-          const result = chatCompletionToResponsesResult(
-            response,
-            responseModel,
-            options.toolMap,
-          )
+          const result = chatCompletionToResponsesResult(response, {
+            model: responseModel,
+            reasoningModel: ccPayload.model,
+            toolMap: options.toolMap,
+          })
           return c.json(result)
         }
 
         return streamSSE(c, async (sseStream) => {
-          const chatState = createCCStreamState(responseModel, options.toolMap)
+          const chatState = createCCStreamState({
+            model: responseModel,
+            reasoningModel: ccPayload.model,
+            toolMap: options.toolMap,
+          })
           const failureState = createResponsesStreamFailureState(responseModel)
           const lifecycle = createResponsesTerminalLifecycle({
             c,
@@ -3087,11 +3281,11 @@ async function completeBufferedChatResponse(
       })
       setSentryOutputMessages(span, response.choices[0]?.message.content ?? "")
     }
-    return chatCompletionToResponsesResult(
-      response,
-      options.responseModel,
-      options.toolMap,
-    )
+    return chatCompletionToResponsesResult(response, {
+      model: options.responseModel,
+      reasoningModel: options.ccPayload.model,
+      toolMap: options.toolMap,
+    })
   }
   // Compaction keeps its existing tracing. Only buffered client SSE needs the
   // Chat span otherwise provided by the streaming fallback branch.
@@ -3133,7 +3327,7 @@ export function chatCompactionTriggerResult(
   model: string,
 ): ResponsesResult {
   return toRemoteCompactionResult(
-    chatCompletionToResponsesResult(response, model),
+    chatCompletionToResponsesResult(response, { model, reasoningModel: model }),
     chatCompactionSummary(response),
   )
 }
@@ -3160,8 +3354,9 @@ function handleStreamingChatFallbackWebSearch(
     stream.onAbort(() => {
       lifecycle.abort()
     })
+    const progress = new PendingResponseProgress(stream, failureState)
     try {
-      const result = await withHeartbeatWhilePending(
+      const result = await progress.wait(
         (async () => {
           const payload = {
             ...options.ccPayload,
@@ -3177,20 +3372,19 @@ function handleStreamingChatFallbackWebSearch(
             maxUses: options.webSearchMaxUses,
             signal: c.req.raw.signal,
           })
-          return chatCompletionToResponsesResult(
-            response,
-            options.responseModel,
-            options.toolMap,
-          )
+          return chatCompletionToResponsesResult(response, {
+            model: options.responseModel,
+            reasoningModel: options.ccPayload.model,
+            toolMap: options.toolMap,
+          })
         })(),
-        stream,
       )
       if (stream.aborted || stream.closed) {
         lifecycle.abort()
         return
       }
       setResponsesResultContext(c, result)
-      await emitResponsesResultAsStream(stream, result)
+      await progress.emit(result)
       await lifecycle.succeed("synthetic")
     } catch (error) {
       if (isAbortError(error) || stream.aborted || stream.closed) {

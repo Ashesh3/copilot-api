@@ -244,6 +244,30 @@ blocks. The tag identifies the encoding, not trusted or authenticated content;
 the upstream provider still verifies its signatures. The native Responses
 candidate removes these envelopes while retaining readable summaries.
 
+Gateway-managed web search on this bridge returns every round, not only the
+last one. Each earlier round's thinking and text become reasoning items and
+`commentary` messages, and each managed call becomes a completed
+`web_search_call` (`ws_` plus the tool-use ID) showing its query or opened
+page. The call's `encrypted_content` holds the exact Messages `tool_use` and
+`tool_result` the loop sent, under the `capi_anthropic_web_search_v1:` tag, so
+a later turn rebuilds the same assistant and user turns: parallel calls stay
+in one assistant turn with their results together in the next user turn. A
+request without tools of its own declares the replayed search tool, owned by
+the gateway, because the Anthropic Messages API rejects tool history in a
+request that declares no tools.
+The state is written and read under one 4 MiB limit. A result too large for it
+keeps its beginning and a truncation note, so the call still replays; Messages
+may then drop the thinking that followed the full result in that turn.
+A `web_search_call` without this state keeps its previous text handling, and
+native Responses drops the state with other output ciphertext.
+
+Developer and system input messages that precede the model's first answer
+form the Messages `system` prompt. Codex adds developer messages later in a
+thread when permissions, the sandbox, the model or the collaboration mode
+change. Once the model has answered, such a message stays at its position as
+user-turn text in a `<system-reminder>` block, after any tool results of that
+turn, so the system prompt and the cached prefix do not change mid-thread.
+
 For Messages-to-Responses/Chat routing, system and developer instructions retain
 their roles and position. Request effort and structured output are translated.
 Claude's `DeferredToolPlaceholder` sentinel is omitted while discovered real
@@ -467,6 +491,16 @@ that the upstream compatibility layer may append after `message_stop`.
 Every committed dialect has one terminal owner. Successful completed and
 incomplete terminals remain successful; received failed/error terminals remain
 visible without a conflicting second terminal. Partial output is retained.
+
+Responses turns that wait for a buffered upstream result (Messages and Chat
+translations, compaction triggers, and gateway-managed web search) keep
+clients from timing out. Codex abandons a stream after five minutes without an
+event and does not count SSE comments or WebSocket pings, so over HTTP a result
+that misses the preflush window announces its response with
+`response.created` and then sends `response.in_progress` every 15 seconds; the
+result completes that response. Over WebSocket the turn sends
+`response.in_progress` frames that name no response, so model fallback,
+interruption, and continuation are unchanged.
 
 <!-- compatibility-contract:stream-behavior:start -->
 | Surface | Behavior |

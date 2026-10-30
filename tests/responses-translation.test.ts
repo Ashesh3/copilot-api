@@ -536,3 +536,90 @@ test("maps raw Responses reasoning content into Anthropic thinking", () => {
     signature: "encrypted-reasoning@rs_1",
   })
 })
+
+test("separates reasoning summary parts in a translated Responses result", () => {
+  const response: ResponsesResult = {
+    id: "resp_summary_parts",
+    object: "response",
+    created_at: 1,
+    model: "gpt-current",
+    output_text: "done",
+    status: "completed",
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+    output: [
+      {
+        id: "rs_parts",
+        type: "reasoning",
+        summary: [
+          { type: "summary_text", text: "**Reading** the file." },
+          { type: "summary_text", text: "**Editing** the test." },
+        ],
+        encrypted_content: "encrypted-reasoning",
+      },
+    ],
+  }
+
+  const anthropic = translateResponsesResultToAnthropic(response)
+
+  expect(anthropic.content[0]).toEqual({
+    type: "thinking",
+    thinking: "**Reading** the file.\n\n**Editing** the test.",
+    signature: "encrypted-reasoning@rs_parts",
+  })
+})
+
+test("names a Messages JSON schema output format for Responses", () => {
+  // Claude Code's session title helper sends this structured output request.
+  const schema = {
+    type: "object",
+    properties: { title: { type: "string" } },
+    required: ["title"],
+    additionalProperties: false,
+  }
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "Name this session." }],
+    output_config: { format: { type: "json_schema", schema } },
+  })
+
+  expect(translated.text).toEqual({
+    format: { type: "json_schema", name: "output", schema, strict: false },
+  })
+})
+
+test("keeps Claude redacted thinking out of GPT input", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [
+      { role: "user", content: "hello" },
+      {
+        role: "assistant",
+        content: [
+          { type: "redacted_thinking", data: "EmwKRedactedState" },
+          { type: "text", text: "Claude answer" },
+        ],
+      } as AnthropicMessagesPayload["messages"][number],
+      { role: "user", content: "continue" },
+    ],
+  })
+
+  expect(translated.input).toEqual([
+    { type: "message", role: "user", content: "hello" },
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Claude answer" }],
+    },
+    { type: "message", role: "user", content: "continue" },
+  ])
+})

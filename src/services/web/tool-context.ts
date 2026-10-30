@@ -270,6 +270,22 @@ export function runWithWebTools<T>(
 export function isCallerOwnedWebSearch(name: string): boolean {
   return context.getStore()?.callerNames.has(name) === true
 }
+/**
+ * Mark a search tool that a translated request declares itself as owned by
+ * the gateway, so the managed loop answers its calls instead of returning
+ * them to a client that cannot run them. A caller function of the same name
+ * stays the caller's. Returns whether an inference scope adopted the name.
+ */
+export function adoptManagedWebSearchTool(name: string): boolean {
+  const active = context.getStore()
+  if (!active || active.callerNames.has(name)) return false
+  if (!active.injected.has(name))
+    active.injected.set(
+      name,
+      active.requested.get(name) ?? definition("search", {}),
+    )
+  return true
+}
 const searchParameters = {
   type: "object",
   properties: {

@@ -522,3 +522,101 @@ test("compatibility retry budget can be claimed only once and shares total sends
   expect(claimCompatibilityRetry(exhausted)).toBe(false)
   expect(exhausted).toEqual({ compatibilityRetryUsed: false, remaining: 0 })
 })
+
+const ttlRefusal = () =>
+  Response.json(
+    {
+      error: {
+        message:
+          "Long-lived prompt caching (cache_control with a ttl other than 5m) is not supported.",
+        code: "unsupported_value",
+      },
+    },
+    { status: 400 },
+  )
+
+describe("native long-lived prompt cache compatibility", () => {
+  test("drops only long-lived ttls everywhere after a refusal", async () => {
+    const body = {
+      model: "claude-opus-5.5",
+      system: [
+        {
+          type: "text",
+          text: "Instructions.",
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [
+                {
+                  type: "text",
+                  text: "Result.",
+                  cache_control: { type: "ephemeral", ttl: "1h" },
+                },
+              ],
+            },
+            {
+              type: "text",
+              text: "Continue.",
+              cache_control: { type: "ephemeral", ttl: "5m" },
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          name: "lookup",
+          input_schema: { type: "object" },
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+      ],
+    }
+
+    const result = await normalize({
+      body,
+      endpoint: "/v1/messages",
+      response: ttlRefusal(),
+    })
+
+    expect(result.kind).toBe("unsupported_extended_cache_ttl")
+    expect(JSON.stringify(result.retry)).not.toContain('"1h"')
+    expect(result.retry).toHaveProperty("system.0.cache_control", {
+      type: "ephemeral",
+    })
+    expect(result.retry).toHaveProperty("tools.0.cache_control", {
+      type: "ephemeral",
+    })
+    expect(result.retry).toHaveProperty("messages.0.content.1.cache_control", {
+      type: "ephemeral",
+      ttl: "5m",
+    })
+  })
+
+  test("ignores the refusal on other endpoints or without a long-lived ttl", async () => {
+    for (const item of [
+      {
+        endpoint: "/responses" as const,
+        body: { cache_control: { type: "ephemeral", ttl: "1h" } },
+      },
+      {
+        endpoint: "/v1/messages" as const,
+        body: { cache_control: { type: "ephemeral", ttl: "5m" } },
+      },
+    ]) {
+      const response = ttlRefusal()
+      const decision = await classifyCompatibilityRetry({
+        body: item.body,
+        endpoint: item.endpoint,
+        response,
+      })
+      expect(decision).toEqual({ kind: "none" })
+      expect(response.bodyUsed).toBe(false)
+    }
+  })
+})

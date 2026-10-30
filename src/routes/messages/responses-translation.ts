@@ -119,7 +119,7 @@ export const translateAnthropicMessagesToResponsesPayload = (
     : {}),
     text:
       payload.output_config?.format ?
-        { format: payload.output_config.format }
+        { format: translateOutputFormat(payload.output_config.format) }
       : undefined,
     task_budget: payload.output_config?.task_budget,
     reasoning: {
@@ -133,6 +133,34 @@ export const translateAnthropicMessagesToResponsesPayload = (
   }
 
   return responsesPayload
+}
+
+const RESPONSES_FORMAT_NAME = /^[\w-]{1,64}$/u
+
+/**
+ * Messages structured output carries only `type` and `schema`, while the
+ * Responses API requires a name for a JSON schema format. Strict mode stays
+ * off unless asked for: it rejects schemas with optional properties.
+ */
+const translateOutputFormat = (
+  format: NonNullable<
+    NonNullable<AnthropicMessagesPayload["output_config"]>["format"]
+  >,
+): NonNullable<NonNullable<ResponsesPayload["text"]>["format"]> => {
+  if (format.type !== "json_schema") return format
+  const name =
+    typeof format.name === "string" && RESPONSES_FORMAT_NAME.test(format.name) ?
+      format.name
+    : "output"
+  return {
+    type: "json_schema",
+    name,
+    schema: format.schema,
+    strict: typeof format.strict === "boolean" ? format.strict : false,
+    ...(typeof format.description === "string" ?
+      { description: format.description }
+    : {}),
+  }
 }
 
 const translateMessage = (
@@ -219,6 +247,9 @@ const translateAssistantMessage = (
       items.push(createFunctionToolCall(block))
       continue
     }
+
+    // Redacted thinking is encrypted for Claude alone; as text it is noise.
+    if (block.type === "redacted_thinking") continue
 
     if (isAnthropicThinkingBlock(block)) {
       const reasoningContent = createReasoningContent(block)
@@ -648,29 +679,39 @@ const extractReasoningText = (
   item: ResponseOutputReasoning,
   options: { useFallback?: boolean } = {},
 ): string => {
-  const segments: Array<string> = []
-
-  const collectFromBlocks = (blocks?: Array<ResponseReasoningBlock>) => {
-    if (!Array.isArray(blocks)) {
-      return
-    }
-
-    for (const block of blocks) {
-      if (typeof block.text === "string") {
-        segments.push(block.text)
-        continue
-      }
-    }
-  }
-
-  collectFromBlocks(item.summary)
-  collectFromBlocks(item.content)
-
-  const text = segments.join("").trim()
+  const text = joinReasoningText(item.summary, item.content)
   // Compatible with opencode, it will filter out blocks where the thinking text is empty, so we add a default thinking text here
   if (text.length > 0) return text
   return options.useFallback ? THINKING_TEXT : ""
 }
+
+const readReasoningTexts = (
+  blocks: Array<ResponseReasoningBlock> | undefined,
+): Array<string> =>
+  Array.isArray(blocks) ?
+    blocks.flatMap((block) =>
+      typeof block.text === "string" ? [block.text] : [],
+    )
+  : []
+
+/**
+ * Summary parts are separate paragraphs, so joining them bare would run one
+ * part's last sentence into the next part's heading. Raw reasoning content
+ * parts are fragments of one text and join as they are.
+ */
+export const joinReasoningText = (
+  summary: Array<ResponseReasoningBlock> | undefined,
+  content: Array<ResponseReasoningBlock> | undefined,
+): string =>
+  [
+    readReasoningTexts(summary)
+      .filter((part) => part.trim().length > 0)
+      .join("\n\n"),
+    readReasoningTexts(content).join(""),
+  ]
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join("\n\n")
 
 const createToolUseContentBlock = (
   call: ResponseOutputFunctionCall,

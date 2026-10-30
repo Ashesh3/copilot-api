@@ -18,6 +18,8 @@ import { getRequestId } from "~/lib/request-session"
 
 import type { AnthropicErrorEvent } from "./anthropic-types"
 
+import { createUpstreamPromptTooLongError } from "./prompt-too-long"
+
 type AnthropicErrorBody = AnthropicErrorEvent & { request_id?: string }
 
 function exactKeys(
@@ -215,6 +217,15 @@ export async function forwardMessagesError(
     const inspection = await inspectHttpError(error)
     reportHttpError(c, inspection)
     if (inspection.kind === "upstream") {
+      const promptTooLong = createUpstreamPromptTooLongError(inspection)
+      if (promptTooLong) {
+        for (const [name, value] of Object.entries(inspection.responseHeaders))
+          c.header(name, value)
+        return c.json(
+          withRequestId(promptTooLong, requestId(c)),
+          inspection.status as ContentfulStatusCode,
+        )
+      }
       return c.body(
         inspection.bodyBytes.slice(),
         inspection.status as ContentfulStatusCode,

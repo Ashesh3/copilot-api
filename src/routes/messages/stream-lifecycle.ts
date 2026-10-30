@@ -14,6 +14,7 @@ import type {
 } from "./anthropic-types"
 
 import { createAnthropicStreamError } from "./error"
+import { createUpstreamPromptTooLongError } from "./prompt-too-long"
 
 export interface AnthropicSseWriter {
   readonly aborted: boolean
@@ -83,6 +84,8 @@ function createMessagesStreamFailure(
 ): AnthropicErrorEvent {
   if (failure.kind === "thrown" && failure.inspection?.kind === "upstream") {
     const inspection = failure.inspection
+    const promptTooLong = createUpstreamPromptTooLongError(inspection)
+    if (promptTooLong) return promptTooLong
     return {
       type: "error",
       error: {

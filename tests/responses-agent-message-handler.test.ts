@@ -14,6 +14,7 @@ import {
 } from "~/routes/responses/websocket"
 import { server } from "~/server"
 
+import { withoutPromptCache } from "./helpers/prompt-cache"
 import {
   PROTOCOL_GATEWAY_KEY,
   seedProtocolDatabase,
@@ -245,7 +246,7 @@ test.each([false, true])(
     expect(body).toContain("hello world")
     expect(requests).toHaveLength(1)
     expect(requests[0]?.path).toBe("/v1/messages")
-    expect(requests[0]?.body.messages).toEqual([
+    expect(withoutPromptCache(requests[0]?.body.messages)).toEqual([
       {
         role: "user",
         content: [{ type: "text", text: "Environment context" }],
@@ -295,7 +296,7 @@ test("WebSocket continuation preserves the next agent message and original sourc
     }),
   )
   expect(socket.sent.at(-1)?.type).toBe("response.completed")
-  expect(requests[0]?.body.messages).toEqual([
+  expect(withoutPromptCache(requests[0]?.body.messages)).toEqual([
     { role: "user", content: [{ type: "text", text: taskText }] },
   ])
   expect(socket.data.responseSnapshots.get("msg_agent_1")?.input?.[0]).toEqual(
@@ -315,7 +316,7 @@ test("WebSocket continuation preserves the next agent message and original sourc
   )
   expect(socket.sent.at(-1)?.type).toBe("response.completed")
   expect(requests).toHaveLength(2)
-  expect(requests[1]?.body.messages).toEqual([
+  expect(withoutPromptCache(requests[1]?.body.messages)).toEqual([
     { role: "user", content: [{ type: "text", text: taskText }] },
     { role: "assistant", content: [{ type: "text", text: "hello world" }] },
     { role: "user", content: [{ type: "text", text: followup }] },
@@ -358,7 +359,7 @@ test("WebSocket warmup retains the original agent task for the following generat
   )
   expect(socket.sent.at(-1)?.type).toBe("response.completed")
   expect(requests).toHaveLength(1)
-  expect(requests[0]?.body.messages).toEqual([
+  expect(withoutPromptCache(requests[0]?.body.messages)).toEqual([
     { role: "user", content: [{ type: "text", text: taskText }] },
   ])
   expect(requests[0]?.body.output_config).toMatchObject({ effort: "max" })
@@ -499,7 +500,7 @@ test.each([messagesModel, "chat-agent-model"])(
 )
 
 test.each(["system", "developer"])(
-  "Messages tool-result followups remain agent-originated after a trailing %s instruction is hoisted",
+  "Messages tool-result followups remain agent-originated after a trailing %s instruction",
   async (role) => {
     const response = await post({
       model: messagesModel,
@@ -529,7 +530,26 @@ test.each(["system", "developer"])(
     })
     expect(response.status).toBe(200)
     expect(requests).toHaveLength(1)
-    expect(requests[0]?.body.system).toBe("Keep the response short")
+    // The model already answered, so the instruction stays after the result.
+    expect(requests[0]?.body.system).toBeUndefined()
+    expect(
+      withoutPromptCache(
+        (requests[0]?.body.messages as Array<unknown> | undefined)?.at(-1),
+      ),
+    ).toEqual({
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "call_hoisted",
+          content: "echo completed",
+        },
+        {
+          type: "text",
+          text: "<system-reminder>\nKeep the response short\n</system-reminder>",
+        },
+      ],
+    })
     expect(requests[0]?.headers.get("x-initiator")).toBe("agent")
   },
 )

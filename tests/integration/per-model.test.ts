@@ -17,25 +17,17 @@ beforeAll(async () => {
   await initializeTestState()
 }, TEST_TIMEOUT)
 
-// Models grouped by their primary API endpoint
+// Models grouped by their primary API endpoint. Keep these to models the CI
+// account serves; a model it stops serving is skipped with a warning that
+// asks for this list to be updated.
 const MESSAGES_MODELS = [
-  "claude-opus-4.6",
-  "claude-opus-4.6-1m",
-  "claude-opus-4.6-fast",
-  "claude-sonnet-4.6",
-  "claude-sonnet-4",
-  "claude-sonnet-4.5",
-  "claude-opus-4.5",
+  "claude-opus-5.5",
+  "claude-sonnet-5.5",
+  "claude-haiku-5.5",
   "claude-haiku-4.5",
 ]
 
-const RESPONSES_ONLY_MODELS = [
-  "gpt-5.2-codex",
-  "gpt-5.3-codex",
-  "gpt-5.1-codex",
-  "gpt-5.1-codex-mini",
-  "gpt-5.1-codex-max",
-]
+const RESPONSES_MODELS = ["gpt-5.3-codex", "grok-4.6"]
 
 const CHAT_COMPLETIONS_MODELS = [
   "gpt-4o-mini",
@@ -47,18 +39,10 @@ const CHAT_COMPLETIONS_MODELS = [
   "gpt-4-o-preview",
   "gpt-4",
   "gpt-4-0613",
-  "gpt-4-0125-preview",
   "gpt-4.1",
   "gpt-4.1-2025-04-14",
   "gpt-3.5-turbo",
   "gpt-3.5-turbo-0613",
-  "gpt-5-mini",
-  "gpt-5.1",
-  "gpt-5.2",
-  "gemini-2.5-pro",
-  "gemini-3-pro-preview",
-  "gemini-3-flash-preview",
-  "gemini-3.1-pro-preview",
 ]
 
 const EMBEDDING_MODELS = [
@@ -222,7 +206,7 @@ describe("Per-model: Messages API (streaming)", () => {
 
 // ── Responses API models (non-streaming) ──
 describe("Per-model: Responses API (non-streaming)", () => {
-  for (const modelId of RESPONSES_ONLY_MODELS) {
+  for (const modelId of RESPONSES_MODELS) {
     test(
       modelId,
       async () => {
@@ -250,7 +234,7 @@ describe("Per-model: Responses API (non-streaming)", () => {
 
 // ── Responses API models (streaming) ──
 describe("Per-model: Responses API (streaming)", () => {
-  for (const modelId of RESPONSES_ONLY_MODELS) {
+  for (const modelId of RESPONSES_MODELS) {
     test(
       modelId,
       async () => {
