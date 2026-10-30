@@ -111,9 +111,51 @@ const RESPONSES_REASONING_CONTEXT = "[Assistant reasoning context]"
 const RESPONSES_TOOL_CONTEXT = "[Non-function tool context]"
 const RESPONSES_UNPAIRED_RESULT_CONTEXT = "[Unpaired tool result]"
 const MAX_ASSISTANT_FALLBACK_TEXT_LENGTH = 16_384
+const PROMPT_CACHE_BREAKPOINT = { type: "ephemeral" } as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Codex resends the whole conversation on every turn and only appends to it.
+ * Messages caches a prompt only up to blocks marked with `cache_control`, so
+ * mark the end of the instructions and the end of the conversation, as
+ * Copilot's own Claude client does. The next turn then reads that prefix from
+ * the cache instead of processing it again. Thinking and empty text blocks
+ * cannot carry a marker.
+ */
+function markPromptCacheBreakpoints(payload: AnthropicMessagesPayload): void {
+  if (typeof payload.system === "string" && payload.system) {
+    payload.system = [
+      {
+        type: "text",
+        text: payload.system,
+        cache_control: { ...PROMPT_CACHE_BREAKPOINT },
+      },
+    ]
+  }
+  const last = payload.messages.at(-1)
+  if (!last) return
+  if (typeof last.content === "string") {
+    if (!last.content) return
+    last.content = [
+      {
+        type: "text",
+        text: last.content,
+        cache_control: { ...PROMPT_CACHE_BREAKPOINT },
+      },
+    ]
+    return
+  }
+  const block = last.content.findLast(
+    (candidate) =>
+      candidate.type !== "thinking"
+      && candidate.type !== "redacted_thinking"
+      && (candidate.type !== "text"
+        || (typeof candidate.text === "string" && candidate.text.length > 0)),
+  )
+  if (block) block.cache_control = { ...PROMPT_CACHE_BREAKPOINT }
 }
 
 function addTranslationFinding(
@@ -751,6 +793,7 @@ export async function adaptResponsesToMessagesCandidate(options: {
       severity: "omitted",
     })
   }
+  markPromptCacheBreakpoints(payload)
   const meaningful =
     converted.messages.length > 0
     || converted.system.length > 0

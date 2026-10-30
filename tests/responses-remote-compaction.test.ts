@@ -12,6 +12,7 @@ import {
 } from "~/routes/responses/websocket"
 import { server } from "~/server"
 
+import { systemText, withoutPromptCache } from "./helpers/prompt-cache"
 import {
   PROTOCOL_GATEWAY_KEY,
   seedProtocolDatabase,
@@ -77,7 +78,7 @@ describe("Codex remote compaction over translated Messages", () => {
     expect(response.status).toBe(200)
     expect(readSummaryItem(await readSseEvents(response))).toBe(SUMMARY)
     const upstream = onlyUpstreamRequest("/v1/messages")
-    expect(upstream.body.system).toContain("You are Codex.")
+    expect(systemText(upstream.body.system)).toContain("You are Codex.")
     expect(upstream.body.tools).toEqual([
       expect.objectContaining({ name: "exec_command" }),
     ])
@@ -177,7 +178,7 @@ describe("Codex remote compaction over translated Messages", () => {
     const messages = onlyUpstreamRequest("/v1/messages").body
       .messages as Array<JsonRecord>
     expect(messages.map((message) => message.role)).not.toContain("assistant")
-    expect(messages.at(-1)).toEqual({
+    expect(withoutPromptCache(messages.at(-1))).toEqual({
       role: "user",
       content: [
         { type: "text", text: `[Previous conversation summary]\n${SUMMARY}` },

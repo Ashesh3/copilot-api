@@ -75,6 +75,7 @@ import {
 import { resetRejectedReasoningStateForTest } from "../src/services/copilot/responses-reasoning-state"
 import { sanitizeResponsesStreamEvent } from "../src/services/copilot/responses-terminal-sanitizer"
 import { clientToolsPayload } from "./helpers/client-tools-payload"
+import { withoutPromptCache } from "./helpers/prompt-cache"
 import {
   useProtocolDatabase,
   seedProtocolDatabase,
@@ -3231,10 +3232,12 @@ describe("responses websocket message handling", () => {
     expect(ws.sent.some((frame) => frame.includes("Hello from Messages"))).toBe(
       true,
     )
-    expect(clientToolsPayload(lastRequestBody ?? {})).toMatchObject({
+    expect(
+      withoutPromptCache(clientToolsPayload(lastRequestBody ?? {})),
+    ).toMatchObject({
       model: "gpt-5.4",
       max_tokens: 4096,
-      messages: [{ role: "user", content: "Hello" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
       stream: false,
     })
   })

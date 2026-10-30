@@ -25,6 +25,7 @@ import {
 } from "~/routes/responses/messages-progress-updates"
 import { decodeAnthropicReasoningEnvelope } from "~/routes/responses/messages-reasoning-provenance"
 
+import { withoutPromptCache } from "./helpers/prompt-cache"
 import {
   seedProtocolDatabase,
   useProtocolDatabase,
@@ -458,7 +459,7 @@ test("replays a progress-update turn exactly as Claude produced it", async () =>
     source: { model: "claude-opus-5.5", input, tools: [EXEC_TOOL] },
   })
 
-  expect(candidate.payload.messages).toEqual([
+  expect(withoutPromptCache(candidate.payload.messages)).toEqual([
     {
       role: "user",
       content: [{ type: "text", text: "Fix the failing test" }],
