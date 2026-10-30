@@ -1056,6 +1056,8 @@ async function handleChatCompletionsWithWebSearch(
     signal: c.req.raw.signal,
     maxUses: getGoogleChatWebSearchMaxUses(payload),
     webSearch: options.webSearch,
+    // Google clients keep the final round's usage; accounting counts all.
+    usage: "final-round",
   })
   if (initialPrepared.accountId !== undefined) {
     setRequestContext(c, { accountId: initialPrepared.accountId })

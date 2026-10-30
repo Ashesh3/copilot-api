@@ -343,8 +343,7 @@ describe("Codex with a Claude model, over the Messages bridge", () => {
 })
 
 describe("Codex with a Chat-only model, over the Chat adapter", () => {
-  // Hosted search on a Chat-only model runs the older Chat search loop.
-  for (const [turn, tools] of TURNS.filter(([name]) => name === "tool-less"))
+  for (const [turn, tools] of TURNS)
     for (const transport of TRANSPORTS)
       test(`a ${turn} turn reports the last round's input, ${transport}`, async () => {
         const usage = await clientUsage(transport, {
@@ -362,4 +361,32 @@ describe("Codex with a Chat-only model, over the Chat adapter", () => {
         })
         expect(await recordedTotals()).toMatchObject(ALL_ROUNDS)
       })
+})
+
+test("a Google client keeps the final round's usage, and every round is counted", async () => {
+  const response = await server.request(
+    `/v1beta/models/${CHAT}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "What changed?" }] }],
+        tools: [{ googleSearch: {} }],
+      }),
+    },
+  )
+  const body = (await response.json()) as { usageMetadata?: JsonRecord }
+
+  expect(response.status).toBe(200)
+  expect(upstream).toHaveLength(2)
+  expect(body.usageMetadata).toEqual({
+    promptTokenCount: 104_000,
+    candidatesTokenCount: 50,
+    totalTokenCount: 104_050,
+    cachedContentTokenCount: 100_000,
+  })
+  expect(await recordedTotals()).toMatchObject(ALL_ROUNDS)
 })

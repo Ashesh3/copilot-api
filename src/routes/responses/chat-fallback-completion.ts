@@ -5,13 +5,16 @@ import type {
 } from "~/services/copilot/create-chat-completions"
 
 import { LocalHTTPError } from "~/lib/error"
+import { captureRequestUsageObserver } from "~/lib/request-usage"
 import {
   buildWebSearchQuery,
   executeWebSearch,
   isChatWebSearchFunctionTool,
 } from "~/services/copilot/mcp-web-search"
+import { lastRoundContextUsage } from "~/services/web/context-usage"
 import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
-import { assertNoClientWebCalls } from "~/services/web/tool-output"
+import { assertNoClientWebCalls, sumUsage } from "~/services/web/tool-output"
+import { ManagedWebUsage } from "~/services/web/tool-usage"
 
 export const MAX_RESPONSES_WEB_SEARCH_USES = 8
 
@@ -47,12 +50,33 @@ function webSearchTool(payload: ChatCompletionsPayload): unknown {
   return payload.tools?.find((tool) => isChatWebSearchFunctionTool(tool))
 }
 
+/**
+ * The usage a client reads after gateway searches. By default it is the last
+ * round's prompt with every round's completion, since a Responses client such
+ * as Codex sizes its context by the reported input. `final-round` keeps the
+ * final round's own usage, for the Google route.
+ */
+export type ResponsesWebSearchUsage = "last-round-context" | "final-round"
+
+function withSearchUsage(
+  response: ChatCompletionResponse,
+  total: Record<string, unknown> | undefined,
+  usage: ResponsesWebSearchUsage | undefined,
+): ChatCompletionResponse {
+  if (usage === "final-round") return response
+  const reported = lastRoundContextUsage(response.usage, total, "chat")
+  return reported ?
+      { ...response, usage: reported as ChatCompletionResponse["usage"] }
+    : response
+}
+
 export async function resolvePreparedResponsesWebSearchCalls(options: {
   readonly completionFactory: ResponsesChatCompletionFactory
   readonly initial: PreparedResponsesChatCompletion
   readonly maxUses?: number
   readonly signal?: AbortSignal
   readonly webSearch?: (query: string, signal?: AbortSignal) => Promise<string>
+  readonly usage?: ResponsesWebSearchUsage
 }): Promise<ChatCompletionResponse> {
   let current = options.initial.response as ChatCompletionResponse
   let currentPayload = options.initial.processedPayload
@@ -62,16 +86,25 @@ export async function resolvePreparedResponsesWebSearchCalls(options: {
     Number.isInteger(options.maxUses) && Number(options.maxUses) > 0 ?
       Math.min(Number(options.maxUses), MAX_RESPONSES_WEB_SEARCH_USES)
     : MAX_RESPONSES_WEB_SEARCH_USES
+  // Request accounting counts every round, as in the managed loop.
+  const observed = new ManagedWebUsage("chat", captureRequestUsageObserver())
+  let total: Record<string, unknown> | undefined
 
   while (true) {
     const calls = webSearchCalls(current)
-    if (calls.length > 0 || searchUses > 0)
+    if (calls.length > 0 || searchUses > 0) {
+      observed.observe(current.usage, calls.length > 0)
+      total = sumUsage(total, current.usage)
       assertNoClientWebCalls(
         current as unknown as Record<string, unknown>,
         "chat",
         new Set(calls.map((call) => call.id)),
       )
-    if (calls.length === 0) return current
+    }
+    if (calls.length === 0)
+      return searchUses > 0 ?
+          withSearchUsage(current, total, options.usage)
+        : current
     if (
       iterations >= maxSearchUses
       || searchUses + calls.length > maxSearchUses
@@ -106,6 +139,7 @@ export async function resolvePreparedResponsesWebSearchCalls(options: {
       stream: false,
       tool_choice: "auto",
     }
+    observed.nextRound()
     const next = await options.completionFactory(nextPayload, {
       allowCompatibilityRetry: false,
       signal: options.signal,

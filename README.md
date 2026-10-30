@@ -180,6 +180,8 @@ parse, or cache them, and has no local-fetch fallback.**
   with gateway-run rounds therefore reports the last round's input-side
   tokens, whose prompt holds the earlier rounds, with the output of every
   round. Request accounting and the dashboard still count every round.
+  Hosted search that the gateway runs for a Chat-only model follows the same
+  rule; Google clients there keep the final round's own usage.
 
 This feature adds no standalone `web_fetch` implementation. Existing caller
 server-tool declarations still pass through subject to upstream support. Page
