@@ -37,9 +37,9 @@ const reasoning = {
   summary: [],
   encrypted_content: "opaque-signed-reasoning",
 }
-// Existing route policy strips foreign encrypted tokens before dispatch. The web
-// layer preserves the original output and leaves that independent policy intact.
-const replayedReasoning = { type: "reasoning", id: "rs_search", summary: [] }
+// Copilot-issued reasoning state is replayed on the next turn so the model keeps
+// its reasoning. The web layer preserves the original output unchanged.
+const replayedReasoning = reasoning
 const clientCall = {
   type: "function_call",
   id: "fc_weather",

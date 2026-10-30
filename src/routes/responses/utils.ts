@@ -6,7 +6,10 @@ import type {
 
 import { isModelFallbackActive } from "~/lib/model-fallback"
 
-import { decodeAnthropicReasoningEnvelope } from "./messages-reasoning-provenance"
+import {
+  ANTHROPIC_REASONING_ENVELOPE_PREFIX,
+  decodeAnthropicReasoningEnvelope,
+} from "./messages-reasoning-provenance"
 
 export function getResponsesVerbosity(
   payload: ResponsesPayload,
@@ -36,7 +39,7 @@ export const getResponsesRequestOptions = (
 
 /**
  * Apply the latest compaction boundary, expand proxy-generated summaries,
- * and strip encrypted_content from reasoning items.
+ * and drop reasoning state that belongs to another model.
  *
  * A compaction item replaces historical input that precedes it. Retaining
  * superseded turns defeats compaction and can make the wire payload grow
@@ -50,8 +53,11 @@ export const getResponsesRequestOptions = (
  * intact. Account routing is stable for a client session, including the
  * stable first-account fallback when no session identifier is supplied.
  *
- * Foreign reasoning state is stripped. Bridge-owned Claude state is retained
- * for the matching Messages candidate, then excluded from native Responses.
+ * Copilot reasoning state is account-bound like native compaction and is
+ * replayed for the same reason: without it Copilot drops the reasoning item.
+ * The Responses client removes it only if Copilot cannot use it. Bridge-owned
+ * Claude state is retained for the Messages candidate of the model that
+ * produced it, then excluded from native Responses.
  */
 export const expandCompactionItems = (payload: ResponsesPayload): void => {
   if (!Array.isArray(payload.input)) return
@@ -81,16 +87,11 @@ export const expandCompactionItems = (payload: ResponsesPayload): void => {
       } as ResponseInputItem
     }
 
-    // Preserve our provider-tagged state for Messages round trips. Unrelated
-    // opaque tokens cannot be verified across Copilot sessions/accounts.
     if (
       record.type === "reasoning"
       && "encrypted_content" in record
       && !isModelFallbackActive()
-      && !decodeAnthropicReasoningEnvelope(
-        record.encrypted_content,
-        payload.model,
-      )
+      && !isReplayableReasoningState(record.encrypted_content, payload.model)
     ) {
       const { encrypted_content: _, ...rest } = record
       return rest as ResponseInputItem
@@ -98,6 +99,41 @@ export const expandCompactionItems = (payload: ResponsesPayload): void => {
 
     return item
   })
+}
+
+/**
+ * Copilot state is replayed; it is bound to the account, not the model. Claude
+ * state can be verified only by the model that produced it. An empty value
+ * carries no state.
+ */
+const isReplayableReasoningState = (value: unknown, model: string): boolean => {
+  if (typeof value !== "string" || value.length === 0) return false
+  if (!value.startsWith(ANTHROPIC_REASONING_ENVELOPE_PREFIX)) return true
+  return decodeAnthropicReasoningEnvelope(value, model) !== undefined
+}
+
+/**
+ * Only native Responses can use Copilot reasoning state. Translated routes
+ * drop it from their own copy of the history and keep bridge-owned Claude
+ * state; model fallback keeps it for providers that accept it.
+ */
+export const omitCopilotReasoningState = (payload: {
+  input?: unknown
+}): void => {
+  if (!Array.isArray(payload.input) || isModelFallbackActive()) return
+  for (const item of payload.input as Array<unknown>) {
+    if (typeof item !== "object" || item === null) continue
+    const record = item as Record<string, unknown>
+    if (
+      record.type === "reasoning"
+      && typeof record.encrypted_content === "string"
+      && !record.encrypted_content.startsWith(
+        ANTHROPIC_REASONING_ENVELOPE_PREFIX,
+      )
+    ) {
+      Reflect.deleteProperty(record, "encrypted_content")
+    }
+  }
 }
 
 const findLatestCompactionIndex = (input: Array<ResponseInputItem>): number => {

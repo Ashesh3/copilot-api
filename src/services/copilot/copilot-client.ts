@@ -52,6 +52,7 @@ import { rediscoverCopilotOAuthBaseUrl } from "~/services/github/resolve-copilot
 
 import type { RetryBudget, RetryClaim } from "./transport-retry"
 
+import { normalizeConnectionOwnershipRejection } from "./connection-ownership"
 import { filterCopilotRequestHeaders } from "./copilot-request-headers"
 import {
   isEncryptedCompactionVerificationError,
@@ -791,10 +792,13 @@ export async function copilotFetch(
         url,
       })
 
-      const response = captureLlmDebugAttemptResponse(
-        debugLogId,
-        upstreamResponse,
-        requestInit.signal ?? undefined,
+      const response = await normalizeConnectionOwnershipRejection(
+        path,
+        captureLlmDebugAttemptResponse(
+          debugLogId,
+          upstreamResponse,
+          requestInit.signal ?? undefined,
+        ),
       )
       // Once a new response arrived, an earlier retry response can no longer
       // be returned. Drain through its tap with bounded stream backpressure.

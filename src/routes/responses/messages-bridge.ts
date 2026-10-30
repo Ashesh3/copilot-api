@@ -89,6 +89,7 @@ import {
 import { omitOptionalResponsesWebSearch } from "./optional-web-search"
 import { associateResponsesFunctionCalls } from "./tool-call-association"
 import { checkResponsesToMessagesTranslation } from "./translation-fidelity"
+import { omitCopilotReasoningState } from "./utils"
 
 export interface ResponsesMessagesBridgeOptions {
   attachmentsNormalized?: boolean
@@ -634,6 +635,7 @@ export async function adaptResponsesToMessagesCandidate(options: {
   const source = createResponsesMessagesToolMap(
     toCompactionSummaryRequest(options.source),
   ).source
+  omitCopilotReasoningState(source)
   source.model = options.finalModel ?? source.model
   if (options.finalReasoningEffort !== undefined) {
     source.reasoning = {
