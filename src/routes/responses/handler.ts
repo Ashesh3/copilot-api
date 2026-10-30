@@ -90,7 +90,6 @@ import {
   unwrapSsePreflushSettlement,
   withHeartbeatWhilePending,
   withSseHeartbeat,
-  writeSseHeartbeat,
 } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
 import { normalizeUsageTokenCount } from "~/lib/storage/usage-counters"
@@ -160,6 +159,7 @@ import {
   type ResponsesChatToolMap,
   type RestoredChatToolCall,
 } from "./messages-tool-map"
+import { PendingResponseProgress } from "./pending-response"
 import { readResponsesRequestJson } from "./request-json"
 import { adaptResponsesToChatCandidate } from "./responses-chat-adapter"
 import { getResponsesChatWebSearchMaxUses } from "./responses-chat-adapter"
@@ -2737,17 +2737,16 @@ async function respondWithBufferedResponsesResult(
     stream.onAbort(() => {
       lifecycle.abort()
     })
+    const progress = new PendingResponseProgress(stream, failureState)
     try {
-      if (preflush.kind === "pending") await writeSseHeartbeat(stream)
+      if (preflush.kind === "pending") await progress.announce()
       const result =
         preflush.kind === "settled" ?
           preflush.value
-        : unwrapSsePreflushSettlement(
-            await withHeartbeatWhilePending(preflush.pending, stream),
-          )
+        : unwrapSsePreflushSettlement(await progress.wait(preflush.pending))
       if (stream.aborted || stream.closed) return
       setResponsesResultContext(c, result)
-      await emitResponsesResultAsStream(stream, result)
+      await progress.emit(result)
       await lifecycle.succeed("synthetic")
     } catch (error) {
       if (isAbortError(error) || stream.aborted || stream.closed) {
@@ -3186,8 +3185,9 @@ function handleStreamingChatFallbackWebSearch(
     stream.onAbort(() => {
       lifecycle.abort()
     })
+    const progress = new PendingResponseProgress(stream, failureState)
     try {
-      const result = await withHeartbeatWhilePending(
+      const result = await progress.wait(
         (async () => {
           const payload = {
             ...options.ccPayload,
@@ -3209,14 +3209,13 @@ function handleStreamingChatFallbackWebSearch(
             options.toolMap,
           )
         })(),
-        stream,
       )
       if (stream.aborted || stream.closed) {
         lifecycle.abort()
         return
       }
       setResponsesResultContext(c, result)
-      await emitResponsesResultAsStream(stream, result)
+      await progress.emit(result)
       await lifecycle.succeed("synthetic")
     } catch (error) {
       if (isAbortError(error) || stream.aborted || stream.closed) {

@@ -19,6 +19,7 @@ import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
+import { setResponseProgressIntervalForTest } from "~/routes/responses/pending-response"
 import { server } from "~/server"
 
 import {
@@ -102,6 +103,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setSsePreflushDeadlineForTest()
+  setResponseProgressIntervalForTest()
 })
 
 test("commits synthetic Responses SSE before buffered Messages headers", async () => {
@@ -122,7 +124,7 @@ test("commits synthetic Responses SSE before buffered Messages headers", async (
   const reader = requireBody(response).getReader()
   const first = await reader.read()
   expect(response.headers.get("content-type")).toContain("text/event-stream")
-  expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n")
+  expect(announcedResponseId(first.value)).toStartWith("resp_")
   await reader.cancel()
 })
 
@@ -132,7 +134,7 @@ test("cancels buffered Messages and emits no Responses events after detach", asy
   )
   const reader = requireBody(response).getReader()
   const first = await reader.read()
-  expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n")
+  expect(announcedResponseId(first.value)).toStartWith("resp_")
 
   await reader.cancel()
 
@@ -151,7 +153,7 @@ test("emits an in-band Responses failure for a late upstream rejection", async (
     )
     const reader = requireBody(response).getReader()
     const first = await reader.read()
-    expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n")
+    const responseId = announcedResponseId(first.value)
 
     rejectUpstream?.(new Error("late private upstream failure"))
     const rest = await readRemaining(reader)
@@ -166,6 +168,9 @@ test("emits an in-band Responses failure for a late upstream rejection", async (
     )
     expect(eventOrder).toEqual(["error", "response.failed"])
     expect(eventTypes).toEqual(["error", "response.failed"])
+    expect(dataFrames(rest).at(-1)).toMatchObject({
+      response: { id: responseId, status: "failed" },
+    })
     const contractBehavior = STREAM_BEHAVIOR_CONTRACT.find(
       (row) => row.surface === "Synthetic Responses-from-Messages failure",
     )?.behavior
@@ -287,7 +292,7 @@ test("completes an in-band Responses stream for a late unknown Messages block", 
   )
   const reader = requireBody(response).getReader()
   const first = await reader.read()
-  expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n")
+  const responseId = announcedResponseId(first.value)
 
   resolveUpstream?.(
     Response.json({
@@ -307,6 +312,57 @@ test("completes an in-band Responses stream for a late unknown Messages block", 
   expect(rest).toContain("future_block")
   expect(rest).not.toContain("event: error")
   expect(rest).not.toContain("event: response.failed")
+  expect(rest).not.toContain("event: response.created")
+  expect(dataFrames(rest).at(-1)).toMatchObject({
+    type: "response.completed",
+    response: { id: responseId, model: "route-model", status: "completed" },
+  })
+})
+
+test("reports progress Codex can see while buffered Messages is pending", async () => {
+  setResponseProgressIntervalForTest(5)
+  const response = await seedProtocolDatabase().then(() =>
+    server.request("/v1/responses", createRequest()),
+  )
+  const reader = requireBody(response).getReader()
+  const decoder = new TextDecoder()
+  let text = decoder.decode((await reader.read()).value, { stream: true })
+  while ((text.match(/event: response\.in_progress/g)?.length ?? 0) < 2) {
+    const next = await reader.read()
+    if (next.done) throw new Error("Stream ended before progress events")
+    text += decoder.decode(next.value, { stream: true })
+  }
+
+  resolveUpstream?.(
+    Response.json({
+      id: "msg_slow",
+      type: "message",
+      role: "assistant",
+      model: "route-model",
+      content: [{ type: "text", text: "Done after a long turn." }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+  )
+  text += await readRemaining(reader)
+
+  const frames = dataFrames(text)
+  const responseId = (frames[0].response as { id: string }).id
+  expect(frames[0]).toMatchObject({ type: "response.created" })
+  for (const frame of frames.slice(1, 3)) {
+    expect(frame).toMatchObject({
+      type: "response.in_progress",
+      response: { id: responseId, status: "in_progress" },
+    })
+  }
+  expect(text.match(/event: response\.created/g)).toHaveLength(1)
+  expect(frames.at(-1)).toMatchObject({
+    type: "response.completed",
+    response: { id: responseId, output_text: "Done after a long turn." },
+  })
+  const sequence = frames.map((frame) => frame.sequence_number as number)
+  expect(sequence).toEqual(sequence.map((_, index) => index))
 })
 
 function createRequest(): RequestInit {
@@ -327,6 +383,24 @@ function createRequest(): RequestInit {
 function requireBody(response: Response): ReadableStream<Uint8Array> {
   if (!response.body) throw new Error("Expected an SSE response body")
   return response.body
+}
+
+function dataFrames(text: string): Array<Record<string, unknown>> {
+  return Array.from(
+    text.matchAll(/^data: (\{.*\})$/gm),
+    (match) => JSON.parse(match[1]) as Record<string, unknown>,
+  )
+}
+
+/** The pending response a late buffered result is announced as. */
+function announcedResponseId(bytes: Uint8Array | undefined): string {
+  const [frame] = dataFrames(new TextDecoder().decode(bytes))
+  expect(frame).toMatchObject({
+    type: "response.created",
+    sequence_number: 0,
+    response: { model: "route-model", status: "in_progress", output: [] },
+  })
+  return (frame.response as { id: string }).id
 }
 
 async function waitForUpstreamAbort(): Promise<boolean> {

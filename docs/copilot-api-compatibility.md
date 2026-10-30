@@ -468,6 +468,16 @@ Every committed dialect has one terminal owner. Successful completed and
 incomplete terminals remain successful; received failed/error terminals remain
 visible without a conflicting second terminal. Partial output is retained.
 
+Responses turns that wait for a buffered upstream result (Messages and Chat
+translations, compaction triggers, and gateway-managed web search) keep
+clients from timing out. Codex abandons a stream after five minutes without an
+event and does not count SSE comments or WebSocket pings, so over HTTP a result
+that misses the preflush window announces its response with
+`response.created` and then sends `response.in_progress` every 15 seconds; the
+result completes that response. Over WebSocket the turn sends
+`response.in_progress` frames that name no response, so model fallback,
+interruption, and continuation are unchanged.
+
 <!-- compatibility-contract:stream-behavior:start -->
 | Surface | Behavior |
 | --- | --- |

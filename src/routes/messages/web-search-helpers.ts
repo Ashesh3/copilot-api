@@ -681,17 +681,24 @@ export const emitResponsesResultAsStream = async (
     writeSSE: (data: { event?: string; data: string }) => Promise<void>
   },
   result: ResponsesResult,
+  options?: {
+    /** `response.created` was already sent for this response. */
+    readonly announced?: boolean
+    readonly sequenceNumber?: number
+  },
 ): Promise<void> => {
-  let seqNum = 0
+  let seqNum = options?.sequenceNumber ?? 0
 
-  await stream.writeSSE({
-    event: "response.created",
-    data: JSON.stringify({
-      type: "response.created",
-      response: { ...result, output: [], status: "in_progress" },
-      sequence_number: seqNum++,
-    }),
-  })
+  if (!options?.announced) {
+    await stream.writeSSE({
+      event: "response.created",
+      data: JSON.stringify({
+        type: "response.created",
+        response: { ...result, output: [], status: "in_progress" },
+        sequence_number: seqNum++,
+      }),
+    })
+  }
 
   for (let i = 0; i < result.output.length; i++) {
     seqNum = await emitResponsesOutputItem(result.output[i], {

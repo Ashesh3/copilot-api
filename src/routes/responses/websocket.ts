@@ -75,6 +75,7 @@ import {
   resolveResponsesRequestRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
 } from "~/lib/routing-affinity"
+import { withProgressWhilePending } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
 import { withRequestSnapshot } from "~/lib/storage/request-snapshot"
 import { admitWebSocketTurn } from "~/lib/storage/websocket-admission"
@@ -127,6 +128,10 @@ import {
 } from "./handler"
 import { executePreparedResponsesMessagesBridge } from "./messages-bridge"
 import { type ResponsesChatToolMap } from "./messages-tool-map"
+import {
+  getResponseProgressIntervalMs,
+  RESPONSE_PROGRESS_FRAME,
+} from "./pending-response"
 import {
   adaptResponsesToChatCandidate,
   getResponsesChatWebSearchMaxUses,
@@ -1050,6 +1055,46 @@ async function waitForWebSocketTurn<T>(
   }
 }
 
+/**
+ * Codex abandons a WebSocket response after five minutes without a frame,
+ * and pings do not count, so a long buffered upstream call would be resent
+ * from the start. While it is pending, send `response.in_progress` frames.
+ * They name no response, so fallback, interruption and continuation see the
+ * turn as before.
+ */
+async function waitForBufferedWebSocketTurn<T>(
+  promise: Promise<T>,
+  ws: ResponsesWebSocketState,
+  turn: ResponsesWebSocketTurn,
+): Promise<T> {
+  const signal = turn.abortController.signal
+  const sink = {
+    get aborted() {
+      return signal.aborted
+    },
+    get closed() {
+      return ws.data.closed
+    },
+    onAbort: (listener: () => void) => {
+      signal.addEventListener("abort", listener, { once: true })
+    },
+    write: (frame: string) => {
+      if (!ws.data.closed && !signal.aborted && turn.terminal.state === "open")
+        ws.send(frame)
+      return Promise.resolve()
+    },
+  }
+  return await waitForWebSocketTurn(
+    withProgressWhilePending(promise, sink, {
+      intervalMs: getResponseProgressIntervalMs(),
+      beat: async (target) => {
+        await target.write(RESPONSE_PROGRESS_FRAME)
+      },
+    }),
+    turn,
+  )
+}
+
 async function failWebSocketTurn(
   ws: ResponsesWebSocketState,
   turn: ResponsesWebSocketTurn,
@@ -1656,7 +1701,7 @@ async function streamAnthropicMessagesOverWs(options: {
   ws: ResponsesWebSocketState
 }): Promise<void> {
   const { nativeOptions, payload, responseContext, turn, ws } = options
-  const result = await waitForWebSocketTurn(
+  const result = await waitForBufferedWebSocketTurn(
     executePreparedResponsesMessagesBridge({
       compaction: isResponsesCompactionRequest(responseContext),
       nativeOptions,
@@ -1664,6 +1709,7 @@ async function streamAnthropicMessagesOverWs(options: {
       responseContext,
       signal: turn.abortController.signal,
     }),
+    ws,
     turn,
   )
   throwIfWebSocketTurnAborted(turn)
@@ -1794,7 +1840,7 @@ async function streamChatCompactionOverWs(options: {
     options
   ccPayload.stream = false
   delete ccPayload.stream_options
-  const response = await waitForWebSocketTurn(
+  const response = await waitForBufferedWebSocketTurn(
     createChatCompletions(ccPayload, {
       allowCompatibilityRetry: false,
       candidatePrepared: true,
@@ -1802,6 +1848,7 @@ async function streamChatCompactionOverWs(options: {
       initiator,
       signal: turn.abortController.signal,
     }),
+    ws,
     turn,
   )
   throwIfWebSocketTurnAborted(turn)
@@ -2036,10 +2083,11 @@ async function streamCustomProviderOverWs(options: {
       },
     ),
   })
-  const initial = await waitForWebSocketTurn(
+  const initial = await waitForBufferedWebSocketTurn(
     completionFactory(candidate.payload, {
       signal: turn.abortController.signal,
     }),
+    ws,
     turn,
   )
   if (hasCompactionTrigger(payload)) {
@@ -2053,7 +2101,7 @@ async function streamCustomProviderOverWs(options: {
     })
     return
   }
-  const response = await waitForWebSocketTurn(
+  const response = await waitForBufferedWebSocketTurn(
     resolvePreparedResponsesWebSearchCalls({
       completionFactory,
       initial,
@@ -2061,6 +2109,7 @@ async function streamCustomProviderOverWs(options: {
       signal: turn.abortController.signal,
       webSearch: responsesWebSocketDependencies.webSearch,
     }),
+    ws,
     turn,
   )
   await streamChatCompletionsAsResponses(
@@ -2110,20 +2159,25 @@ async function streamChatWebSearchOverWs(options: {
       initiator,
       signal: factoryOptions.signal,
     })
-  const initial = await waitForWebSocketTurn(
+  const initial = await waitForBufferedWebSocketTurn(
     completionFactory(ccPayload, {
       allowCompatibilityRetry: false,
       signal: turn.abortController.signal,
     }),
+    ws,
     turn,
   )
-  const response = await resolvePreparedResponsesWebSearchCalls({
-    completionFactory,
-    initial,
-    maxUses,
-    signal: turn.abortController.signal,
-    webSearch: responsesWebSocketDependencies.webSearch,
-  })
+  const response = await waitForBufferedWebSocketTurn(
+    resolvePreparedResponsesWebSearchCalls({
+      completionFactory,
+      initial,
+      maxUses,
+      signal: turn.abortController.signal,
+      webSearch: responsesWebSocketDependencies.webSearch,
+    }),
+    ws,
+    turn,
+  )
   const wsStream = {
     writeSSE: async (data: { event?: string; data: string }) => {
       if (data.data === "[DONE]") return
