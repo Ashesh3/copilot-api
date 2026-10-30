@@ -30,8 +30,9 @@ export type ResponsesResend = (
 /**
  * Copilot binds item IDs to the account that issued them, and expires them.
  * An ID only names an item whose content is replayed with it, so when Copilot
- * refuses one, resend without any of them, and leave them off later requests
- * to that account.
+ * refuses one, resend without any of them. Copilot names no item, so the IDs
+ * stay off that account's later requests only once a resend without them
+ * succeeds on it.
  */
 export async function resendWithoutRefusedItemIds(options: {
   attempt: ResponsesAttempt
@@ -44,15 +45,18 @@ export async function resendWithoutRefusedItemIds(options: {
   if (!(await isItemIdOwnershipRejection(attempt.response))) return attempt
   const payload = structuredClone(attempt.payload)
   const removed = stripItemIds(payload)
-  if (removed.length === 0) return attempt
-  // Copilot names no item, and dropping an ID loses nothing, so every ID the
-  // refused request carried stays off this account's later requests.
-  rememberRefusedItemIds(options.accountScope(attempt.accountId), removed)
-  if (!consumeExtraSend(options.retryBudget)) return attempt
+  if (removed.length === 0 || !consumeExtraSend(options.retryBudget)) {
+    return attempt
+  }
   consola.warn("Copilot refused replayed item IDs; resending without them", {
     items: removed.length,
   })
-  return { payload, ...(await options.send(payload)) }
+  const resent: ResponsesAttempt = { payload, ...(await options.send(payload)) }
+  // Success on the refusing account shows that account refuses the IDs.
+  if (resent.response.ok && resent.accountId === attempt.accountId) {
+    rememberRefusedItemIds(options.accountScope(attempt.accountId), removed)
+  }
+  return resent
 }
 
 // Each memory resend is sized from Copilot's latest count, so two suffice.

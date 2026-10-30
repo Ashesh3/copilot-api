@@ -14,9 +14,10 @@ type ReplayedItem = Record<string, unknown> & { id: string }
 const MAX_REMEMBERED_REFUSALS = 4096
 // Keyed by account and ID fingerprint, like refused reasoning state.
 const refusedItemIds = new Set<string>()
+// Copilot refuses item state, previous response IDs and item references with
+// the same "does not belong to this connection" wording and code. Only this
+// message is about an item ID, which removing IDs can repair.
 const ITEM_ID_REFUSAL = /\binput item id does not belong to this connection\b/u
-const ITEM_STATE_REFUSAL = /\binput item does not belong to this connection\b/u
-const MISMATCH_CODE = "input_item_connection_mismatch"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -110,11 +111,7 @@ export function resetRefusedItemIdsForTest(): void {
   refusedItemIds.clear()
 }
 
-/**
- * Whether Copilot refused a replayed item ID. A bare mismatch code that does
- * not name item state is read as an ID refusal too, since removing IDs is
- * free; refused item state has its own recovery.
- */
+/** Whether Copilot refused a replayed item ID. */
 export async function isItemIdOwnershipRejection(
   response: Response,
 ): Promise<boolean> {
@@ -126,12 +123,5 @@ export async function isItemIdOwnershipRejection(
     return false
   }
   const text = readConnectionOwnershipRejection(parsed)
-  if (text === undefined) return false
-  if (ITEM_ID_REFUSAL.test(text)) return true
-  return (
-    isRecord(parsed)
-    && isRecord(parsed.error)
-    && parsed.error.code === MISMATCH_CODE
-    && !ITEM_STATE_REFUSAL.test(text)
-  )
+  return text !== undefined && ITEM_ID_REFUSAL.test(text)
 }

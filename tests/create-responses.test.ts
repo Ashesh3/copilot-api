@@ -1897,6 +1897,83 @@ test("recovers refused reasoning state that an item ID refusal hid", async () =>
   }
 })
 
+test("keeps item IDs when Copilot refuses other connection state", async () => {
+  state.models = responsesCapableModels
+  queuedResponses.push(
+    Response.json(
+      {
+        error: {
+          code: "input_item_connection_mismatch",
+          message: "previous_response_id does not belong to this connection",
+        },
+      },
+      { status: 400 },
+    ),
+    createSuccessResponse(),
+  )
+
+  try {
+    const refused = await postReasoningTurn(
+      "gpt-4o",
+      "item-id-other-state-session",
+      ISSUED_REASONING,
+    )
+    const next = await postReasoningTurn(
+      "gpt-4o",
+      "item-id-other-state-session",
+      ISSUED_REASONING,
+    )
+
+    expect(refused.status).toBe(400)
+    expect(next.status).toBe(200)
+    // No resend without the IDs, and none is remembered as refused.
+    expect(requestBodies).toHaveLength(2)
+    for (const body of requestBodies) {
+      expect(body.input).toContainEqual(ISSUED_REASONING)
+    }
+  } finally {
+    resetRefusedItemIdsForTest()
+    resetRejectedReasoningStateForTest()
+  }
+})
+
+test("remembers refused item IDs only after a resend without them succeeds", async () => {
+  state.models = responsesCapableModels
+  queuedResponses.push(
+    itemIdRejection(),
+    Response.json(
+      { error: { message: "The request could not be processed." } },
+      { status: 400 },
+    ),
+    createSuccessResponse(),
+  )
+
+  try {
+    const failed = await postReasoningTurn(
+      "gpt-4o",
+      "item-id-failed-resend-session",
+      ISSUED_REASONING,
+    )
+    const next = await postReasoningTurn(
+      "gpt-4o",
+      "item-id-failed-resend-session",
+      ISSUED_REASONING,
+    )
+
+    expect(failed.status).toBe(400)
+    expect(next.status).toBe(200)
+    expect(requestBodies).toHaveLength(3)
+    expect(JSON.stringify(requestBodies[1].input)).not.toContain(
+      ISSUED_REASONING.id,
+    )
+    // A failed resend shows nothing about the IDs, so the next turn sends them.
+    expect(requestBodies[2].input).toContainEqual(ISSUED_REASONING)
+  } finally {
+    resetRefusedItemIdsForTest()
+    resetRejectedReasoningStateForTest()
+  }
+})
+
 const MEMORY_PROMPT_HEAD =
   "Analyze this rollout and produce JSON with `raw_memory`, `rollout_summary`, and `rollout_slug` (use empty string when unknown).\n\nrendered conversation (pre-rendered from rollout `.jsonl`; filtered response items):\n"
 const MEMORY_PROMPT_TAIL =
