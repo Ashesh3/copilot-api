@@ -26,6 +26,7 @@ import {
 } from "~/lib/model-suffix"
 import { preparePermissionReviewResponsesCandidate } from "~/lib/permission-review"
 import {
+  isAnthropicThinkingBlock,
   isAnthropicToolResultBlock,
   isAnthropicToolUseBlock,
 } from "~/routes/messages/anthropic-types"
@@ -255,6 +256,39 @@ function rewriteSourceToolHistoryForTarget(
 
 function hasMeaningfulMessages(payload: AnthropicMessagesPayload): boolean {
   return payload.messages.length > 0
+}
+
+/**
+ * Claude verifies every thinking signature it is sent. Reasoning from a GPT
+ * turn carries the gateway's `state@id` envelope, and Anthropic signatures
+ * never contain "@". Claude rejects such a block, and recovering from that
+ * rejection would also drop Claude's own signed thinking, so GPT reasoning is
+ * left out of the native request.
+ */
+function omitGptThinking(payload: AnthropicMessagesPayload): boolean {
+  let omitted = false
+  const emptied = new Set<AnthropicMessagesPayload["messages"][number]>()
+  for (const message of payload.messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) {
+      continue
+    }
+    const content = message.content.filter(
+      (block) =>
+        !isAnthropicThinkingBlock(block)
+        || typeof block.signature !== "string"
+        || !block.signature.includes("@"),
+    )
+    if (content.length === message.content.length) continue
+    omitted = true
+    message.content = content
+    if (content.length === 0) emptied.add(message)
+  }
+  if (emptied.size > 0) {
+    payload.messages = payload.messages.filter(
+      (message) => !emptied.has(message),
+    )
+  }
+  return omitted
 }
 
 function createCandidate<
@@ -519,6 +553,7 @@ export async function prepareMessagesCandidates(
   const support = getModelEndpointSupport(options.selectedModel)
   const resolveAttachment = createAttachmentResolver()
   const nativePayload = structuredClone(options.source)
+  const omittedForeignThinking = omitGptThinking(nativePayload)
   if (
     options.effortOverride !== undefined
     && !options.preserveNativeBodyEffort
@@ -552,6 +587,10 @@ export async function prepareMessagesCandidates(
   const nativeCandidate = createCandidate({
     endpoint: "/v1/messages",
     payload: finalizedNative,
+    findings:
+      omittedForeignThinking ?
+        [{ class: "reasoning_state", severity: "omitted" }]
+      : [],
     meaningful: hasMeaningfulMessages(options.source),
   })
   const webSearchMaxUses = getMessagesWebSearchMaxUses(options.source)

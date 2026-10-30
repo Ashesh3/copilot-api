@@ -785,3 +785,73 @@ test.each([
     expect(source).toEqual(snapshot)
   },
 )
+
+test("leaves GPT reasoning out of a native Claude request after a model switch", async () => {
+  const source = createSource({
+    messages: [
+      { role: "user", content: "start" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: "GPT plan",
+            signature: "gAAAAencrypted-state@rs_gpt1",
+          },
+          { type: "text", text: "GPT answer" },
+        ],
+      },
+      { role: "user", content: "switch" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: "GPT reasoning only",
+            signature: "gAAAAother-state@rs_gpt2",
+          },
+        ],
+      },
+      { role: "user", content: "again" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: "Claude plan",
+            signature: "EqoBClaudeSignature==",
+          },
+          { type: "redacted_thinking", data: "EmwKRedactedState" },
+          { type: "text", text: "Claude answer" },
+        ],
+      } as AnthropicMessagesPayload["messages"][number],
+      { role: "user", content: "continue" },
+    ],
+  })
+  const snapshot = structuredClone(source)
+
+  const candidates = await prepareMessagesCandidates({ source, selectedModel })
+
+  expect(candidates.native.payload.messages).toEqual([
+    { role: "user", content: "start" },
+    { role: "assistant", content: [{ type: "text", text: "GPT answer" }] },
+    { role: "user", content: "switch" },
+    { role: "user", content: "again" },
+    snapshot.messages[5],
+    { role: "user", content: "continue" },
+  ])
+  expect(candidates.native.check.findings).toContainEqual({
+    class: "reasoning_state",
+    severity: "omitted",
+  })
+  const responsesInput = candidates.responses?.payload.input
+  expect(
+    Array.isArray(responsesInput) ?
+      responsesInput.find((item) => item.type === "reasoning")
+    : undefined,
+  ).toMatchObject({ encrypted_content: "gAAAAencrypted-state" })
+  expect(JSON.stringify(candidates.responses?.payload.input)).not.toContain(
+    "EmwKRedactedState",
+  )
+  expect(source).toEqual(snapshot)
+})

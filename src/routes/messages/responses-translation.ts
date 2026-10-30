@@ -248,6 +248,9 @@ const translateAssistantMessage = (
       continue
     }
 
+    // Redacted thinking is encrypted for Claude alone; as text it is noise.
+    if (block.type === "redacted_thinking") continue
+
     if (isAnthropicThinkingBlock(block)) {
       const reasoningContent = createReasoningContent(block)
       if (!reasoningContent) {

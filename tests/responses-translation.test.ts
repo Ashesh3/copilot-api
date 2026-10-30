@@ -595,3 +595,31 @@ test("names a Messages JSON schema output format for Responses", () => {
     format: { type: "json_schema", name: "output", schema, strict: false },
   })
 })
+
+test("keeps Claude redacted thinking out of GPT input", () => {
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [
+      { role: "user", content: "hello" },
+      {
+        role: "assistant",
+        content: [
+          { type: "redacted_thinking", data: "EmwKRedactedState" },
+          { type: "text", text: "Claude answer" },
+        ],
+      } as AnthropicMessagesPayload["messages"][number],
+      { role: "user", content: "continue" },
+    ],
+  })
+
+  expect(translated.input).toEqual([
+    { type: "message", role: "user", content: "hello" },
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Claude answer" }],
+    },
+    { type: "message", role: "user", content: "continue" },
+  ])
+})
