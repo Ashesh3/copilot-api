@@ -15,19 +15,42 @@ type ReasoningStateItem = Record<string, unknown> & {
 }
 
 /**
- * `foreign`: issued to another account, or expired; deterministic, so later
- * turns omit it. `unreadable`: the model could not decrypt it, which may be
- * transient, so it is removed only from the request that failed.
+ * `foreign`: issued to another account, or expired. `unreadable`: the model
+ * could not decrypt it, which may be transient.
  */
 export type ReasoningStateRejection = "foreign" | "unreadable"
 
+export interface ReasoningStateRejectionDetail {
+  readonly kind: ReasoningStateRejection
+  /** The ends of the state Copilot quotes when it cannot read it. */
+  readonly quoted?: { readonly prefix: string; readonly suffix: string }
+}
+
+/** Picks replayed state by its value and fingerprint. */
+export type ReasoningStateSelector = (
+  state: string,
+  fingerprint: string,
+) => boolean
+
+export interface ReasoningStateRecoveryStep {
+  readonly select: ReasoningStateSelector
+  /** A successful resend shows the account refuses the removed state. */
+  readonly remember: boolean
+}
+
 const MAX_REMEMBERED_REJECTIONS = 4096
+const MAX_REMEMBERED_ACCEPTANCES = 16_384
+// Ownership is per account, so both sets key state by account and fingerprint.
 const rejectedReasoningState = new Set<string>()
+const acceptedReasoningState = new Set<string>()
 // Copilot reports state it cannot open as, for example, "The encrypted content
 // a96q...p3k= could not be verified. Reason: Encrypted content could not be
-// decrypted or parsed." with code `invalid_request_body`.
+// decrypted or parsed." with code `invalid_request_body`. The quoted ends
+// identify the item.
 const UNREADABLE_STATE =
   /\bencrypted content\b.{1,256}?\bcould not be (?:verified|decrypted|parsed)\b/u
+const QUOTED_STATE =
+  /\bencrypted content ([\w+/=-]{1,16})\.\.\.([\w+/=-]{1,16}) could not be\b/iu
 // Copilot message for item state issued to another account, or expired. Item
 // IDs and previous response IDs are rejected with different messages.
 const FOREIGN_STATE = /\binput item does not belong to this connection\b/u
@@ -53,59 +76,87 @@ function fingerprint(state: string): string {
   return createHash("sha256").update(state).digest("base64url")
 }
 
+function accountStateKey(account: string, value: string): string {
+  return `${account}:${value}`
+}
+
+function remember(set: Set<string>, limit: number, key: string): void {
+  set.delete(key)
+  if (set.size >= limit) {
+    const oldest = set.values().next()
+    if (!oldest.done) set.delete(oldest.value)
+  }
+  set.add(key)
+}
+
 export function hasReasoningState(body: Record<string, unknown>): boolean {
   return reasoningStateItems(body).length > 0
 }
 
-/** Remove every replayed reasoning state, returning fingerprints of it. */
+/** Remove the replayed state `select` picks, returning fingerprints of it. */
 export function stripReasoningState(
   body: Record<string, unknown>,
+  select: ReasoningStateSelector = () => true,
 ): Array<string> {
   const removed: Array<string> = []
   for (const item of reasoningStateItems(body)) {
-    removed.push(fingerprint(item.encrypted_content))
+    const value = fingerprint(item.encrypted_content)
+    if (!select(item.encrypted_content, value)) continue
+    removed.push(value)
     Reflect.deleteProperty(item, "encrypted_content")
   }
   return removed
 }
 
-/** Remove only state Copilot already refused, so later turns do not fail first. */
+/**
+ * Remove state the destination account already refused, so the turn does
+ * not fail first. State another account refused stays. `account` scopes
+ * ownership: the account in a pool, or one scope for a single account.
+ */
 export function omitRejectedReasoningState(
   body: Record<string, unknown>,
+  account: string,
 ): number {
   if (rejectedReasoningState.size === 0) return 0
-  let omitted = 0
-  for (const item of reasoningStateItems(body)) {
-    if (!rejectedReasoningState.has(fingerprint(item.encrypted_content))) {
-      continue
-    }
-    Reflect.deleteProperty(item, "encrypted_content")
-    omitted += 1
-  }
-  return omitted
+  return stripReasoningState(body, (_state, value) =>
+    rejectedReasoningState.has(accountStateKey(account, value)),
+  ).length
 }
 
 export function rememberRejectedReasoningState(
+  account: string,
   fingerprints: Iterable<string>,
 ): void {
   for (const value of fingerprints) {
-    rejectedReasoningState.delete(value)
-    if (rejectedReasoningState.size >= MAX_REMEMBERED_REJECTIONS) {
-      const oldest = rejectedReasoningState.values().next()
-      if (!oldest.done) rejectedReasoningState.delete(oldest.value)
-    }
-    rejectedReasoningState.add(value)
+    remember(
+      rejectedReasoningState,
+      MAX_REMEMBERED_REJECTIONS,
+      accountStateKey(account, value),
+    )
+  }
+}
+
+/** Note the state an account accepted, so a later refusal does not blame it. */
+export function rememberAcceptedReasoningState(
+  body: Record<string, unknown>,
+  account: string,
+): void {
+  for (const item of reasoningStateItems(body)) {
+    const key = accountStateKey(account, fingerprint(item.encrypted_content))
+    rejectedReasoningState.delete(key)
+    remember(acceptedReasoningState, MAX_REMEMBERED_ACCEPTANCES, key)
   }
 }
 
 export function resetRejectedReasoningStateForTest(): void {
   rejectedReasoningState.clear()
+  acceptedReasoningState.clear()
 }
 
 /** Why Copilot or the model could not use the replayed reasoning state. */
-export async function classifyReasoningStateRejection(
+export async function readReasoningStateRejection(
   response: Response,
-): Promise<ReasoningStateRejection | undefined> {
+): Promise<ReasoningStateRejectionDetail | undefined> {
   if (response.status !== 400) return undefined
   let parsed: unknown
   try {
@@ -115,16 +166,63 @@ export async function classifyReasoningStateRejection(
   }
   const ownership = readConnectionOwnershipRejection(parsed)
   if (ownership !== undefined) {
-    return FOREIGN_STATE.test(ownership) ? "foreign" : undefined
+    return FOREIGN_STATE.test(ownership) ? { kind: "foreign" } : undefined
   }
   if (!isRecord(parsed) || !isRecord(parsed.error)) return undefined
   const { code, message } = parsed.error
-  if (code === "invalid_encrypted_content") return "unreadable"
-  if (typeof message !== "string") return undefined
-  const normalized = message.toLowerCase().replaceAll(/\s+/gu, " ")
-  return UNREADABLE_STATE.test(normalized) ? "unreadable" : undefined
+  const text =
+    typeof message === "string" ? message.replaceAll(/\s+/gu, " ") : ""
+  if (
+    code !== "invalid_encrypted_content"
+    && !UNREADABLE_STATE.test(text.toLowerCase())
+  ) {
+    return undefined
+  }
+  const quoted = QUOTED_STATE.exec(text)
+  return {
+    kind: "unreadable",
+    ...(quoted ? { quoted: { prefix: quoted[1], suffix: quoted[2] } } : {}),
+  }
 }
 
+export async function classifyReasoningStateRejection(
+  response: Response,
+): Promise<ReasoningStateRejection | undefined> {
+  return (await readReasoningStateRejection(response))?.kind
+}
+
+/**
+ * Resends to try, narrowest first. Unreadable state Copilot quotes is removed
+ * alone. For a foreign refusal, state this account never accepted goes first,
+ * and only a successful resend marks it refused. Removing all of it is the
+ * last resort and stays local to the request.
+ */
+export function reasoningStateRecoverySteps(
+  rejection: ReasoningStateRejectionDetail,
+  account: string,
+): Array<ReasoningStateRecoveryStep> {
+  if (rejection.kind === "unreadable") {
+    const { quoted } = rejection
+    return [
+      {
+        remember: false,
+        select:
+          quoted ?
+            (state) =>
+              state.startsWith(quoted.prefix) && state.endsWith(quoted.suffix)
+          : () => true,
+      },
+    ]
+  }
+  return [
+    {
+      remember: true,
+      select: (_state, value) =>
+        !acceptedReasoningState.has(accountStateKey(account, value)),
+    },
+    { remember: false, select: () => true },
+  ]
+}
 export interface ReasoningStateBudget {
   readonly currentBytes: number
   readonly targetBytes: number

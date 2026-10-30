@@ -4,7 +4,11 @@ import { events } from "fetch-event-stream"
 import type { RoutedAccountPin } from "~/lib/account-router"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
-import { routedFetch } from "~/lib/account-router"
+import {
+  getSelectedRoutedAccountId,
+  routedFetch,
+  usesPooledAccounts,
+} from "~/lib/account-router"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
 import {
@@ -15,9 +19,11 @@ import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
 import { stripUnsupportedResponsesInputMetadata } from "~/services/copilot/responses-metadata"
 import { omitOutputTokenReplay } from "~/services/copilot/responses-output-replay"
 import {
-  classifyReasoningStateRejection,
   hasReasoningState,
   omitRejectedReasoningState,
+  readReasoningStateRejection,
+  reasoningStateRecoverySteps,
+  rememberAcceptedReasoningState,
   rememberRejectedReasoningState,
   stripReasoningState,
 } from "~/services/copilot/responses-reasoning-state"
@@ -583,7 +589,6 @@ export const createResponses = async (
   })) as CreateResponsesReturn
 }
 
-// eslint-disable-next-line complexity -- Provider request preparation and compatibility retries remain together.
 const createResponsesCore = async (
   payload: ResponsesPayload,
   options: ResponsesRequestOptions,
@@ -603,7 +608,12 @@ const createResponsesCore = async (
   const body = prepared.body
   stripUnsupportedResponsesInputMetadata(body)
   omitOutputTokenReplay(body)
-  const omittedRejectedState = omitRejectedReasoningState(body)
+  const omittedRejectedState = omitRejectedReasoningState(
+    body,
+    reasoningStateAccount(
+      options.routedAccountPin?.accountId ?? getSelectedRoutedAccountId(),
+    ),
+  )
   if (omittedRejectedState > 0) {
     consola.debug("Omitted reasoning state Copilot already refused", {
       reasoningItems: omittedRejectedState,
@@ -639,50 +649,28 @@ const createResponsesCore = async (
     initiator,
   }
   const retryBudget = options.retryBudget ?? createRetryBudget()
-  const send = createResponsesSender({
-    headerOptions: headerOpts,
-    model: body.model,
+  const attempt = await sendResponsesWithRecovery({
+    allowCompatibilityRetry: options.allowCompatibilityRetry,
+    payload: preparedPayload,
     retryBudget,
-    routedAccountPin: options.routedAccountPin ?? {},
-    signal,
-    stream: Boolean(body.stream),
-  })
-
-  let activePayload = preparedPayload
-  let response = await send(preparedPayload, false)
-  // The gateway replays reasoning state, so it owns this recovery whether or
-  // not the caller allows compatibility retries.
-  ;({ payload: activePayload, response } =
-    await resendWithoutRejectedReasoningState({
-      payload: activePayload,
-      response,
+    send: createResponsesSender({
+      headerOptions: headerOpts,
+      model: body.model,
       retryBudget,
-      send: async (payload) => await send(payload, true),
-    }))
-
-  const compatibilityDecision =
-    options.allowCompatibilityRetry === false ?
-      { kind: "none" as const }
-    : await classifyCompatibilityRetry({
-        body: activePayload,
-        endpoint: "/responses",
-        response,
-      })
-  if (compatibilityDecision.kind !== "none") {
-    const retryPayload = structuredClone(activePayload)
-    if (
-      compatibilityDecision.normalize(retryPayload)
-      && claimCompatibilityRetry(retryBudget)
-    ) {
-      activePayload = retryPayload
-      response = await send(retryPayload, true)
-    }
-  }
-
+      routedAccountPin: options.routedAccountPin ?? {},
+      signal,
+      stream: Boolean(body.stream),
+    }),
+  })
+  const { payload: activePayload, response } = attempt
   if (!response.ok) {
     consola.error("Failed to create responses")
     throw new HTTPError("Failed to create responses", response, activePayload)
   }
+  rememberAcceptedReasoningState(
+    activePayload,
+    reasoningStateAccount(attempt.accountId),
+  )
 
   if (body.stream) {
     return {
@@ -696,6 +684,27 @@ const createResponsesCore = async (
   return { response: result, processedPayload: activePayload }
 }
 
+interface ResponsesAttempt {
+  /** The account that answered, as the router reports it. */
+  readonly accountId: number | undefined
+  readonly payload: Record<string, unknown>
+  readonly response: Response
+}
+
+type ResponsesSend = (
+  payload: Record<string, unknown>,
+  retry: boolean,
+) => Promise<Omit<ResponsesAttempt, "payload">>
+
+/**
+ * Ownership scope for replayed reasoning state: the account in a pool, where
+ * state one account refuses may suit another, or one scope for a single one.
+ */
+export function reasoningStateAccount(accountId: number | undefined): string {
+  if (!usesPooledAccounts()) return "single"
+  return accountId === undefined ? "unrouted" : `account:${accountId}`
+}
+
 /** One routed send per call; resends reuse the pinned account and budget. */
 function createResponsesSender(options: {
   headerOptions: Parameters<typeof routedFetch>[2]["headerOptions"]
@@ -704,62 +713,120 @@ function createResponsesSender(options: {
   routedAccountPin: RoutedAccountPin
   signal?: AbortSignal
   stream: boolean
-}): (payload: Record<string, unknown>, retry: boolean) => Promise<Response> {
-  return async (payload, retry) =>
-    (
-      await routedFetch(
-        "/responses",
-        {
-          method: "POST",
-          body: JSON.stringify(payload),
-          signal: options.signal,
-        },
-        {
-          modelId: options.model,
-          headerOptions: options.headerOptions,
-          maxHttpRetryDelaySeconds:
-            options.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
-          ...(retry ?
-            { reason: "compatibility_retry" as const, recordSelection: false }
-          : {}),
-          routedAccountPin: options.routedAccountPin,
-          retryBudget: options.retryBudget,
-        },
-      )
-    ).response
+}): ResponsesSend {
+  return async (payload, retry) => {
+    const { account, response } = await routedFetch(
+      "/responses",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        signal: options.signal,
+      },
+      {
+        modelId: options.model,
+        headerOptions: options.headerOptions,
+        maxHttpRetryDelaySeconds:
+          options.stream ? PRE_HEADER_MAX_DELAY_SECONDS : undefined,
+        ...(retry ?
+          { reason: "compatibility_retry" as const, recordSelection: false }
+        : {}),
+        routedAccountPin: options.routedAccountPin,
+        retryBudget: options.retryBudget,
+      },
+    )
+    return { accountId: account?.id, response }
+  }
+}
+
+/**
+ * Send the prepared payload. Recover from reasoning state Copilot refuses
+ * and, when the caller allows it, from one compatibility rejection.
+ */
+async function sendResponsesWithRecovery(options: {
+  allowCompatibilityRetry?: boolean
+  payload: Record<string, unknown>
+  retryBudget: RetryBudget
+  send: ResponsesSend
+}): Promise<ResponsesAttempt> {
+  // The gateway replays reasoning state, so it owns this recovery whether or
+  // not the caller allows compatibility retries.
+  const recover = async (attempt: ResponsesAttempt) =>
+    await resendWithoutRejectedReasoningState({
+      attempt,
+      retryBudget: options.retryBudget,
+      send: async (payload) => await options.send(payload, true),
+    })
+  const attempt = await recover({
+    payload: options.payload,
+    ...(await options.send(options.payload, false)),
+  })
+  if (options.allowCompatibilityRetry === false) return attempt
+  const decision = await classifyCompatibilityRetry({
+    body: attempt.payload,
+    endpoint: "/responses",
+    response: attempt.response,
+  })
+  if (decision.kind === "none") return attempt
+  const retryPayload = structuredClone(attempt.payload)
+  if (
+    !decision.normalize(retryPayload)
+    || !claimCompatibilityRetry(options.retryBudget)
+  ) {
+    return attempt
+  }
+  // The resend can reveal refused reasoning state the first error masked.
+  return await recover({
+    payload: retryPayload,
+    ...(await options.send(retryPayload, true)),
+  })
 }
 
 /**
  * Copilot binds replayed reasoning state to the account that produced it, and
- * expires it. When Copilot cannot use that state, resend once without it: the
- * turn keeps its history and loses only the reasoning that was refused. State
- * refused as foreign is remembered so later turns omit it up front.
+ * expires it. When Copilot cannot use that state, resend without the state it
+ * refused, narrowest guess first: the turn keeps its history and as much of
+ * its reasoning as Copilot accepts. State the account refuses is remembered
+ * for that account only after a resend without it succeeds.
  */
 async function resendWithoutRejectedReasoningState(options: {
-  payload: Record<string, unknown>
-  response: Response
+  attempt: ResponsesAttempt
   retryBudget: RetryBudget
-  send: (payload: Record<string, unknown>) => Promise<Response>
-}): Promise<{ payload: Record<string, unknown>; response: Response }> {
+  send: (
+    payload: Record<string, unknown>,
+  ) => Promise<Omit<ResponsesAttempt, "payload">>
+}): Promise<ResponsesAttempt> {
+  let { attempt } = options
   const rejection =
-    hasReasoningState(options.payload) ?
-      await classifyReasoningStateRejection(options.response)
+    hasReasoningState(attempt.payload) ?
+      await readReasoningStateRejection(attempt.response)
     : undefined
-  if (!rejection || !consumeExtraSend(options.retryBudget)) {
-    return { payload: options.payload, response: options.response }
+  if (!rejection) return attempt
+  for (const step of reasoningStateRecoverySteps(
+    rejection,
+    reasoningStateAccount(attempt.accountId),
+  )) {
+    const payload = structuredClone(attempt.payload)
+    const removed = stripReasoningState(payload, step.select)
+    if (removed.length === 0) continue
+    if (!consumeExtraSend(options.retryBudget)) break
+    consola.warn(
+      "Copilot could not use replayed reasoning state; resending without it",
+      { reasoningItems: removed.length, rejection: rejection.kind },
+    )
+    const refusedBy = attempt.accountId
+    attempt = { payload, ...(await options.send(payload)) }
+    if (attempt.response.ok) {
+      // Success on the refusing account shows that account refuses the state.
+      if (step.remember && attempt.accountId === refusedBy) {
+        rememberRejectedReasoningState(
+          reasoningStateAccount(refusedBy),
+          removed,
+        )
+      }
+      break
+    }
+    const again = await readReasoningStateRejection(attempt.response)
+    if (again?.kind !== rejection.kind) break
   }
-  const payload = structuredClone(options.payload)
-  const removed = stripReasoningState(payload)
-  consola.warn(
-    "Copilot could not use replayed reasoning state; resending without it",
-    { reasoningItems: removed.length, rejection },
-  )
-  const response = await options.send(payload)
-  if (
-    rejection === "foreign"
-    && (await classifyReasoningStateRejection(response)) !== "foreign"
-  ) {
-    rememberRejectedReasoningState(removed)
-  }
-  return { payload, response }
+  return attempt
 }

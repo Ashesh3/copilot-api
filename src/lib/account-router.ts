@@ -1175,7 +1175,8 @@ async function routedFetchInner(
   return result
 }
 
-function usesPooledAccounts(): boolean {
+/** Whether requests choose among several accounts rather than one. */
+export function usesPooledAccounts(): boolean {
   return (
     state.isMultiToken
     || (peekStorageRuntime() !== undefined

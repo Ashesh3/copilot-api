@@ -7,6 +7,7 @@ import type { AnthropicResponse } from "~/routes/messages/anthropic-types"
 import type { Model } from "~/services/copilot/get-models"
 
 import {
+  getSelectedRoutedAccountId,
   runWithRoutedModelSelection,
   selectRoutedModel,
 } from "~/lib/account-router"
@@ -58,6 +59,7 @@ import {
   type ResponsesPayload,
   type ResponsesResult,
   createResponses,
+  reasoningStateAccount,
 } from "~/services/copilot/create-responses"
 import { stripUnsupportedResponsesInputMetadata } from "~/services/copilot/responses-metadata"
 import { omitOutputTokenReplay } from "~/services/copilot/responses-output-replay"
@@ -320,7 +322,10 @@ const handleCompactAttempt = async (c: Context, body: CompactRequestBody) => {
         // Use native Responses API
         stripUnsupportedResponsesInputMetadata(responsesPayload)
         omitOutputTokenReplay(responsesPayload)
-        omitRejectedReasoningState(responsesPayload)
+        omitRejectedReasoningState(
+          responsesPayload,
+          reasoningStateAccount(getSelectedRoutedAccountId()),
+        )
         const fitted = fitResponsesCompactionPayload(responsesPayload)
         const fittedPayload = fitted.payload
         reportCompactionReduction(
