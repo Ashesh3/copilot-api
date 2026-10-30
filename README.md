@@ -175,13 +175,13 @@ parse, or cache them, and has no local-fetch fallback.**
   HTTP streams and WebSocket turns. Failed Responses usage is excluded, while
   completed rounds remain counted; invalid counts retain known subtotals and
   mark an accounting gap instead of becoming measured zero usage.
-- A Responses client on a Messages or Chat fallback, such as Codex with a
-  Claude model, sizes its context by a response's input tokens. A response
-  with gateway-run rounds therefore reports the last round's input-side
-  tokens, whose prompt holds the earlier rounds, with the output of every
-  round. Request accounting and the dashboard still count every round.
+- A Responses client such as Codex sizes its context by a response's input
+  tokens. A response with gateway-run rounds therefore reports the last
+  round's input-side tokens, whose prompt holds the earlier rounds, with the
+  output of every round, on native Responses as on a Messages or Chat
+  fallback. Request accounting and the dashboard still count every round.
   Hosted search that the gateway runs for a Chat-only model follows the same
-  rule; Google clients there keep the final round's own usage.
+  rule.
 - When the gateway runs the hosted search tool of a Messages, Chat or Google
   client, such as Claude Code's `web_search`, the client sees the final
   round's usage, and request accounting counts every round.

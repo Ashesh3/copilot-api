@@ -52,14 +52,11 @@ export function lastRoundContextUsage(
 }
 
 /**
- * Whether a Responses client is served over Messages or Chat, such as Codex
- * with a Claude or Chat-only model. It reads usage the way Codex does.
+ * Whether the client speaks Responses, such as Codex, over any upstream
+ * protocol. It reads usage the way Codex does.
  */
 export function servesResponsesClient(
   prepared: PreparedManagedWebTools,
-  protocol: WebProtocol,
 ): boolean {
-  return (
-    protocol !== "responses" && prepared.context?.clientProtocol === "responses"
-  )
+  return prepared.context?.clientProtocol === "responses"
 }

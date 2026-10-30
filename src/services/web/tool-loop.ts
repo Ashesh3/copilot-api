@@ -59,8 +59,8 @@ export interface ManagedWebRequest {
   /**
    * Receives every buffered round the loop answers privately, in order. The
    * request still resolves to the final round, whose usage covers them all;
-   * a Responses client served over another protocol sees the last round's
-   * input instead (see context-usage.ts).
+   * a Responses client sees the last round's input instead (see
+   * context-usage.ts).
    */
   onRound?: (round: ManagedWebRound) => void
   send: (
@@ -194,7 +194,7 @@ export async function runManagedWebRequest(
   let usage: Record<string, unknown> | undefined
   // Codex sizes its context by the reported input; accounting keeps totals.
   const reported = (round: number, last: unknown) =>
-    round > 0 && servesResponsesClient(prepared, options.protocol) ?
+    round > 0 && servesResponsesClient(prepared) ?
       lastRoundContextUsage(last, usage, options.protocol)
     : usage
   for (let round = 0; round < MAX_MANAGED_WEB_ROUNDS; round++) {

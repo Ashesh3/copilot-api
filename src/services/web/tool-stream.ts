@@ -53,6 +53,7 @@ export async function* streamManagedWebRequest(
   // Droid replays carriers, so its rounds may hand off to client tools.
   const carriers = usesDroidCarriers(prepared)
   const finish = carriers ? finishDroidStreamRound : finishStreamRound
+  const responsesClient = servesResponsesClient(prepared)
   for (let round = 0; round < MAX_MANAGED_WEB_ROUNDS; round++) {
     position.usage = usage
     position.output = allOutput
@@ -67,6 +68,8 @@ export async function* streamManagedWebRequest(
       position,
       observedUsage,
       carriers,
+      // Droid and Codex size their context by the last round's input.
+      lastRoundContext: carriers || (round > 0 && responsesClient),
     })
     if (state.failed || (state.transparent && round === 0)) return
     const response = state.finish()
@@ -110,7 +113,7 @@ async function* finishStreamRound(
     position.offset = 0
     // Codex sizes its context by the reported input; accounting keeps totals.
     const usage =
-      round.index > 0 && servesResponsesClient(prepared, options.protocol) ?
+      round.index > 0 && servesResponsesClient(prepared) ?
         lastRoundContextUsage(response.usage, round.usage, options.protocol)
       : round.usage
     yield* placeEvents(state.terminalEvents(visible, usage, output), position)
@@ -162,6 +165,7 @@ async function* consumeRound(
     position: StreamPosition
     observedUsage: ManagedWebUsage
     carriers: boolean
+    lastRoundContext: boolean
   },
 ): AsyncGenerator<WebEvent> {
   const { source, round, position } = input
@@ -188,7 +192,7 @@ async function* consumeRound(
           event,
           parsed,
           position,
-          carriers: input.carriers,
+          lastRoundContext: input.lastRoundContext,
         })
       return
     }
@@ -217,7 +221,7 @@ function* failedRoundEvents(
     event: WebEvent
     parsed: Record<string, unknown>
     position: StreamPosition
-    carriers: boolean
+    lastRoundContext: boolean
   },
 ): Generator<WebEvent> {
   const { event, parsed, position } = input
@@ -242,7 +246,7 @@ function* failedRoundEvents(
       output,
       output_text: responseOutputText(output),
       usage:
-        input.carriers ?
+        input.lastRoundContext ?
           lastRoundContextUsage(response.usage, usage, position.protocol)
         : usage,
     }
