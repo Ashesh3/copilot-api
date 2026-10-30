@@ -97,6 +97,7 @@ import {
   finalizeNativeResponsesRequest,
   prepareResponsesRequest,
 } from "~/services/copilot/responses-contract"
+import { omitUnprefixedItemIds } from "~/services/copilot/responses-item-ids"
 import { withoutLegacyWebResults } from "~/services/web/legacy-history"
 import { runWithWebTools } from "~/services/web/tool-context"
 
@@ -2187,10 +2188,15 @@ function createCompletedResponseSnapshot(
 ): ResponsesPayload {
   const output = frame.response?.output
   const snapshotPayload = structuredClone(payload)
+  const outputItems = Array.isArray(output) ? structuredClone(output) : output
+  // Copilot binds output item IDs to the account and time that issued them.
+  // Codex drops such IDs before replaying history, so the rehydrated turn
+  // does the same and a later turn on another account is not refused.
+  if (Array.isArray(outputItems)) omitUnprefixedItemIds(outputItems)
   const completedInput =
-    Array.isArray(output) ?
+    Array.isArray(outputItems) ?
       withoutLegacyWebResults(
-        mergeContinuationInput(snapshotPayload.input, structuredClone(output)),
+        mergeContinuationInput(snapshotPayload.input, outputItems),
       )
     : withoutLegacyWebResults(snapshotPayload.input)
 

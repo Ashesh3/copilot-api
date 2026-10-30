@@ -36,6 +36,7 @@ import {
   sanitizeResponsesStreamEvent,
   type ResponsesPayload,
 } from "../src/services/copilot/create-responses"
+import { resetRefusedItemIdsForTest } from "../src/services/copilot/responses-item-ids"
 import { resetRejectedReasoningStateForTest } from "../src/services/copilot/responses-reasoning-state"
 import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
@@ -1813,6 +1814,85 @@ test("remembers refused reasoning state only for the account that refused it", a
       `Bearer ${REASONING_BOUND_TOKEN}`,
     ])
   } finally {
+    resetRejectedReasoningStateForTest()
+  }
+})
+
+// Copilot checks each replayed item's ID before its state.
+function itemIdRejection(status = 401): Response {
+  return Response.json(
+    { error: { message: "Input item ID does not belong to this connection" } },
+    { status },
+  )
+}
+
+const ISSUED_REASONING = {
+  id: "Y29waWxvdC1pc3N1ZWQtcmVhc29uaW5nLWlk",
+  type: "reasoning",
+  summary: [{ type: "summary_text", text: "Planned the change." }],
+  encrypted_content: "reasoning-state-issued-with-the-id",
+}
+
+test("resends without item IDs when Copilot refuses one, keeping the item state", async () => {
+  state.models = responsesCapableModels
+  queuedResponses.push(itemIdRejection(), createSuccessResponse())
+
+  try {
+    const first = await postReasoningTurn(
+      "gpt-4o",
+      "item-id-session",
+      ISSUED_REASONING,
+    )
+    const second = await postReasoningTurn(
+      "gpt-4o",
+      "item-id-session",
+      ISSUED_REASONING,
+    )
+
+    expect(first.status).toBe(200)
+    expect(second.status).toBe(200)
+    // The refused turn, its resend, then the next turn sent once.
+    expect(requestBodies).toHaveLength(3)
+    expect(requestBodies[0].input).toContainEqual(ISSUED_REASONING)
+    const { id: _id, ...withoutId } = ISSUED_REASONING
+    for (const body of requestBodies.slice(1)) {
+      expect(body.input).toContainEqual(withoutId)
+      expect(JSON.stringify(body.input)).not.toContain(ISSUED_REASONING.id)
+    }
+  } finally {
+    resetRefusedItemIdsForTest()
+    resetRejectedReasoningStateForTest()
+  }
+})
+
+test("recovers refused reasoning state that an item ID refusal hid", async () => {
+  state.models = responsesCapableModels
+  queuedResponses.push(
+    itemIdRejection(400),
+    foreignStateRejection(),
+    createSuccessResponse(),
+  )
+
+  try {
+    const response = await postReasoningTurn(
+      "gpt-4o",
+      "item-id-state-session",
+      ISSUED_REASONING,
+    )
+
+    expect(response.status).toBe(200)
+    expect(requestBodies).toHaveLength(3)
+    expect(requestBodies[1].input).toContainEqual({
+      type: "reasoning",
+      summary: ISSUED_REASONING.summary,
+      encrypted_content: ISSUED_REASONING.encrypted_content,
+    })
+    expect(requestBodies[2].input).toContainEqual({
+      type: "reasoning",
+      summary: ISSUED_REASONING.summary,
+    })
+  } finally {
+    resetRefusedItemIdsForTest()
     resetRejectedReasoningStateForTest()
   }
 })

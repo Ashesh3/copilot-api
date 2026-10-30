@@ -16,6 +16,12 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
+import {
+  isItemIdOwnershipRejection,
+  omitRefusedItemIds,
+  rememberRefusedItemIds,
+  stripItemIds,
+} from "~/services/copilot/responses-item-ids"
 import { stripUnsupportedResponsesInputMetadata } from "~/services/copilot/responses-metadata"
 import { omitOutputTokenReplay } from "~/services/copilot/responses-output-replay"
 import {
@@ -609,15 +615,22 @@ const createResponsesCore = async (
   const body = prepared.body
   stripUnsupportedResponsesInputMetadata(body)
   omitOutputTokenReplay(body)
+  const destinationAccount = reasoningStateAccount(
+    options.routedAccountPin?.accountId ?? getSelectedRoutedAccountId(),
+  )
   const omittedRejectedState = omitRejectedReasoningState(
     body,
-    reasoningStateAccount(
-      options.routedAccountPin?.accountId ?? getSelectedRoutedAccountId(),
-    ),
+    destinationAccount,
   )
   if (omittedRejectedState > 0) {
     consola.debug("Omitted reasoning state Copilot already refused", {
       reasoningItems: omittedRejectedState,
+    })
+  }
+  const omittedRefusedIds = omitRefusedItemIds(body, destinationAccount)
+  if (omittedRefusedIds > 0) {
+    consola.debug("Omitted item IDs Copilot already refused", {
+      items: omittedRefusedIds,
     })
   }
   omitConfiguredReasoningEffort("responses", body)
@@ -749,8 +762,12 @@ async function sendResponsesWithRecovery(options: {
   retryBudget: RetryBudget
   send: ResponsesSend
 }): Promise<ResponsesAttempt> {
-  // The gateway replays reasoning state, so it owns this recovery whether or
-  // not the caller allows compatibility retries.
+  // The gateway replays reasoning state and item IDs, so it owns this
+  // recovery whether or not the caller allows compatibility retries. Copilot
+  // checks each item's ID before its state, and reports only the first
+  // refusal, so a resend can reveal the other kind.
+  const resend = async (payload: Record<string, unknown>) =>
+    await options.send(payload, true)
   const recover = async (attempt: ResponsesAttempt) => {
     let activeAttempt = attempt
     const payload = await recoverReasoningItemIds(
@@ -760,11 +777,19 @@ async function sendResponsesWithRecovery(options: {
     if (payload && consumeExtraSend(options.retryBudget)) {
       activeAttempt = { payload, ...(await options.send(payload, true)) }
     }
-    return await resendWithoutRejectedReasoningState({
-      attempt: activeAttempt,
-      retryBudget: options.retryBudget,
-      send: async (payload) => await options.send(payload, true),
-    })
+    const recoverIds = async (current: ResponsesAttempt) =>
+      await resendWithoutRefusedItemIds({
+        attempt: current,
+        retryBudget: options.retryBudget,
+        send: resend,
+      })
+    return await recoverIds(
+      await resendWithoutRejectedReasoningState({
+        attempt: await recoverIds(activeAttempt),
+        retryBudget: options.retryBudget,
+        send: resend,
+      }),
+    )
   }
   const attempt = await recover({
     payload: options.payload,
@@ -839,4 +864,32 @@ async function resendWithoutRejectedReasoningState(options: {
     if (again?.kind !== rejection.kind) break
   }
   return attempt
+}
+
+/**
+ * Copilot binds item IDs to the account that issued them, and expires them.
+ * An ID only names an item whose content is replayed with it, so when Copilot
+ * refuses one, resend without any of them, and leave them off later requests
+ * to that account.
+ */
+async function resendWithoutRefusedItemIds(options: {
+  attempt: ResponsesAttempt
+  retryBudget: RetryBudget
+  send: (
+    payload: Record<string, unknown>,
+  ) => Promise<Omit<ResponsesAttempt, "payload">>
+}): Promise<ResponsesAttempt> {
+  const { attempt } = options
+  if (!(await isItemIdOwnershipRejection(attempt.response))) return attempt
+  const payload = structuredClone(attempt.payload)
+  const removed = stripItemIds(payload)
+  if (removed.length === 0) return attempt
+  // Copilot names no item, and dropping an ID loses nothing, so every ID the
+  // refused request carried stays off this account's later requests.
+  rememberRefusedItemIds(reasoningStateAccount(attempt.accountId), removed)
+  if (!consumeExtraSend(options.retryBudget)) return attempt
+  consola.warn("Copilot refused replayed item IDs; resending without them", {
+    items: removed.length,
+  })
+  return { payload, ...(await options.send(payload)) }
 }

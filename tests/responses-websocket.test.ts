@@ -4727,6 +4727,93 @@ describe("responses websocket upstream handling", () => {
     })
   })
 
+  test("rehydrates continuation output without Copilot-issued item IDs", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(createResponsesSseResponse("resp_without_item_ids"))
+    const ws = createTestWebSocket()
+
+    recordResponseSnapshotFromFrame(
+      ws.data.responseSnapshots,
+      {
+        model: "gpt-5.4",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "First" }],
+          },
+        ],
+        stream: true,
+      },
+      JSON.stringify({
+        type: "response.completed",
+        response: {
+          id: "resp_with_item_ids",
+          output: [
+            {
+              id: "c2lnbmVkLXJlYXNvbmluZy1pZA==",
+              type: "reasoning",
+              summary: [{ type: "summary_text", text: "Thought" }],
+              encrypted_content: "token-bound-secret",
+            },
+            {
+              id: "c2lnbmVkLW1lc3NhZ2UtaWQ+/w==",
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "Done", annotations: [] }],
+            },
+            {
+              id: "fc_local",
+              type: "function_call",
+              call_id: "call_1",
+              name: "shell",
+              arguments: "{}",
+            },
+          ],
+        },
+      }),
+    )
+
+    await seedProtocolDatabase().then(() =>
+      responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          previous_response_id: "resp_with_item_ids",
+          input: [
+            {
+              type: "function_call_output",
+              call_id: "call_1",
+              output: "ok",
+            },
+          ],
+          tools: [],
+        }),
+      ),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const input = lastRequestBody?.input as Array<Record<string, unknown>>
+    expect(input).toContainEqual({
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "Thought" }],
+      encrypted_content: "token-bound-secret",
+    })
+    expect(input).toContainEqual({
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "Done", annotations: [] }],
+    })
+    expect(input.find((item) => item.type === "function_call")?.id).toBe(
+      "fc_local",
+    )
+  })
+
   test("resends a native WebSocket turn without reasoning state Copilot refuses", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"
