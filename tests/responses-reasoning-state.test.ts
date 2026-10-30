@@ -39,6 +39,11 @@ const latestReasoning = {
   summary: [],
   encrypted_content: "state-from-this-turn",
 }
+const foreignReasoning = {
+  type: "reasoning",
+  summary: [],
+  encrypted_content: "state-from-another-account",
+}
 
 function completed(): Response {
   return Response.json({
@@ -218,6 +223,115 @@ test("keeps reasoning state when removing it does not resolve the rejection", as
 
   expect(error).toBeInstanceOf(HTTPError)
   expect(requests[0].input).toContainEqual(earlierReasoning)
+})
+
+test("keeps state the account accepted when a turn mixes in refused state", async () => {
+  await send(conversation(earlierReasoning))
+  queued.push(rejection({ message: FOREIGN_STATE }))
+  requests.length = 0
+
+  await send(conversation(earlierReasoning, foreignReasoning))
+  await send(conversation(earlierReasoning, foreignReasoning))
+
+  // Only the unfamiliar state is removed, then left out up front.
+  expect(requests).toHaveLength(3)
+  expect(requests[1].input).toContainEqual(earlierReasoning)
+  for (const request of requests.slice(1)) {
+    expect(JSON.stringify(request.input)).not.toContain(
+      foreignReasoning.encrypted_content,
+    )
+  }
+  expect(requests[2].input).toContainEqual(earlierReasoning)
+})
+
+test("does not remember state when the resend fails for another reason", async () => {
+  queued.push(
+    rejection({ message: FOREIGN_STATE }),
+    rejection({ message: "prompt is too long" }),
+  )
+
+  const error = await send(conversation(foreignReasoning)).catch(
+    (caught: unknown) => caught,
+  )
+  requests.length = 0
+  await send(conversation(foreignReasoning))
+
+  expect(error).toBeInstanceOf(HTTPError)
+  expect(requests).toHaveLength(1)
+  expect(requests[0].input).toContainEqual(foreignReasoning)
+})
+
+test("removes all state, for this request only, when the account refuses state it accepted", async () => {
+  await send(conversation(earlierReasoning, latestReasoning))
+  // Accepted state can still expire.
+  queued.push(rejection({ message: FOREIGN_STATE }))
+  requests.length = 0
+
+  await send(conversation(earlierReasoning, latestReasoning))
+  await send(conversation(earlierReasoning, latestReasoning))
+
+  expect(requests).toHaveLength(3)
+  expect(JSON.stringify(requests[1].input)).not.toContain("encrypted_content")
+  expect(requests[2].input).toContainEqual(earlierReasoning)
+  expect(requests[2].input).toContainEqual(latestReasoning)
+})
+
+test("removes only the unreadable state Copilot quotes", async () => {
+  const readable = {
+    ...earlierReasoning,
+    encrypted_content: "AAAAreadableZZZZ",
+  }
+  const corrupt = { ...latestReasoning, encrypted_content: "BBBBcorruptYYYY" }
+  queued.push(
+    rejection({
+      code: "invalid_request_body",
+      message:
+        "The encrypted content BBBB...YYYY could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
+    }),
+  )
+
+  await send(conversation(readable, corrupt), false)
+
+  expect(requests).toHaveLength(2)
+  expect(requests[1].input).toContainEqual(readable)
+  expect(requests[1].input).toContainEqual({ type: "reasoning", summary: [] })
+})
+
+test("keeps reasoning state when Copilot quotes other unreadable state", async () => {
+  queued.push(
+    rejection({
+      code: "invalid_request_body",
+      message:
+        "The encrypted content QQQQ...WWWW could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
+    }),
+  )
+
+  const error = await send(conversation(earlierReasoning), false).catch(
+    (caught: unknown) => caught,
+  )
+
+  expect(error).toBeInstanceOf(HTTPError)
+  expect(requests).toHaveLength(1)
+})
+
+test("recovers refused reasoning state that a compatibility resend reveals", async () => {
+  queued.push(
+    rejection({
+      code: "invalid_request_body",
+      message:
+        "Unsupported parameter: 'temperature' is not supported with this model.",
+    }),
+    rejection({ message: FOREIGN_STATE }),
+  )
+
+  await send({ ...conversation(foreignReasoning), temperature: 0.2 })
+
+  expect(requests).toHaveLength(3)
+  expect(requests[1]).not.toHaveProperty("temperature")
+  expect(requests[1].input).toContainEqual(foreignReasoning)
+  expect(JSON.stringify(requests[2].input)).not.toContain(
+    foreignReasoning.encrypted_content,
+  )
 })
 
 test.each<[Record<string, unknown>, ReasoningStateRejection | undefined]>([

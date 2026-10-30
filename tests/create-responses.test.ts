@@ -1679,8 +1679,13 @@ test("returns a structured conflict when a bound Responses account still rejects
   )
 })
 
-test("keeps a bound session when Copilot refuses replayed reasoning state as another account's", async () => {
-  const modelId = "responses-session-foreign-reasoning"
+const REASONING_BOUND_TOKEN = "responses-reasoning-bound-token"
+const REASONING_ALTERNATE_TOKEN = "responses-reasoning-alternate-token"
+
+/** Pool two accounts serving one model; returns a session bound to each. */
+function installReasoningAccounts(
+  modelId: string,
+): Record<2221 | 2222, string> {
   const model = {
     ...responsesCapableModels.data[0],
     id: modelId,
@@ -1688,8 +1693,8 @@ test("keeps a bound session when Copilot refuses replayed reasoning state as ano
   }
   state.models = { data: [model], object: "list" }
   for (const [id, token] of [
-    [2221, "responses-reasoning-bound-token"],
-    [2222, "responses-reasoning-alternate-token"],
+    [2221, REASONING_BOUND_TOKEN],
+    [2222, REASONING_ALTERNATE_TOKEN],
   ] as const) {
     const account = tokenPool.addAccount(`github-${id}`, "individual", id)
     account.copilotToken = token
@@ -1699,22 +1704,58 @@ test("keeps a bound session when Copilot refuses replayed reasoning state as ano
   }
   tokenPool.rebuildModelIndex()
   state.isMultiToken = true
-  const sessionId = Array.from(
-    { length: 1000 },
-    (_, index) => `responses-reasoning-session-${index}`,
-  ).find(
-    (candidate) =>
-      tokenPool.getAccountForModelBySession(modelId, candidate)?.id === 2221,
+  const sessionFor = (accountId: number): string => {
+    const sessionId = Array.from(
+      { length: 1000 },
+      (_, index) => `responses-reasoning-session-${index}`,
+    ).find(
+      (candidate) =>
+        tokenPool.getAccountForModelBySession(modelId, candidate)?.id
+        === accountId,
+    )
+    if (!sessionId)
+      throw new TypeError(`Expected affinity key for account ${accountId}`)
+    return sessionId
+  }
+  return { 2221: sessionFor(2221), 2222: sessionFor(2222) }
+}
+
+async function postReasoningTurn(
+  modelId: string,
+  sessionId: string,
+  reasoning: Record<string, unknown>,
+): Promise<Response> {
+  await seedProtocolDatabase()
+  return await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      client_metadata: { session_id: sessionId },
+      input: [
+        { type: "message", role: "user", content: "Make the change." },
+        reasoning,
+        { type: "message", role: "user", content: "Continue." },
+      ],
+      model: modelId,
+    }),
+  })
+}
+
+// Copilot reports state minted for another account as 401.
+function foreignStateRejection(): Response {
+  return Response.json(
+    { error: { message: "Input item does not belong to this connection" } },
+    { status: 401 },
   )
-  if (!sessionId) throw new TypeError("Expected affinity key for account 2221")
-  // Copilot reports state minted for another account as 401.
-  queuedResponses.push(
-    Response.json(
-      { error: { message: "Input item does not belong to this connection" } },
-      { status: 401 },
-    ),
-    createSuccessResponse(),
-  )
+}
+
+test("keeps a bound session when Copilot refuses replayed reasoning state as another account's", async () => {
+  const modelId = "responses-session-foreign-reasoning"
+  const sessions = installReasoningAccounts(modelId)
+  queuedResponses.push(foreignStateRejection(), createSuccessResponse())
   const reasoning = {
     type: "reasoning",
     summary: [{ type: "summary_text", text: "Planned the change." }],
@@ -1722,24 +1763,7 @@ test("keeps a bound session when Copilot refuses replayed reasoning state as ano
   }
 
   try {
-    const response = await seedProtocolDatabase().then(() =>
-      server.request("/v1/responses", {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          client_metadata: { session_id: sessionId },
-          input: [
-            { type: "message", role: "user", content: "Make the change." },
-            reasoning,
-            { type: "message", role: "user", content: "Continue." },
-          ],
-          model: modelId,
-        }),
-      }),
-    )
+    const response = await postReasoningTurn(modelId, sessions[2221], reasoning)
 
     expect(response.status).toBe(200)
     expect(requestBodies).toHaveLength(2)
@@ -1749,8 +1773,44 @@ test("keeps a bound session when Copilot refuses replayed reasoning state as ano
       summary: reasoning.summary,
     })
     expect(capturedAuthorization).toEqual([
-      "Bearer responses-reasoning-bound-token",
-      "Bearer responses-reasoning-bound-token",
+      `Bearer ${REASONING_BOUND_TOKEN}`,
+      `Bearer ${REASONING_BOUND_TOKEN}`,
+    ])
+  } finally {
+    resetRejectedReasoningStateForTest()
+  }
+})
+
+test("remembers refused reasoning state only for the account that refused it", async () => {
+  const modelId = "responses-session-scoped-reasoning"
+  const sessions = installReasoningAccounts(modelId)
+  queuedResponses.push(foreignStateRejection(), createSuccessResponse())
+  const reasoning = {
+    type: "reasoning",
+    summary: [],
+    encrypted_content: "reasoning-state-from-account-2222",
+  }
+
+  try {
+    for (const accountId of [2221, 2222, 2221] as const) {
+      const response = await postReasoningTurn(
+        modelId,
+        sessions[accountId],
+        reasoning,
+      )
+      expect(response.status).toBe(200)
+    }
+
+    expect(
+      requestBodies.map((body) =>
+        JSON.stringify(body.input).includes(reasoning.encrypted_content),
+      ),
+    ).toEqual([true, false, true, false])
+    expect(capturedAuthorization).toEqual([
+      `Bearer ${REASONING_BOUND_TOKEN}`,
+      `Bearer ${REASONING_BOUND_TOKEN}`,
+      `Bearer ${REASONING_ALTERNATE_TOKEN}`,
+      `Bearer ${REASONING_BOUND_TOKEN}`,
     ])
   } finally {
     resetRejectedReasoningStateForTest()
