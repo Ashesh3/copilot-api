@@ -593,7 +593,7 @@ async function convertTolerantResponsesInput(
     appendTolerantTextMessage(messages, "user", FUTURE_RESPONSES_ITEM_CONTEXT)
   }
   webSearches.flush()
-  instructions.flush()
+  instructions.flush({ final: true })
   return { messages, system, webSearchTools }
 }
 

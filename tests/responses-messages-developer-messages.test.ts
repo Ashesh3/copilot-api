@@ -31,6 +31,15 @@ function reminder(text: string) {
   }
 }
 
+function execCall(id: string, cmd: string) {
+  return {
+    type: "function_call" as const,
+    call_id: id,
+    name: "exec_command",
+    arguments: JSON.stringify({ cmd }),
+  }
+}
+
 async function translate(input: Array<ResponseInputItem>) {
   const candidate = await adaptResponsesToMessagesCandidate({
     source: {
@@ -151,4 +160,43 @@ test("consecutive instructions during a tool call all follow its result", async 
       reminder("Sandbox: read-only"),
     ],
   })
+})
+
+test("an instruction between parallel tool calls waits for all their results", async () => {
+  const payload = await translate([
+    ...FIRST_TURN.slice(0, 2),
+    execCall("call_1", "bun test"),
+    { type: "message", role: "developer", content: "Approval: never" },
+    execCall("call_2", "bun run lint"),
+    { type: "function_call_output", call_id: "call_1", output: "2 passed" },
+    { type: "function_call_output", call_id: "call_2", output: "clean" },
+  ])
+
+  expect(mergeTurns(payload.messages).slice(1)).toEqual([
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "call_1",
+          name: "exec_command",
+          input: { cmd: "bun test" },
+        },
+        {
+          type: "tool_use",
+          id: "call_2",
+          name: "exec_command",
+          input: { cmd: "bun run lint" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "call_1", content: "2 passed" },
+        { type: "tool_result", tool_use_id: "call_2", content: "clean" },
+        reminder("Approval: never"),
+      ],
+    },
+  ])
 })

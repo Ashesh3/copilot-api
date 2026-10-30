@@ -12,6 +12,15 @@ function systemReminder(text: string): AnthropicTextBlock {
   }
 }
 
+/** An assistant turn whose tool calls still wait for their results. */
+function awaitsToolResults(message: AnthropicMessage | undefined): boolean {
+  return (
+    message?.role === "assistant"
+    && Array.isArray(message.content)
+    && message.content.some((block) => block.type === "tool_use")
+  )
+}
+
 /** A developer or system message, which the bridge treats as instructions. */
 export function isResponsesInstruction(item: {
   role?: unknown
@@ -61,7 +70,13 @@ export class MidThreadInstructions {
     this.flush()
   }
 
-  flush(): void {
+  /**
+   * Tool results must directly follow the turn that made the calls, so
+   * instructions wait while that turn is last, including through further
+   * parallel calls. At the end of the input they are placed regardless.
+   */
+  flush(options: { final?: boolean } = {}): void {
+    if (!options.final && awaitsToolResults(this.messages.at(-1))) return
     for (const text of this.pending.splice(0)) {
       const previous = this.messages.at(-1)
       if (
