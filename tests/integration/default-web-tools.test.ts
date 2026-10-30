@@ -15,6 +15,23 @@ import { initializeTestState, postJSON, useIntegrationFixture } from "./setup"
 const PREFERRED_RESPONSES_MODELS = ["gpt-5.3-codex"]
 const RESPONSES_MODEL_ATTEMPTS = 3
 
+/** The text a Messages SSE stream delivered; a phrase can span deltas. */
+function streamedText(body: string): string {
+  let text = ""
+  for (const line of body.split("\n")) {
+    if (!line.startsWith("data: ")) continue
+    try {
+      const event = JSON.parse(line.slice("data: ".length)) as {
+        delta?: { type?: string; text?: string }
+      }
+      if (event.delta?.type === "text_delta") text += event.delta.text ?? ""
+    } catch {
+      // Not a JSON event.
+    }
+  }
+  return text
+}
+
 const originalFetch = globalThis.fetch
 const destinations: Array<{ host: string; path: string; status: number }> = []
 const pageOriginAttempts: Array<string> = []
@@ -168,7 +185,7 @@ test("live streaming page reading stays GitHub-only with one terminal", async ()
   expect(response.status).toBe(200)
   expect(openedUrls).toContain("https://example.com/")
   expect(pageOriginAttempts).toEqual([])
-  expect(body).toContain("Example Domain")
+  expect(streamedText(body)).toContain("Example Domain")
   expect(body.match(/event: message_stop/g)).toHaveLength(1)
   expect(body).not.toContain('"name":"_copilot_web_')
 }, 180_000)
