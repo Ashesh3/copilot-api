@@ -263,6 +263,70 @@ test.each([
   },
 )
 
+test.each([
+  {
+    name: "a prompt over the limit",
+    status: 400,
+    message: "prompt is too long: 250000 tokens > 200000 maximum",
+    code: "context_length_exceeded",
+  },
+  {
+    name: "a request the provider refused",
+    status: 400,
+    message: "tools.0.input_schema: invalid",
+    code: "invalid_prompt",
+  },
+  {
+    name: "a rate limit",
+    status: 429,
+    message: "Slow down.",
+    code: "rate_limit_exceeded",
+    retryAfter: "7",
+  },
+  {
+    name: "a server error",
+    status: 503,
+    message: "Overloaded.",
+    code: "server_error",
+    retryAfter: "3",
+  },
+])(
+  "codes a late failure from $name so Codex knows whether to retry",
+  async ({ code, message, retryAfter, status }) => {
+    const response = await seedProtocolDatabase().then(() =>
+      server.request("/v1/responses", createRequest()),
+    )
+    const reader = requireBody(response).getReader()
+    await reader.read()
+    rejectUpstream?.(
+      new HTTPError(
+        "late refusal",
+        Response.json(
+          {
+            type: "error",
+            error: { type: "invalid_request_error", message },
+          },
+          {
+            status,
+            headers: retryAfter ? { "retry-after": retryAfter } : {},
+          },
+        ),
+      ),
+    )
+
+    const failed = dataFrames(await readRemaining(reader)).at(-1)
+
+    expect(failed).toMatchObject({ type: "response.failed" })
+    const error = frameError(failed ?? {})
+    expect(error).toMatchObject({ code, status })
+    if (retryAfter) {
+      expect(error.headers).toEqual({ "retry-after": retryAfter })
+    } else {
+      expect(error).not.toHaveProperty("headers")
+    }
+  },
+)
+
 test("does not emit failure or leak rejection when abort races late failure", async () => {
   const unhandled: Array<unknown> = []
   const onUnhandled = (event: Event): void => {

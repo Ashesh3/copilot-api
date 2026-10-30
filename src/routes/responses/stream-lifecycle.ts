@@ -9,6 +9,10 @@ import type {
 
 import { isHTTPError, reportHttpError } from "~/lib/error"
 import { createStreamTerminalLifecycle } from "~/lib/stream-terminal-lifecycle"
+import {
+  readContextOverflow,
+  readContextOverflowText,
+} from "~/services/copilot/context-overflow"
 
 export type ResponsesTerminalKind =
   | "response.completed"
@@ -286,22 +290,69 @@ function updateOutputItem(
 type ResponsesStreamFailureError = NonNullable<ResponsesResult["error"]> & {
   body_bytes?: Array<number>
   content_type?: string
+  /** Read by Codex for the delay before it retries. */
+  headers?: Record<string, string>
   status?: number
 }
 
 function createResponsesStreamFailureError(
   inspection?: HttpErrorInspection,
 ): ResponsesStreamFailureError {
-  if (inspection?.kind !== "upstream") {
-    return { message: "Upstream request failed" }
+  if (!inspection) return { message: "Upstream request failed" }
+  const retryAfter = inspection.responseHeaders["retry-after"]
+  const classified = {
+    code: classifyResponsesFailure(inspection),
+    ...(retryAfter ? { headers: { "retry-after": retryAfter } } : {}),
+  }
+  if (inspection.kind !== "upstream") {
+    return { ...classified, message: "Upstream request failed" }
   }
   return {
+    ...classified,
     ...(inspection.bodyText === undefined ?
       { body_bytes: Array.from(inspection.bodyBytes), message: "" }
     : { message: inspection.bodyText }),
     ...(inspection.contentType ? { content_type: inspection.contentType } : {}),
     status: inspection.status,
   }
+}
+
+// Rate limits, timeouts and conflicts may pass; other client errors repeat.
+const TRANSIENT_CLIENT_STATUSES = new Set([408, 409, 425, 429])
+
+/**
+ * Once the stream has started, a failure reaches the client only as
+ * `response.failed`, and its code decides what Codex does. Codex retries a
+ * code it does not know up to five times, compacts on
+ * `context_length_exceeded`, and stops on `invalid_prompt`. A request the
+ * provider refused fails the same way every time, so only rate limits and
+ * server errors stay retryable, with their `retry-after`.
+ */
+function classifyResponsesFailure(inspection: HttpErrorInspection): string {
+  const { status } = inspection
+  if (isContextOverflow(inspection)) return "context_length_exceeded"
+  if (status === 429) return "rate_limit_exceeded"
+  if (status >= 400 && status < 500 && !TRANSIENT_CLIENT_STATUSES.has(status)) {
+    return "invalid_prompt"
+  }
+  return "server_error"
+}
+
+function isContextOverflow(inspection: HttpErrorInspection): boolean {
+  if (inspection.kind === "upstream") {
+    return (
+      readContextOverflowText(inspection.status, inspection.bodyText)
+      !== undefined
+    )
+  }
+  if (inspection.kind === "custom-provider" && inspection.providerError) {
+    return (
+      readContextOverflow(inspection.status, {
+        error: inspection.providerError,
+      }) !== undefined
+    )
+  }
+  return false
 }
 
 function createFailedResponsesResult(
