@@ -289,8 +289,9 @@ const handleOutputItemDone = (
   state.reasoningInProgress.delete(outputIndex)
   const reasoningText = extractReasoningText(item)
   const encryptedContent = item.encrypted_content
-  const openedEarly = isThinkingBlockOpen(state, outputIndex)
-  if (!reasoningText && !encryptedContent && !openedEarly) {
+  // A keep-alive may already have opened the block; it must not stay empty.
+  const blockOpen = isThinkingBlockOpen(state, outputIndex)
+  if (!reasoningText && !encryptedContent && !blockOpen) {
     return events
   }
 
