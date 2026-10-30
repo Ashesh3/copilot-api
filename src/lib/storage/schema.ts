@@ -31,6 +31,10 @@ import {
   conversationAccountModelTables,
 } from "~/lib/storage/migrations/009-conversation-account-model"
 import { usageTokenCountersMigration } from "~/lib/storage/migrations/010-usage-token-counters"
+import {
+  codexReasoningPreferencesMigration,
+  codexReasoningPreferenceTables,
+} from "~/lib/storage/migrations/011-codex-reasoning-preferences"
 
 export const storageMigrations = [
   initialMigration,
@@ -43,9 +47,10 @@ export const storageMigrations = [
   conversationModelsMigration,
   conversationAccountModelMigration,
   usageTokenCountersMigration,
+  codexReasoningPreferencesMigration,
 ] as const
 
-export const currentSchemaVersion = usageTokenCountersMigration.version
+export const currentSchemaVersion = codexReasoningPreferencesMigration.version
 const versionTwoTables = { ...initialTables, ...gatewaySecretTables }
 const versionThreeTables = Object.fromEntries(
   Object.entries(versionTwoTables).filter(([name]) => name !== "capi_debug"),
@@ -65,9 +70,13 @@ const versionEightTables = {
   ...versionSevenTables,
   ...conversationModelTables,
 }
-export const currentTables = {
+const versionTenTables = {
   ...versionEightTables,
   ...conversationAccountModelTables,
+}
+export const currentTables = {
+  ...versionTenTables,
+  ...codexReasoningPreferenceTables,
 }
 const versionThreeIndexes = Object.fromEntries(
   Object.entries(initialIndexes).filter(
@@ -137,6 +146,13 @@ export function storageSchema(version: number) {
       }
     }
     case 9:
+    case 10: {
+      return {
+        tables: versionTenTables,
+        indexes: currentIndexes,
+        counterKeys: currentCounterKeys,
+      }
+    }
     case currentSchemaVersion: {
       return {
         tables: currentTables,

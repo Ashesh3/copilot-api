@@ -43,6 +43,7 @@ import { codexAuthRoutes } from "./routes/codex-auth/route"
 import { codexPluginServiceRoutes } from "./routes/codex-plugins/route"
 import { codexResponsesRoutes } from "./routes/codex-responses/route"
 import { codexSearchRoutes } from "./routes/codex-search/route"
+import { codexSettingsRoutes } from "./routes/codex-settings/route"
 import { computerUsePolicyRoutes } from "./routes/computer-use-policy/route"
 import { copilotControlPlaneRoutes } from "./routes/copilot-control-plane/route"
 import { dashboardRoutes } from "./routes/dashboard/route"
@@ -197,6 +198,7 @@ server.get("/code", async (c) => {
 // catch-all as well as /wham's unsupported-cloud handler and the inference
 // guards. These exact routes authenticate enabled managed identities internally.
 server.route("", codexAccountRoutes)
+server.route("", codexSettingsRoutes)
 // OAuth fake layer — authorize, token exchange, profile
 server.route("/oauth", oauthBrowserRoutes)
 server.route("/v1/oauth", oauthTokenRoutes)

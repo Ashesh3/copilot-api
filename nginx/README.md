@@ -235,6 +235,13 @@ Then verify the boundary from outside the origin:
     HEAD, mutation methods, trailing slashes, and neighboring paths are denied by
     Nginx. An unknown or disabled bearer and a conflicting account header are
     rejected by the application. Verify the response is no-store.
+15. Exact `GET /settings/user` and `PATCH /settings/account_user_setting`
+    (including `/backend-api` aliases) reach the authenticated reasoning
+    preference handlers. The default response enables every effort, including
+    Max and Ultra. Verify a saved checkbox choice persists and resetting restores
+    all efforts. Missing bearers, unsupported methods and neighboring settings
+    paths remain denied. These locations require a separate host Nginx reload;
+    `update.sh` deploys the application only.
 
 See [../docs/codex-desktop-managed-auth.md](../docs/codex-desktop-managed-auth.md)
 for the complete Windows client and digest-registration procedure.

@@ -307,5 +307,40 @@ server {
     proxy_cache off;
   }
 
+  # Desktop 26.1027 loads reasoning visibility from account-user settings.
+  # Keep the new read/write surface exact and authenticated; the application
+  # accepts only the reasoning preference and scopes it to the managed identity.
+  location = /settings/user {
+    if ($request_method != GET) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location = /settings/account_user_setting {
+    if ($request_method != PATCH) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location = /backend-api/settings/user {
+    if ($request_method != GET) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location = /backend-api/settings/account_user_setting {
+    if ($request_method != PATCH) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
   location / { return 404; }
 }

@@ -11,6 +11,7 @@ import {
 } from "~/lib/storage/legacy-import"
 import { migrateStorage } from "~/lib/storage/migrations"
 import { repairUsageTokenCounters } from "~/lib/storage/migrations/010-usage-token-counters"
+import { codexReasoningPreferencesMigration } from "~/lib/storage/migrations/011-codex-reasoning-preferences"
 import { restoreBackup } from "~/lib/storage/restore"
 import { storageMigrations, storageSchema } from "~/lib/storage/schema"
 
@@ -182,6 +183,15 @@ test("fresh schema needs no counter recovery and remains idempotent", async () =
 
 test("schema nine backup restores repair sentinels before retaining current detail", async () => {
   const source = await legacySchema()
+  // The current exporter reads current tables. An empty preference table emits
+  // no frames, preserving the schema-nine backup payload under test without
+  // running the counter repair that this restore test is meant to exercise.
+  await source.atomicBatch(
+    codexReasoningPreferencesMigration.statements.map((sql) => ({
+      sql,
+      args: [],
+    })),
+  )
   const now = Math.floor(Date.now() / 60_000) * 60_000
   await source.atomicBatch([
     {
