@@ -4,11 +4,7 @@ import { events } from "fetch-event-stream"
 import type { RoutedAccountPin } from "~/lib/account-router"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
 
-import {
-  getSelectedRoutedAccountId,
-  routedFetch,
-  usesPooledAccounts,
-} from "~/lib/account-router"
+import { getSelectedRoutedAccountId, routedFetch } from "~/lib/account-router"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
 import {
@@ -37,6 +33,7 @@ import {
 } from "~/services/copilot/transport-retry"
 import { runManagedWebRequest } from "~/services/web/tool-loop"
 
+import { copilotAccountScope } from "./account-scope"
 import {
   fitResponsesCompactionPayload,
   isResponsesCompactionRequest,
@@ -709,8 +706,7 @@ type ResponsesSend = (
  * state one account refuses may suit another, or one scope for a single one.
  */
 export function reasoningStateAccount(accountId: number | undefined): string {
-  if (!usesPooledAccounts()) return "single"
-  return accountId === undefined ? "unrouted" : `account:${accountId}`
+  return copilotAccountScope(accountId)
 }
 
 /** One routed send per call; resends reuse the pinned account and budget. */

@@ -1,24 +1,25 @@
 /**
  * Copilot can refuse long-lived prompt caching (a `cache_control` ttl other
  * than 5m) for an account. Clients such as Claude Code keep asking for it
- * once configured, so after a refusal this process sends the default
- * lifetime instead of failing every request.
+ * once configured, so after an account refuses, requests to that account
+ * send the default lifetime instead of failing every time.
  */
 const DEFAULT_CACHE_TTL = "5m"
 const MAX_CACHE_CONTROL_DEPTH = 16
 
-let extendedCacheTtlRefused = false
+// Account scopes (see copilotAccountScope) that refused long-lived caching.
+const refusingScopes = new Set<string>()
 
-export function rememberExtendedCacheTtlRefusal(): void {
-  extendedCacheTtlRefused = true
+export function rememberExtendedCacheTtlRefusal(scope: string): void {
+  refusingScopes.add(scope)
 }
 
-export function refusesExtendedCacheTtl(): boolean {
-  return extendedCacheTtlRefused
+export function refusesExtendedCacheTtl(scope: string): boolean {
+  return refusingScopes.has(scope)
 }
 
 export function resetExtendedCacheTtlRefusalForTest(): void {
-  extendedCacheTtlRefused = false
+  refusingScopes.clear()
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
