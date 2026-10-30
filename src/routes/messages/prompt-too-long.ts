@@ -11,7 +11,12 @@ import type { AnthropicErrorEvent } from "./anthropic-types"
 const PROMPT_TOO_LONG = /^prompt is too long/i
 const COPILOT_PROMPT_LIMIT =
   /prompt token count of (\d+) exceeds the limit of (\d+)/i
-const CONTEXT_WINDOW_EXCEEDED = /exceeds the context window/i
+// OpenAI's Chat Completions wording: "This model's maximum context length is
+// M tokens. However, your messages resulted in N tokens."
+const MAXIMUM_CONTEXT_LENGTH = /maximum context length is (\d+) tokens/i
+const RESULTED_IN_TOKENS = /resulted in (\d+) tokens/i
+const CONTEXT_WINDOW_EXCEEDED =
+  /exceeds the context window|maximum context length/i
 const CONTEXT_OVERFLOW_CODES = new Set([
   "context_length_exceeded",
   "model_max_prompt_tokens_exceeded",
@@ -35,6 +40,11 @@ function toPromptTooLongMessage(
   const counts = COPILOT_PROMPT_LIMIT.exec(message)
   if (counts) {
     return `prompt is too long: ${counts[1]} tokens > ${counts[2]} maximum`
+  }
+  const limit = MAXIMUM_CONTEXT_LENGTH.exec(message)?.[1]
+  const prompt = RESULTED_IN_TOKENS.exec(message)?.[1]
+  if (limit && prompt) {
+    return `prompt is too long: ${prompt} tokens > ${limit} maximum`
   }
   const overflow =
     (typeof error.code === "string" && CONTEXT_OVERFLOW_CODES.has(error.code))

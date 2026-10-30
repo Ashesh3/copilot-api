@@ -87,6 +87,33 @@ test("restates a provider context window overflow as prompt-too-long", async () 
   })
 })
 
+test("restates a Chat Completions maximum context length error with its counts", async () => {
+  const response = await forwardAnthropicError(
+    new HTTPError(
+      "Failed to create chat completions",
+      Response.json(
+        {
+          error: {
+            message:
+              "This model's maximum context length is 128000 tokens. However, your messages resulted in 130512 tokens. Please reduce the length of the messages.",
+            type: "invalid_request_error",
+          },
+        },
+        { status: 400 },
+      ),
+    ),
+  )
+
+  expect(response.status).toBe(400)
+  const body = (await response.json()) as AnthropicErrorBody
+  expect(body.error.message).toBe(
+    "prompt is too long: 130512 tokens > 128000 maximum",
+  )
+  expect(
+    CLAUDE_CODE_PROMPT_TOO_LONG.exec(body.error.message)?.slice(1),
+  ).toEqual(["130512", "128000"])
+})
+
 test("forwards Anthropic prompt-too-long and unrelated upstream errors as sent", async () => {
   for (const body of [
     {
