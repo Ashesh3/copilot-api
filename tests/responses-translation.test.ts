@@ -536,3 +536,42 @@ test("maps raw Responses reasoning content into Anthropic thinking", () => {
     signature: "encrypted-reasoning@rs_1",
   })
 })
+
+test("separates reasoning summary parts in a translated Responses result", () => {
+  const response: ResponsesResult = {
+    id: "resp_summary_parts",
+    object: "response",
+    created_at: 1,
+    model: "gpt-current",
+    output_text: "done",
+    status: "completed",
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+    output: [
+      {
+        id: "rs_parts",
+        type: "reasoning",
+        summary: [
+          { type: "summary_text", text: "**Reading** the file." },
+          { type: "summary_text", text: "**Editing** the test." },
+        ],
+        encrypted_content: "encrypted-reasoning",
+      },
+    ],
+  }
+
+  const anthropic = translateResponsesResultToAnthropic(response)
+
+  expect(anthropic.content[0]).toEqual({
+    type: "thinking",
+    thinking: "**Reading** the file.\n\n**Editing** the test.",
+    signature: "encrypted-reasoning@rs_parts",
+  })
+})

@@ -16,6 +16,7 @@ import {
   closeResponsesOpenBlocks,
   createResponsesNormalTerminalEvents,
   createResponsesStreamState,
+  type TranslatableResponsesStreamEvent,
   translateResponsesStreamEvent,
 } from "../src/routes/messages/responses-stream-translation"
 
@@ -547,3 +548,257 @@ test.each(["incomplete", "failed", "eof"] as const)(
     ])
   },
 )
+
+function translatedEventsOf(
+  state: ReturnType<typeof createResponsesStreamState>,
+  events: Array<TranslatableResponsesStreamEvent>,
+) {
+  return events.flatMap((event) => {
+    const result = translateResponsesStreamEvent(event, state)
+    if (result.kind !== "events") throw new Error("Expected translated events")
+    return result.events
+  })
+}
+
+const createdResponse = {
+  id: "resp_live",
+  object: "response",
+  created_at: 1,
+  model: "gpt-current",
+  output: [],
+  output_text: "",
+  status: "in_progress",
+  usage: null,
+  error: null,
+  incomplete_details: null,
+  instructions: null,
+  metadata: null,
+  parallel_tool_calls: true,
+  temperature: null,
+  tool_choice: "auto",
+  tools: [],
+  top_p: null,
+} as ResponseCreatedEvent["response"]
+
+test("turns keep-alives during hidden reasoning into empty thinking deltas", () => {
+  const state = createResponsesStreamState()
+  translatedEventsOf(state, [
+    { type: "response.created", sequence_number: 0, response: createdResponse },
+  ])
+
+  const events = translatedEventsOf(state, [
+    {
+      type: "response.output_item.added",
+      sequence_number: 1,
+      output_index: 0,
+      item: { id: "rs_live", type: "reasoning", summary: [] },
+    },
+    { type: "keepalive", sequence_number: 2 },
+    { type: "keepalive", sequence_number: 3 },
+    {
+      type: "response.reasoning_summary_text.delta",
+      sequence_number: 4,
+      item_id: "rs_live",
+      output_index: 0,
+      summary_index: 0,
+      delta: "Planning the change.",
+    },
+    {
+      type: "response.output_item.done",
+      sequence_number: 5,
+      output_index: 0,
+      item: {
+        id: "rs_live",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Planning the change." }],
+        encrypted_content: "encrypted-state",
+      },
+    },
+  ])
+
+  expect(events).toEqual([
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "Planning the change." },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: {
+        type: "signature_delta",
+        signature: "encrypted-state@rs_live",
+      },
+    },
+  ])
+})
+
+test("fills a keep-alive thinking block when reasoning has no summary", () => {
+  const state = createResponsesStreamState()
+  const events = translatedEventsOf(state, [
+    { type: "response.created", sequence_number: 0, response: createdResponse },
+    {
+      type: "response.output_item.added",
+      sequence_number: 1,
+      output_index: 0,
+      item: { id: "rs_quiet", type: "reasoning", summary: [] },
+    },
+    { type: "keepalive", sequence_number: 2 },
+    {
+      type: "response.output_item.done",
+      sequence_number: 3,
+      output_index: 0,
+      item: {
+        id: "rs_quiet",
+        type: "reasoning",
+        summary: [],
+        encrypted_content: "quiet-state",
+      },
+    },
+  ])
+
+  expect(events.slice(1)).toEqual([
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "Thinking..." },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "signature_delta", signature: "quiet-state@rs_quiet" },
+    },
+  ])
+})
+
+test("relays keep-alives outside reasoning as pings", () => {
+  const state = createResponsesStreamState()
+  const beforeStart = translatedEventsOf(state, [
+    { type: "keepalive", sequence_number: 0 },
+  ])
+  const afterStart = translatedEventsOf(state, [
+    { type: "response.created", sequence_number: 1, response: createdResponse },
+    { type: "keepalive", sequence_number: 2 },
+  ])
+
+  expect(beforeStart).toEqual([{ type: "ping" }])
+  expect(afterStart.map((event) => event.type)).toEqual([
+    "message_start",
+    "ping",
+  ])
+  expect(state.openBlocks.size).toBe(0)
+})
+
+test("separates streamed reasoning summary parts", () => {
+  const state = createResponsesStreamState()
+  const events = translatedEventsOf(state, [
+    {
+      type: "response.reasoning_summary_text.delta",
+      sequence_number: 1,
+      item_id: "rs_parts",
+      output_index: 0,
+      summary_index: 0,
+      delta: "First part ends here.",
+    },
+    {
+      type: "response.reasoning_summary_text.delta",
+      sequence_number: 2,
+      item_id: "rs_parts",
+      output_index: 0,
+      summary_index: 1,
+      delta: "**Second part**",
+    },
+    {
+      type: "response.reasoning_summary_text.done",
+      sequence_number: 3,
+      item_id: "rs_parts",
+      output_index: 0,
+      summary_index: 1,
+      text: "**Second part**",
+    },
+    {
+      type: "response.reasoning_summary_text.done",
+      sequence_number: 4,
+      item_id: "rs_parts",
+      output_index: 0,
+      summary_index: 2,
+      text: "Third part arrived only as done.",
+    },
+  ])
+
+  expect(
+    events.flatMap((event) =>
+      (
+        event.type === "content_block_delta"
+        && event.delta.type === "thinking_delta"
+      ) ?
+        [event.delta.thinking]
+      : [],
+    ),
+  ).toEqual([
+    "First part ends here.",
+    "\n\n**Second part**",
+    "\n\nThird part arrived only as done.",
+  ])
+})
+
+test("shows a streamed refusal as text", () => {
+  const state = createResponsesStreamState()
+  const events = translatedEventsOf(state, [
+    { type: "response.created", sequence_number: 0, response: createdResponse },
+    {
+      type: "response.refusal.delta",
+      sequence_number: 1,
+      item_id: "msg_refusal",
+      output_index: 0,
+      content_index: 0,
+      delta: "I can't help with that.",
+    },
+    {
+      type: "response.refusal.done",
+      sequence_number: 2,
+      item_id: "msg_refusal",
+      output_index: 0,
+      content_index: 0,
+      refusal: "I can't help with that.",
+    },
+  ])
+
+  expect(events.slice(1)).toEqual([
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "I can't help with that." },
+    },
+  ])
+})

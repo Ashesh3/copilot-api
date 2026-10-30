@@ -648,29 +648,39 @@ const extractReasoningText = (
   item: ResponseOutputReasoning,
   options: { useFallback?: boolean } = {},
 ): string => {
-  const segments: Array<string> = []
-
-  const collectFromBlocks = (blocks?: Array<ResponseReasoningBlock>) => {
-    if (!Array.isArray(blocks)) {
-      return
-    }
-
-    for (const block of blocks) {
-      if (typeof block.text === "string") {
-        segments.push(block.text)
-        continue
-      }
-    }
-  }
-
-  collectFromBlocks(item.summary)
-  collectFromBlocks(item.content)
-
-  const text = segments.join("").trim()
+  const text = joinReasoningText(item.summary, item.content)
   // Compatible with opencode, it will filter out blocks where the thinking text is empty, so we add a default thinking text here
   if (text.length > 0) return text
   return options.useFallback ? THINKING_TEXT : ""
 }
+
+const readReasoningTexts = (
+  blocks: Array<ResponseReasoningBlock> | undefined,
+): Array<string> =>
+  Array.isArray(blocks) ?
+    blocks.flatMap((block) =>
+      typeof block.text === "string" ? [block.text] : [],
+    )
+  : []
+
+/**
+ * Summary parts are separate paragraphs, so joining them bare would run one
+ * part's last sentence into the next part's heading. Raw reasoning content
+ * parts are fragments of one text and join as they are.
+ */
+export const joinReasoningText = (
+  summary: Array<ResponseReasoningBlock> | undefined,
+  content: Array<ResponseReasoningBlock> | undefined,
+): string =>
+  [
+    readReasoningTexts(summary)
+      .filter((part) => part.trim().length > 0)
+      .join("\n\n"),
+    readReasoningTexts(content).join(""),
+  ]
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join("\n\n")
 
 const createToolUseContentBlock = (
   call: ResponseOutputFunctionCall,
