@@ -1,5 +1,16 @@
 import type { Model } from "~/services/copilot/get-models"
 
+import { parseReasoningEffort } from "~/lib/model-suffix"
+
+/** The listed model behind an effort variant such as `gpt-5.3-codex:high`. */
+function baseModelId(model: string): string {
+  const separator = model.lastIndexOf(":")
+  if (separator === -1) return model
+  return parseReasoningEffort(model.slice(separator + 1)) ?
+      model.slice(0, separator)
+    : model
+}
+
 /**
  * Environment for running Claude Code against this server. Claude Code knows
  * the context window only of Claude models; for any other model name it
@@ -12,7 +23,9 @@ export function buildClaudeCodeEnvironment(options: {
   smallModel: string
   models: ReadonlyArray<Model>
 }): Record<string, string> {
-  const promptLimit = options.models.find((entry) => entry.id === options.model)
+  // Effort variants share the base model's prompt limit.
+  const baseModel = baseModelId(options.model)
+  const promptLimit = options.models.find((entry) => entry.id === baseModel)
     ?.capabilities.limits?.max_prompt_tokens
   const knowsWindow = options.model.toLowerCase().startsWith("claude-")
   return {

@@ -50,3 +50,15 @@ test("leaves the context window to Claude Code for Claude models", () => {
   expect(env).not.toHaveProperty("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
   expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-current")
 })
+
+test("uses the base model's prompt window for an effort variant", () => {
+  const env = buildClaudeCodeEnvironment({
+    serverUrl: "http://localhost:4141",
+    model: "gpt-current:high",
+    smallModel: "claude-current",
+    models,
+  })
+
+  expect(env.ANTHROPIC_MODEL).toBe("gpt-current:high")
+  expect(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe("272000")
+})
