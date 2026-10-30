@@ -33,9 +33,9 @@ const COPILOT_REQUEST_HEADERS = new Set([
   "x-request-id",
 ])
 
-// Only BetaHeaderAllow entries from pkg/llmapi/messagesapi/beta_headers.go
-// at the revision above. Removed, rejected and unknown flags stay local.
-// CAPI injects model-required flags (e.g. fast mode) itself.
+// Only flags the Copilot Messages API forwards upstream (synced 2026-10-27).
+// Removed, rejected and unknown flags stay local. CAPI injects model-required
+// flags (e.g. fast mode) itself.
 const COPILOT_ANTHROPIC_BETAS = new Set([
   "adaptive-thinking-2026-01-28",
   "advanced-tool-use-2025-11-20",
@@ -47,11 +47,16 @@ const COPILOT_ANTHROPIC_BETAS = new Set([
   "context-management-2025-06-27",
   "fallback-credit-2026-07-01",
   "fine-grained-tool-streaming-2025-05-14",
+  "inline-tools-2026-09-15",
   "interleaved-thinking-2025-05-14",
   "mid-conv-tool-change-2026-07-01",
+  "mid-conversation-output-config-2026-07-01",
   "mid-conversation-system-2026-04-07",
+  "mid-conversation-tool-changes-2026-07-01",
+  "per-turn-control-2026-07-01",
   "task-budgets-2026-03-13",
   "thinking-binding-controls-2026-08-01",
+  "thinking-display-updates-2026-08-18",
   "token-efficient-tools-2025-02-19",
 ])
 

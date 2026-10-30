@@ -43,6 +43,7 @@ export interface AnthropicMessagesPayload extends Record<string, unknown> {
   thinking?: Record<string, unknown> & {
     type: "enabled" | "adaptive" | "disabled"
     budget_tokens?: number
+    display?: "summarized" | "omitted" | "updates"
   }
   service_tier?: "auto" | "standard_only"
   output_config?: Record<string, unknown> & {

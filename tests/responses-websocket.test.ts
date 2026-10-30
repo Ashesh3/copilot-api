@@ -47,6 +47,10 @@ import {
 import { state } from "../src/lib/state"
 import { tokenPool } from "../src/lib/token-pool"
 import {
+  resetProgressUpdatesRejectionsForTest,
+  THINKING_DISPLAY_UPDATES_BETA,
+} from "../src/routes/responses/messages-progress-updates"
+import {
   extractResponsesPayload,
   isSyntheticWarmupRequest,
   recordResponseSnapshotFromFrame,
@@ -191,6 +195,7 @@ afterEach(() => {
   resetIpSecurityForTest()
   setIpAllowlistForTest([])
   resetRoutingTelemetryForTest()
+  resetProgressUpdatesRejectionsForTest()
 })
 
 describe("extractResponsesPayload", () => {
@@ -3268,6 +3273,108 @@ describe("responses websocket message handling", () => {
       source: "copilot_session",
     })
     expect(ws.data.responseSnapshots.has("msg_ws_headers")).toBe(true)
+  })
+
+  test("shows Claude progress updates as commentary on a Messages WebSocket turn", async () => {
+    installWebSocketMessagesModel("claude-opus-5.5")
+    queuedResponses.push(
+      Response.json({
+        id: "msg_ws_updates",
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-5-5",
+        content: [
+          { type: "thinking", thinking: "", signature: "sig-reasoning" },
+          {
+            type: "thinking",
+            thinking: "Checking the build first.",
+            signature: "sig-update",
+          },
+          { type: "text", text: "The build is green." },
+        ],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 2, output_tokens: 3 },
+      }),
+    )
+    const ws = createTestWebSocket()
+
+    await seedProtocolDatabase().then(() =>
+      responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "claude-opus-5.5",
+          input: "Is the build green?",
+        }),
+      ),
+    )
+
+    expect(lastRequestBody?.thinking).toEqual({
+      type: "adaptive",
+      display: "updates",
+    })
+    expect(capturedUpstreamHeaders[0]?.get("anthropic-beta")).toBe(
+      THINKING_DISPLAY_UPDATES_BETA,
+    )
+    const messages = ws.sent
+      .map(
+        (frame) =>
+          JSON.parse(frame) as {
+            item?: {
+              content?: Array<{ text?: string }>
+              phase?: string
+              type?: string
+            }
+            type?: string
+          },
+      )
+      .filter(
+        (frame) =>
+          frame.type === "response.output_item.done"
+          && frame.item?.type === "message",
+      )
+      .map((frame) => [frame.item?.phase, frame.item?.content?.[0]?.text])
+    expect(messages).toEqual([
+      ["commentary", "Checking the build first."],
+      ["final_answer", "The build is green."],
+    ])
+  })
+
+  test("resends a Messages WebSocket turn without progress updates when Copilot rejects them", async () => {
+    installWebSocketMessagesModel("claude-opus-5.5")
+    queuedResponses.push(
+      Response.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message: `Unexpected value(s) \`${THINKING_DISPLAY_UPDATES_BETA}\` for the \`anthropic-beta\` header.`,
+          },
+        },
+        { status: 400 },
+      ),
+      createAnthropicMessageResponse("msg_ws_plain", "claude-opus-5.5"),
+    )
+    const ws = createTestWebSocket()
+
+    await seedProtocolDatabase().then(() =>
+      responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "claude-opus-5.5",
+          input: "Hello",
+        }),
+      ),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(lastRequestBody).not.toHaveProperty("thinking")
+    expect(capturedUpstreamHeaders[1]?.get("anthropic-beta")).toBeNull()
+    expect(ws.sent.some((frame) => frame.includes("Hello from Messages"))).toBe(
+      true,
+    )
   })
 
   test("persists only frame native Messages options across turns", async () => {

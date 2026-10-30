@@ -84,7 +84,7 @@ beforeEach(() => {
   tokenPool.rebuildModelIndex()
   state.models = tokenPool.getAllModels()
   upstreamReply = (body, index) =>
-    messageResponse(String(body.model), index, body.model !== targetModel)
+    messageResponse(body, index, body.model !== targetModel)
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
     if (url.pathname !== "/v1/messages" || typeof init?.body !== "string")
@@ -119,7 +119,7 @@ test.each(transports)(
         body.model === sourceModel
         || body.model === firstFallback
         || (body.model === rememberedModel && rememberedCalls++ > 0)
-      return messageResponse(String(body.model), index, refused)
+      return messageResponse(body, index, refused)
     }
     const client = await createClient(transport)
     const first = await client.send()
@@ -195,6 +195,18 @@ test.each(transports)(
     expect(calls.map((call) => call.authorization)).toEqual(
       Array.from({ length: 7 }, () => "Bearer owner-17-copilot-token"),
     )
+    // Only the Claude 5.5 hops are asked for progress updates.
+    expect(
+      calls.map((call) => (call.body.thinking as Frame | undefined)?.display),
+    ).toEqual([
+      "updates",
+      undefined,
+      undefined,
+      undefined,
+      "updates",
+      "updates",
+      "updates",
+    ])
     expect(await owners()).toEqual([ownerId])
   },
 )
@@ -238,7 +250,7 @@ test.each(
     configureChain([sourceModel, "missing-first", unavailableModel])
     upstreamReply = (body, index) =>
       reason === "refusal" ?
-        messageResponse(String(body.model), index, true)
+        messageResponse(body, index, true)
       : new Response("original upstream rejection", { status: 422 })
     const client = await createClient(transport)
     for (let turn = 0; turn < 2; turn++) {
@@ -275,7 +287,7 @@ test.each(
 test("a remembered target that loses all providers advances without sending another request to it", async () => {
   configureChain([sourceModel, rememberedModel, unavailableModel, targetModel])
   upstreamReply = (body, index) =>
-    messageResponse(String(body.model), index, body.model === sourceModel)
+    messageResponse(body, index, body.model === sourceModel)
   const client = await createClient("HTTP JSON")
   expect((await client.send()).response).toMatchObject({ status: "completed" })
   expect(await storedTargets()).toEqual([rememberedModel])
@@ -311,11 +323,7 @@ test("a fallback model switch reassigns the conversation to an account that serv
   tokenPool.rebuildModelIndex()
   state.models = tokenPool.getAllModels()
   upstreamReply = (body, index) =>
-    messageResponse(
-      String(body.model),
-      index,
-      index > 1 && body.model !== targetModel,
-    )
+    messageResponse(body, index, index > 1 && body.model !== targetModel)
   const client = await createClient("HTTP JSON")
   expect((await client.send()).response).toMatchObject({ status: "completed" })
   expect(await owners()).toEqual([ownerId])
@@ -560,10 +568,17 @@ function model(id: string): Model {
 }
 
 function messageResponse(
-  modelId: string,
+  body: Frame,
   index: number,
   refused: boolean,
 ): Response {
+  const modelId = String(body.model)
+  // Under display updates thinking text is narration for the user. These
+  // turns narrate nothing, so only their signed reasoning comes back.
+  const thinking =
+    (body.thinking as Frame | undefined)?.display === "updates" ?
+      ""
+    : `thought from ${modelId}`
   return Response.json({
     id: `msg_${index}`,
     type: "message",
@@ -572,7 +587,7 @@ function messageResponse(
     content: [
       {
         type: "thinking",
-        thinking: `thought from ${modelId}`,
+        thinking,
         signature: `${modelId}-signature`,
       },
       {

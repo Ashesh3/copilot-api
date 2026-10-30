@@ -1,4 +1,6 @@
 /* eslint-disable complexity, max-lines, max-lines-per-function, max-params -- tolerant Responses-to-Messages adapter handles open protocol families */
+import consola from "consola"
+
 import type {
   EvaluatedEndpointCandidate,
   TranslationFinding,
@@ -10,6 +12,7 @@ import type {
   AnthropicMessage,
   AnthropicMessagesPayload,
   AnthropicResponse,
+  AnthropicTextBlock,
   AnthropicToolResultBlock,
   AnthropicUserContentBlock,
 } from "~/routes/messages/anthropic-types"
@@ -18,6 +21,7 @@ import type { ContentPart } from "~/services/copilot/create-chat-completions"
 import type {
   FunctionTool,
   ResponseInputItem,
+  ResponseOutputMessage,
   ResponseOutputItem,
   ResponsesPayload,
   ResponsesResult,
@@ -42,6 +46,10 @@ import {
 import { createNativeMessages } from "~/routes/messages/native-handler"
 import { rewriteUnsupportedAnthropicPrefill } from "~/services/copilot/anthropic-prefill"
 import { createWebSearchAnthropicTool } from "~/services/copilot/mcp-web-search"
+import {
+  consumeExtraSend,
+  createRetryBudget,
+} from "~/services/copilot/transport-retry"
 
 import type { ResponsesAttachmentCache } from "./attachment-cache"
 
@@ -62,6 +70,14 @@ import {
   toCompactionSummaryRequest,
   toRemoteCompactionResult,
 } from "./compaction-trigger"
+import {
+  isProgressUpdatesRejection,
+  isVisibleProgressUpdate,
+  rememberProgressUpdatesRejection,
+  replayedProgressUpdate,
+  requestProgressUpdates,
+  VisibleTextBuilder,
+} from "./messages-progress-updates"
 import {
   decodeAnthropicReasoningEnvelope,
   encodeAnthropicReasoningEnvelope,
@@ -141,6 +157,24 @@ function appendTolerantTextMessage(
 ): void {
   const detail = stringifyTolerantValue(value)
   messages.push({ role, content: detail ? `${label}\n${detail}` : label })
+}
+
+/**
+ * A progress update reaches the client twice: as the signed thinking block in
+ * its reasoning item and as the visible message that follows it. The thinking
+ * block alone is the model's original turn, so the repeated text is not
+ * replayed; an extra block would alter the history later signatures cover.
+ */
+function repeatsProgressUpdate(
+  blocks: ReadonlyArray<AnthropicTextBlock>,
+  update: string,
+): boolean {
+  return (
+    blocks
+      .map((block) => block.text)
+      .join("")
+      .trim() === update.trim()
+  )
 }
 
 async function convertTolerantResponsesContent(
@@ -279,7 +313,10 @@ async function convertTolerantResponsesInput(
     (itemIndex) => `responses_messages_call_${itemIndex}`,
   )
 
+  let pendingProgressUpdate: string | undefined
   for (const [itemIndex, item] of source.input.entries()) {
+    const precedingProgressUpdate = pendingProgressUpdate
+    pendingProgressUpdate = undefined
     if (!isRecord(item)) {
       if (stringifyTolerantValue(item)) {
         addTranslationFinding(state.findings, {
@@ -383,6 +420,7 @@ async function convertTolerantResponsesInput(
       )
       if (thinking) {
         for (const block of thinking) appendAssistantBlock(messages, block)
+        pendingProgressUpdate = replayedProgressUpdate(source.model, thinking)
         continue
       }
       for (const entry of summary) {
@@ -456,10 +494,14 @@ async function convertTolerantResponsesInput(
       )
       if (blocks.length === 0) continue
       if (assistant) {
-        messages.push({
-          role: "assistant",
-          content: blocks.filter((block) => isAnthropicTextBlock(block)),
-        })
+        const textBlocks = blocks.filter((block) => isAnthropicTextBlock(block))
+        if (
+          precedingProgressUpdate !== undefined
+          && repeatsProgressUpdate(textBlocks, precedingProgressUpdate)
+        ) {
+          continue
+        }
+        messages.push({ role: "assistant", content: textBlocks })
       } else {
         messages.push({ role: "user", content: blocks })
       }
@@ -730,19 +772,21 @@ export async function executePreparedResponsesMessagesBridge(options: {
 }): Promise<ResponsesResult> {
   const anthropicPayload = structuredClone(options.payload)
   anthropicPayload.stream = false
-  const response = (await createNativeMessages(
-    anthropicPayload,
-    options.nativeOptions,
-    {
+  const { progressUpdates, response } = await dispatchResponsesMessages({
+    compaction: options.compaction,
+    dispatchOptions: {
       alreadyAdapted: true,
       compaction: options.compaction,
       signal: options.signal,
     },
-  )) as AnthropicResponse
+    nativeOptions: options.nativeOptions,
+    payload: anthropicPayload,
+  })
   const result = anthropicResponseToResponsesResult(
     response,
     options.nativeOptions.requestedModel ?? options.responseContext.model,
     structuredClone(options.responseContext),
+    { progressUpdates },
   )
   return completeCompactionTrigger(options.responseContext, response, result)
 }
@@ -761,21 +805,67 @@ export async function executeResponsesMessagesBridge(options: {
     { attachmentsNormalized: options.attachmentsNormalized },
   )
   anthropicPayload.stream = false
-  const response = (await createNativeMessages(
-    anthropicPayload,
-    options.nativeOptions,
-    {
+  const { progressUpdates, response } = await dispatchResponsesMessages({
+    compaction: options.compaction,
+    dispatchOptions: {
       compaction: options.compaction,
       preserveValidatedControls: options.preserveValidatedControls,
       signal: options.signal,
     },
-  )) as AnthropicResponse
+    nativeOptions: options.nativeOptions,
+    payload: anthropicPayload,
+  })
   const result = anthropicResponseToResponsesResult(
     response,
     options.nativeOptions.requestedModel ?? options.payload.model,
     options.payload,
+    { progressUpdates },
   )
   return completeCompactionTrigger(options.payload, response, result)
+}
+
+/**
+ * Send a translated Responses turn to Messages, asking Claude 5.5 models for
+ * readable progress updates. If Copilot rejects that display, send the same
+ * turn once without it rather than failing the client's request.
+ */
+async function dispatchResponsesMessages(options: {
+  readonly compaction?: boolean
+  readonly dispatchOptions: Parameters<typeof createNativeMessages>[2]
+  readonly nativeOptions: NativeMessagesRequestOptions
+  readonly payload: AnthropicMessagesPayload
+}): Promise<{ progressUpdates: boolean; response: AnthropicResponse }> {
+  const retryBudget = options.nativeOptions.retryBudget ?? createRetryBudget()
+  const nativeOptions = { ...options.nativeOptions, retryBudget }
+  const updates = requestProgressUpdates({
+    compaction: options.compaction,
+    nativeOptions,
+    payload: options.payload,
+  })
+  if (updates) {
+    try {
+      const response = (await createNativeMessages(
+        updates.payload,
+        updates.nativeOptions,
+        options.dispatchOptions,
+      )) as AnthropicResponse
+      return { progressUpdates: true, response }
+    } catch (error) {
+      if (!(await isProgressUpdatesRejection(error))) throw error
+      rememberProgressUpdatesRejection(options.payload.model)
+      consola.warn(
+        "Copilot rejected Claude progress updates; resending without them",
+        { model: options.payload.model },
+      )
+      if (!consumeExtraSend(retryBudget)) throw error
+    }
+  }
+  const response = (await createNativeMessages(
+    options.payload,
+    nativeOptions,
+    options.dispatchOptions,
+  )) as AnthropicResponse
+  return { progressUpdates: false, response }
 }
 
 /** Answer a Codex compaction trigger with the validated summary item. */
@@ -1225,12 +1315,13 @@ export function anthropicResponseToResponsesResult(
   response: AnthropicResponse,
   requestedModel: string,
   request?: ResponsesPayload,
+  options?: { readonly progressUpdates?: boolean },
 ): ResponsesResult {
-  const { output, text } = convertAnthropicOutput(
-    response,
-    request ? createResponsesMessagesToolMap(request) : undefined,
-    request?.model ?? response.model,
-  )
+  const { output, text } = convertAnthropicOutput(response, {
+    progressUpdates: options?.progressUpdates ?? false,
+    reasoningModel: request?.model ?? response.model,
+    toolMap: request ? createResponsesMessagesToolMap(request) : undefined,
+  })
   const incompleteDetails = mapStopReason(response.stop_reason)
   return {
     id: response.id,
@@ -1285,80 +1376,84 @@ function getResponsesRequestContext(
   }
 }
 
+interface AnthropicOutputState {
+  readonly assistantMessages: Array<{
+    readonly item: ResponseOutputMessage
+    readonly text: string
+    readonly update: boolean
+  }>
+  messageIndex: number
+  readonly output: Array<ResponseOutputItem>
+  reasoningIndex: number
+  readonly responseId: string
+  readonly visibleText: VisibleTextBuilder
+}
+
 function convertAnthropicOutput(
   response: AnthropicResponse,
-  toolMap?: ResponsesMessagesToolMap,
-  reasoningModel = response.model,
+  options: {
+    readonly progressUpdates: boolean
+    readonly reasoningModel: string
+    readonly toolMap?: ResponsesMessagesToolMap
+  },
 ): {
   output: Array<ResponseOutputItem>
   text: string
 } {
-  const output: Array<ResponseOutputItem> = []
-  let text = ""
-  let messageIndex = 0
-  let reasoningIndex = 0
+  const state: AnthropicOutputState = {
+    assistantMessages: [],
+    messageIndex: 0,
+    output: [],
+    reasoningIndex: 0,
+    responseId: response.id,
+    visibleText: new VisibleTextBuilder(),
+  }
   for (const rawBlock of response.content) {
     const block = rawBlock as unknown as Record<string, unknown>
     const type = typeof block.type === "string" ? block.type : undefined
     if (type === "thinking") {
       if (typeof block.thinking !== "string") {
-        const converted = appendAssistantBlockFallback({
-          block,
-          messageIndex,
-          output,
-          responseId: response.id,
-          text,
-        })
-        messageIndex = converted.messageIndex
-        text = converted.text
+        appendAssistantBlockFallback(state, block)
         continue
       }
-      output.push(
-        createReasoningOutput(
-          response.id,
-          block as unknown as Extract<
-            AnthropicResponse["content"][number],
-            { type: "thinking" }
-          >,
-          reasoningIndex,
-          reasoningModel,
-        ),
+      const thinking = block as unknown as Extract<
+        AnthropicResponse["content"][number],
+        { type: "thinking" }
+      >
+      state.output.push(
+        createReasoningOutput(state, thinking, {
+          model: options.reasoningModel,
+          // Under display updates thinking text is narration, not reasoning.
+          summarize: !options.progressUpdates,
+        }),
       )
-      reasoningIndex += 1
+      if (
+        options.progressUpdates
+        && isVisibleProgressUpdate(thinking.thinking)
+      ) {
+        pushAssistantText(state, thinking.thinking, true)
+      }
       continue
     }
     if (type === "redacted_thinking" && typeof block.data === "string") {
-      output.push({
-        id:
-          reasoningIndex === 0 ?
-            `rs_${response.id}`
-          : `rs_${response.id}_${reasoningIndex}`,
+      state.output.push({
+        id: nextReasoningId(state),
         type: "reasoning",
         summary: [],
-        encrypted_content: encodeAnthropicReasoningEnvelope(reasoningModel, [
-          { type: "redacted_thinking", data: block.data },
-        ]),
+        encrypted_content: encodeAnthropicReasoningEnvelope(
+          options.reasoningModel,
+          [{ type: "redacted_thinking", data: block.data }],
+        ),
         status: "completed",
       })
-      reasoningIndex += 1
       continue
     }
     if (type === "text") {
       if (typeof block.text !== "string") {
-        const converted = appendAssistantBlockFallback({
-          block,
-          messageIndex,
-          output,
-          responseId: response.id,
-          text,
-        })
-        messageIndex = converted.messageIndex
-        text = converted.text
+        appendAssistantBlockFallback(state, block)
         continue
       }
-      text += block.text
-      output.push(createTextOutput(response.id, block.text, messageIndex))
-      messageIndex += 1
+      pushAssistantText(state, block.text, false)
       continue
     }
     if (type === "tool_use") {
@@ -1367,15 +1462,7 @@ function convertAnthropicOutput(
         || typeof block.name !== "string"
         || !isRecordValue(block.input)
       ) {
-        const converted = appendAssistantBlockFallback({
-          block,
-          messageIndex,
-          output,
-          responseId: response.id,
-          text,
-        })
-        messageIndex = converted.messageIndex
-        text = converted.text
+        appendAssistantBlockFallback(state, block)
         continue
       }
       const toolBlock = block as unknown as Extract<
@@ -1383,37 +1470,52 @@ function convertAnthropicOutput(
         { type: "tool_use" }
       >
       const converted =
-        toolMap ?
-          toolMap.restoreToolCall(toolBlock)
+        options.toolMap ?
+          options.toolMap.restoreToolCall(toolBlock)
         : createFunctionCallOutput(toolBlock)
-      if (converted) output.push(converted)
-      else {
-        const fallback = appendAssistantBlockFallback({
-          block,
-          messageIndex,
-          output,
-          responseId: response.id,
-          text,
-        })
-        messageIndex = fallback.messageIndex
-        text = fallback.text
-      }
+      if (converted) state.output.push(converted)
+      else appendAssistantBlockFallback(state, block)
       continue
     }
     if (!type) {
       throwResponseContentError()
     }
-    const converted = appendAssistantBlockFallback({
-      block,
-      messageIndex,
-      output,
-      responseId: response.id,
-      text,
-    })
-    messageIndex = converted.messageIndex
-    text = converted.text
+    appendAssistantBlockFallback(state, block)
   }
-  return { output, text }
+  assignAssistantPhases(state, response.stop_reason)
+  return { output: state.output, text: state.visibleText.toString() }
+}
+
+/**
+ * Codex reads `phase` to tell progress narration from a turn's answer, as
+ * native Responses models report it. Text before a tool call is commentary
+ * and text that ends the turn is the final answer. A turn that ends on
+ * narration alone presents its last update as the answer, so it stays in view.
+ * Incomplete and refused turns keep unphased text.
+ */
+function assignAssistantPhases(
+  state: AnthropicOutputState,
+  stopReason: AnthropicResponse["stop_reason"],
+): void {
+  const messages = state.assistantMessages
+  if (messages.length === 0) return
+  const callsTools = state.output.some(
+    (item) => item.type !== "message" && item.type !== "reasoning",
+  )
+  const endsTurn =
+    !callsTools && (stopReason === "end_turn" || stopReason === "stop_sequence")
+  if (!endsTurn) {
+    for (const message of messages) {
+      if (callsTools || message.update) message.item.phase = "commentary"
+    }
+    return
+  }
+  const visible = messages.filter((message) => message.text.trim())
+  const answers = visible.filter((message) => !message.update)
+  const finals = new Set(answers.length > 0 ? answers : visible.slice(-1))
+  for (const message of messages) {
+    message.item.phase = finals.has(message) ? "final_answer" : "commentary"
+  }
 }
 
 function isRecordValue(value: unknown): value is Record<string, unknown> {
@@ -1441,39 +1543,52 @@ function stringifyUnknownAssistantBlock(
   }
 }
 
-function appendAssistantBlockFallback(options: {
-  block: Record<string, unknown>
-  messageIndex: number
-  output: Array<ResponseOutputItem>
-  responseId: string
-  text: string
-}): { messageIndex: number; text: string } {
-  const fallbackText = stringifyUnknownAssistantBlock(options.block)
-  if (!fallbackText) {
-    return { messageIndex: options.messageIndex, text: options.text }
-  }
-  options.output.push(
-    createTextOutput(options.responseId, fallbackText, options.messageIndex),
-  )
-  return {
-    messageIndex: options.messageIndex + 1,
-    text: options.text + fallbackText,
-  }
+function pushAssistantText(
+  state: AnthropicOutputState,
+  text: string,
+  update: boolean,
+): void {
+  const item = createTextOutput(state.responseId, text, state.messageIndex)
+  state.messageIndex += 1
+  state.output.push(item)
+  state.assistantMessages.push({ item, text, update })
+  state.visibleText.push(text, update)
+}
+
+function appendAssistantBlockFallback(
+  state: AnthropicOutputState,
+  block: Record<string, unknown>,
+): void {
+  const fallbackText = stringifyUnknownAssistantBlock(block)
+  if (fallbackText) pushAssistantText(state, fallbackText, false)
+}
+
+function nextReasoningId(state: AnthropicOutputState): string {
+  const index = state.reasoningIndex
+  state.reasoningIndex += 1
+  return index === 0 ?
+      `rs_${state.responseId}`
+    : `rs_${state.responseId}_${index}`
 }
 
 function createReasoningOutput(
-  responseId: string,
+  state: AnthropicOutputState,
   block: Extract<AnthropicResponse["content"][number], { type: "thinking" }>,
-  index: number,
-  model: string,
+  options: { readonly model: string; readonly summarize: boolean },
 ): ResponseOutputItem {
   return {
-    id: index === 0 ? `rs_${responseId}` : `rs_${responseId}_${index}`,
+    id: nextReasoningId(state),
     type: "reasoning",
     summary:
-      block.thinking ? [{ type: "summary_text", text: block.thinking }] : [],
+      options.summarize && block.thinking ?
+        [{ type: "summary_text", text: block.thinking }]
+      : [],
     ...(block.signature ?
-      { encrypted_content: encodeAnthropicReasoningEnvelope(model, [block]) }
+      {
+        encrypted_content: encodeAnthropicReasoningEnvelope(options.model, [
+          block,
+        ]),
+      }
     : {}),
     status: "completed",
   }
@@ -1483,7 +1598,7 @@ function createTextOutput(
   responseId: string,
   text: string,
   index: number,
-): ResponseOutputItem {
+): ResponseOutputMessage {
   return {
     id: index === 0 ? `msg_${responseId}` : `msg_${responseId}_${index}`,
     type: "message",
@@ -1492,7 +1607,6 @@ function createTextOutput(
     content: [{ type: "output_text", text, annotations: [] }],
   }
 }
-
 function createFunctionCallOutput(
   block: Extract<AnthropicResponse["content"][number], { type: "tool_use" }>,
 ): ResponseOutputItem {
