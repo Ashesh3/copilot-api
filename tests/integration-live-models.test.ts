@@ -124,6 +124,51 @@ test("reads the model from a Google AI path", async () => {
   )
 })
 
+test("skips a failure when the gateway does not find an unlisted model", async () => {
+  await runLiveTest("messages", async () => {
+    const response = Response.json(
+      {
+        type: "error",
+        error: {
+          type: "not_found_error",
+          code: "model_not_found",
+          message: "The requested Copilot Messages model was not found.",
+        },
+      },
+      { status: 404 },
+    )
+    await recordLiveModelResponse(
+      "/v1/messages",
+      body("claude-sonnet-4"),
+      response,
+    )
+    expect(response.status).toBe(200)
+  })
+
+  expect(warnings).toContain(
+    'Skipped live test "messages": claude-sonnet-4 is not available on this account.',
+  )
+})
+
+test.each([
+  [500, "Upstream request failed"],
+  [400, "prompt_cache_options is not supported on this model"],
+])(
+  "keeps a %d failure on an unlisted model that is not about the model",
+  async (status, message) => {
+    const run = runLiveTest("unlisted", async () => {
+      const response = Response.json({ error: { message } }, { status })
+      await recordLiveModelResponse("/v1/responses", body("gpt-4.1"), response)
+      expect(response.status).toBe(200)
+    })
+
+    const error = await run.catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(Error)
+    expect(warnings).toEqual([])
+  },
+)
+
 test("keeps a failure after any model served a request", async () => {
   const run = runLiveTest("candidates", async () => {
     await recordLiveModelResponse(
