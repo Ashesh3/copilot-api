@@ -185,3 +185,15 @@ for (const { loop, client, request, finalRound } of CASES)
       expect(await recordedTotals()).toMatchObject(ALL_ROUNDS)
     })
   })
+
+test("a streamed Chat request that offers web search records a round without one", async () => {
+  fixture.answerFirst = true
+  await send(chatRequest(CHAT)(true))
+
+  expect(fixture.upstream).toHaveLength(1)
+  expect(await recordedTotals()).toMatchObject({
+    total_input_tokens: 100_000,
+    total_output_tokens: 300,
+    total_requests: 1,
+  })
+})
