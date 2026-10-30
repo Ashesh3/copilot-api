@@ -427,6 +427,14 @@ bunx --bun @ashsec/copilot-api@latest start --host 127.0.0.1 --claude-code
 The generated command always uses `dummy`. Before running it, replace that value
 with a stored gateway or inference credential.
 
+Claude Code knows the context window of Claude models only. For any other
+model, such as a GPT model, it assumes 200,000 tokens and compacts at that
+size unless `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is set. The helper sets it from
+the selected model's Copilot prompt limit; set it yourself when you configure
+Claude Code by hand. When a model's prompt is over Copilot's limit, the gateway
+answers in Anthropic's "prompt is too long" form, which makes Claude Code
+compact and continue.
+
 ### Claude desktop
 
 Claude desktop's third-party inference mode can use Copilot API as its gateway.
