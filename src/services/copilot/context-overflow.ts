@@ -2,7 +2,8 @@
  * Copilot refuses a prompt over the model's input limit in two ways: its own
  * preflight answers `model_max_prompt_tokens_exceeded` with "prompt token
  * count of N exceeds the limit of M", and a provider refusal arrives as
- * `invalid_request_body` with the provider's context-window message.
+ * `invalid_request_body` with the provider's context-window message. A
+ * Messages error envelope says "prompt is too long: N tokens > M maximum".
  */
 
 export interface ContextOverflow {
@@ -17,8 +18,11 @@ const OVERFLOW_CODES = new Set([
   "model_max_prompt_tokens_exceeded",
 ])
 const OVERFLOW_MESSAGE =
-  /\b(?:exceeds the context window|maximum context length|context_length_exceeded)\b/iu
-const PROMPT_COUNT = /prompt token count of (\d+) exceeds the limit of (\d+)/iu
+  /\b(?:exceeds the context window|maximum context length|context_length_exceeded)\b|^prompt is too long\b/iu
+const PROMPT_COUNTS = [
+  /prompt token count of (\d+) exceeds the limit of (\d+)/iu,
+  /prompt is too long: (\d+) tokens > (\d+) maximum/iu,
+]
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -35,9 +39,12 @@ export function readContextOverflow(
   const text = typeof message === "string" ? message : ""
   const overflow =
     (typeof code === "string" && OVERFLOW_CODES.has(code))
-    || (code === "invalid_request_body" && OVERFLOW_MESSAGE.test(text))
+    || ((code === undefined || code === "invalid_request_body")
+      && OVERFLOW_MESSAGE.test(text))
   if (!overflow) return undefined
-  const counts = PROMPT_COUNT.exec(text)
+  const counts = PROMPT_COUNTS.map((pattern) => pattern.exec(text)).find(
+    (match) => match !== null,
+  )
   return {
     message: text,
     ...(counts ?

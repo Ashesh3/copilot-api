@@ -2003,27 +2003,40 @@ const CODEX_CLIENT_METADATA = {
 
 test("answers a Codex stream over the prompt limit with context_length_exceeded", async () => {
   state.models = responsesCapableModels
-  queuedResponses.push(promptLimitRejection())
+  const messagesRefusal = {
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      code: "model_max_prompt_tokens_exceeded",
+      message: "prompt is too long: 210000 tokens > 200000 maximum",
+    },
+  }
+  queuedResponses.push(
+    promptLimitRejection(),
+    Response.json(messagesRefusal, { status: 400 }),
+  )
 
-  const response = await postCodexStream({
-    clientMetadata: CODEX_CLIENT_METADATA,
-  })
+  for (const message of [
+    "prompt token count of 922500 exceeds the limit of 922000",
+    messagesRefusal.error.message,
+  ]) {
+    const response = await postCodexStream({
+      clientMetadata: CODEX_CLIENT_METADATA,
+    })
 
-  expect(response.status).toBe(200)
-  expect(response.headers.get("content-type")).toContain("text/event-stream")
-  const body = await response.text()
-  expect(body).toContain("event: response.failed")
-  const data = body
-    .split("\n")
-    .find((line) => line.startsWith("data: "))
-    ?.slice("data: ".length)
-  expect(
-    (JSON.parse(data ?? "{}") as { response?: { error?: unknown } }).response
-      ?.error,
-  ).toEqual({
-    code: "context_length_exceeded",
-    message: "prompt token count of 922500 exceeds the limit of 922000",
-  })
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type")).toContain("text/event-stream")
+    const body = await response.text()
+    expect(body).toContain("event: response.failed")
+    const data = body
+      .split("\n")
+      .find((line) => line.startsWith("data: "))
+      ?.slice("data: ".length)
+    expect(
+      (JSON.parse(data ?? "{}") as { response?: { error?: unknown } }).response
+        ?.error,
+    ).toEqual({ code: "context_length_exceeded", message })
+  }
 })
 
 test("keeps other prompt limit refusals and other Codex errors as HTTP errors", async () => {

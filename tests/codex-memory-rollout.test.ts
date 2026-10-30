@@ -57,6 +57,22 @@ test("reads Copilot's prompt limit refusal with its counts", () => {
       error: { code: "invalid_request_body", message: "Invalid input" },
     }),
   ).toBeUndefined()
+  for (const code of ["model_max_prompt_tokens_exceeded", undefined]) {
+    expect(
+      readContextOverflow(400, {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "prompt is too long: 210000 tokens > 200000 maximum",
+          ...(code ? { code } : {}),
+        },
+      }),
+    ).toEqual({
+      message: "prompt is too long: 210000 tokens > 200000 maximum",
+      promptTokens: 210_000,
+      limit: 200_000,
+    })
+  }
   expect(
     readContextOverflow(500, {
       error: { code: "model_max_prompt_tokens_exceeded", message: "" },
