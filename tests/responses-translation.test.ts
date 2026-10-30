@@ -575,3 +575,23 @@ test("separates reasoning summary parts in a translated Responses result", () =>
     signature: "encrypted-reasoning@rs_parts",
   })
 })
+
+test("names a Messages JSON schema output format for Responses", () => {
+  // Claude Code's session title helper sends this structured output request.
+  const schema = {
+    type: "object",
+    properties: { title: { type: "string" } },
+    required: ["title"],
+    additionalProperties: false,
+  }
+  const translated = translateAnthropicMessagesToResponsesPayload({
+    model: "gpt-current",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "Name this session." }],
+    output_config: { format: { type: "json_schema", schema } },
+  })
+
+  expect(translated.text).toEqual({
+    format: { type: "json_schema", name: "output", schema, strict: false },
+  })
+})

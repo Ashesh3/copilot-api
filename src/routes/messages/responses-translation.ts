@@ -119,7 +119,7 @@ export const translateAnthropicMessagesToResponsesPayload = (
     : {}),
     text:
       payload.output_config?.format ?
-        { format: payload.output_config.format }
+        { format: translateOutputFormat(payload.output_config.format) }
       : undefined,
     task_budget: payload.output_config?.task_budget,
     reasoning: {
@@ -133,6 +133,34 @@ export const translateAnthropicMessagesToResponsesPayload = (
   }
 
   return responsesPayload
+}
+
+const RESPONSES_FORMAT_NAME = /^[\w-]{1,64}$/u
+
+/**
+ * Messages structured output carries only `type` and `schema`, while the
+ * Responses API requires a name for a JSON schema format. Strict mode stays
+ * off unless asked for: it rejects schemas with optional properties.
+ */
+const translateOutputFormat = (
+  format: NonNullable<
+    NonNullable<AnthropicMessagesPayload["output_config"]>["format"]
+  >,
+): NonNullable<NonNullable<ResponsesPayload["text"]>["format"]> => {
+  if (format.type !== "json_schema") return format
+  const name =
+    typeof format.name === "string" && RESPONSES_FORMAT_NAME.test(format.name) ?
+      format.name
+    : "output"
+  return {
+    type: "json_schema",
+    name,
+    schema: format.schema,
+    strict: typeof format.strict === "boolean" ? format.strict : false,
+    ...(typeof format.description === "string" ?
+      { description: format.description }
+    : {}),
+  }
 }
 
 const translateMessage = (
