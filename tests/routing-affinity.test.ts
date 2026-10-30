@@ -7,6 +7,7 @@ import {
   installRoutingAffinityFallback,
   normalizeRoutingAffinityKey,
   resolveClaudeRoutingAffinity,
+  resolveDroidRoutingAffinity,
   resolveResponsesRequestRoutingAffinity,
   resolveResponsesRoutingAffinity,
   resolveRoutingAffinityFromHeaders,
@@ -92,6 +93,52 @@ test("extracts Claude session metadata best effort", () => {
     }),
   ).toBeUndefined()
   expect(resolveClaudeRoutingAffinity(undefined)).toBeUndefined()
+})
+
+test("names a Droid session only by Droid's own prompt cache key", () => {
+  const droid = new Headers({ "user-agent": "factory-cli/1.0.0" })
+  expect(resolveDroidRoutingAffinity(droid, " droid-session ")).toEqual({
+    key: "droid-session",
+    source: "droid_session",
+  })
+  expect(
+    resolveDroidRoutingAffinity(
+      new Headers({ "user-agent": " Factory-CLI/2.3.4 " }),
+      "next",
+    ),
+  ).toEqual({ key: "next", source: "droid_session" })
+  for (const value of [undefined, 42, "", " ", "x".repeat(513)])
+    expect(resolveDroidRoutingAffinity(droid, value)).toBeUndefined()
+  for (const userAgent of ["OpenAI/JS 6.0.0", "app factory-cli/1.0.0", ""])
+    expect(
+      resolveDroidRoutingAffinity(
+        new Headers({ "user-agent": userAgent }),
+        "shared-cache-key",
+      ),
+    ).toBeUndefined()
+  expect(
+    resolveDroidRoutingAffinity(new Headers(), "shared-cache-key"),
+  ).toBeUndefined()
+})
+
+test("installs a Responses fallback only without another identity", () => {
+  const droid = { key: "droid-session", source: "droid_session" as const }
+  const installed = (
+    initial: RoutingAffinity | undefined,
+    clientMetadata: unknown,
+  ) =>
+    runWithRoutingAffinity(initial, () => {
+      installResponsesRoutingAffinity(clientMetadata, droid)
+      return getRoutingAffinity()
+    })
+
+  expect(installed(undefined, undefined)).toEqual(droid)
+  expect(installed(undefined, { session_id: "codex-session" })).toEqual({
+    key: "codex-session",
+    source: "codex_metadata",
+  })
+  const header = { key: "header-session", source: "copilot_session" as const }
+  expect(installed(header, undefined)).toEqual(header)
 })
 
 test("extracts Responses session then thread metadata best effort", () => {

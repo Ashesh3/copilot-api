@@ -77,7 +77,10 @@ import {
   recordNonDefaultBehavior,
   setRequestContext,
 } from "~/lib/request-logger"
-import { installResponsesRoutingAffinity } from "~/lib/routing-affinity"
+import {
+  installResponsesRoutingAffinity,
+  resolveDroidRoutingAffinity,
+} from "~/lib/routing-affinity"
 import {
   createSentryChatSpanOptions,
   createSentryInvokeAgentSpanOptions,
@@ -837,6 +840,10 @@ export const handleResponses = async (c: Context) => {
   }
   installResponsesRoutingAffinity(
     (sourcePayload as Record<string, unknown>).client_metadata,
+    resolveDroidRoutingAffinity(
+      c.req.raw.headers,
+      sourcePayload.prompt_cache_key,
+    ),
   )
   const conversationId = setSentryConversationIdFromRequest(c, sourcePayload)
 

@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { createHash } from "node:crypto"
 
+import { isDroidRequest } from "~/lib/droid-client"
+
 const MAX_AFFINITY_KEY_LENGTH = 512
 const CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata"
 
@@ -11,6 +13,7 @@ export type RoutingAffinitySource =
   | "claude_metadata"
   | "codex_metadata"
   | "codex_thread"
+  | "droid_session"
 
 export interface RoutingAffinity {
   key: string
@@ -122,6 +125,22 @@ export function resolveClaudeRoutingAffinity(
   if (!metadataRecord) return undefined
   const userMetadata = parseRoutingMetadataRecord(metadataRecord.user_id)
   return affinity(userMetadata?.session_id, "claude_metadata")
+}
+
+/**
+ * Droid sends no session header or client metadata. Its Responses
+ * `prompt_cache_key` is its session's cache identity: the session ID, which
+ * the app's forks, rewinds and side chats of that session keep. Other clients
+ * may share one cache key across conversations, so only Droid's names a
+ * session.
+ */
+export function resolveDroidRoutingAffinity(
+  headers: Headers,
+  promptCacheKey: unknown,
+): RoutingAffinity | undefined {
+  return isDroidRequest(headers) ?
+      affinity(promptCacheKey, "droid_session")
+    : undefined
 }
 
 export function resolveResponsesRoutingAffinity(
@@ -301,12 +320,18 @@ export function installRoutingAffinityFallback(
   state.affinity = fallback
 }
 
-export function installResponsesRoutingAffinity(clientMetadata: unknown): void {
+/**
+ * Install a Responses request's identity. `fallback` applies only when
+ * neither the headers nor the client metadata identify the conversation.
+ */
+export function installResponsesRoutingAffinity(
+  clientMetadata: unknown,
+  fallback?: RoutingAffinity,
+): void {
   const state = routingAffinityStorage.getStore()
   if (!state) return
-  const affinity = resolveResponsesRequestRoutingAffinity(
-    clientMetadata,
-    state.affinity,
-  )
+  const affinity =
+    resolveResponsesRequestRoutingAffinity(clientMetadata, state.affinity)
+    ?? fallback
   if (affinity) state.affinity = affinity
 }
