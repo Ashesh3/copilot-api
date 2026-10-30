@@ -758,6 +758,9 @@ const emitResponsesOutputItem = async (
         status: "in_progress",
         ...(item.type === "function_call" ? { arguments: "" } : {}),
         ...(item.type === "custom_tool_call" ? { input: "" } : {}),
+        // Text and summaries arrive once, through the deltas below.
+        ...(item.type === "message" ? { content: [] } : {}),
+        ...(item.type === "reasoning" ? { summary: [] } : {}),
       },
       output_index: ctx.outputIndex,
       sequence_number: seq++,
@@ -852,6 +855,17 @@ const emitResponsesReasoningSummary = async (
   for (const [summaryIndex, block] of summary.entries()) {
     if (typeof block.text !== "string") continue
     await ctx.stream.writeSSE({
+      event: "response.reasoning_summary_part.added",
+      data: JSON.stringify({
+        type: "response.reasoning_summary_part.added",
+        item_id: ctx.itemId,
+        output_index: ctx.outputIndex,
+        summary_index: summaryIndex,
+        part: { type: "summary_text", text: "" },
+        sequence_number: seq++,
+      }),
+    })
+    await ctx.stream.writeSSE({
       event: "response.reasoning_summary_text.delta",
       data: JSON.stringify({
         type: "response.reasoning_summary_text.delta",
@@ -873,6 +887,17 @@ const emitResponsesReasoningSummary = async (
         sequence_number: seq++,
       }),
     })
+    await ctx.stream.writeSSE({
+      event: "response.reasoning_summary_part.done",
+      data: JSON.stringify({
+        type: "response.reasoning_summary_part.done",
+        item_id: ctx.itemId,
+        output_index: ctx.outputIndex,
+        summary_index: summaryIndex,
+        part: { type: "summary_text", text: block.text },
+        sequence_number: seq++,
+      }),
+    })
   }
   return seq
 }
@@ -891,37 +916,72 @@ const emitResponsesMessageContent = async (
   let seq = ctx.seqNum
 
   for (const [ci, block] of content.entries()) {
-    if (
-      !("type" in block)
-      || (block as { type: string }).type !== "output_text"
-    )
-      continue
-
-    const text = (block as unknown as ResponseOutputText).text
+    const isText =
+      "type" in block && (block as { type: string }).type === "output_text"
+    // Each part opens empty and its text arrives once, as the deltas below.
     await ctx.stream.writeSSE({
-      event: "response.output_text.delta",
+      event: "response.content_part.added",
       data: JSON.stringify({
-        type: "response.output_text.delta",
+        type: "response.content_part.added",
         item_id: ctx.itemId,
         output_index: ctx.outputIndex,
         content_index: ci,
-        delta: text,
+        part:
+          isText ? { type: "output_text", text: "", annotations: [] } : block,
         sequence_number: seq++,
       }),
     })
+    if (isText) {
+      seq = await emitResponsesOutputText(
+        (block as unknown as ResponseOutputText).text,
+        ci,
+        { ...ctx, seqNum: seq },
+      )
+    }
     await ctx.stream.writeSSE({
-      event: "response.output_text.done",
+      event: "response.content_part.done",
       data: JSON.stringify({
-        type: "response.output_text.done",
+        type: "response.content_part.done",
         item_id: ctx.itemId,
         output_index: ctx.outputIndex,
         content_index: ci,
-        text,
+        part: block,
         sequence_number: seq++,
       }),
     })
   }
 
+  return seq
+}
+
+const emitResponsesOutputText = async (
+  text: string,
+  contentIndex: number,
+  ctx: MessageContentEmitContext,
+): Promise<number> => {
+  let seq = ctx.seqNum
+  await ctx.stream.writeSSE({
+    event: "response.output_text.delta",
+    data: JSON.stringify({
+      type: "response.output_text.delta",
+      item_id: ctx.itemId,
+      output_index: ctx.outputIndex,
+      content_index: contentIndex,
+      delta: text,
+      sequence_number: seq++,
+    }),
+  })
+  await ctx.stream.writeSSE({
+    event: "response.output_text.done",
+    data: JSON.stringify({
+      type: "response.output_text.done",
+      item_id: ctx.itemId,
+      output_index: ctx.outputIndex,
+      content_index: contentIndex,
+      text,
+      sequence_number: seq++,
+    }),
+  })
   return seq
 }
 

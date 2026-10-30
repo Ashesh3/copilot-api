@@ -1522,8 +1522,10 @@ test("emits reasoning lifecycle and the result's terminal status", async () => {
   expect(writes.map((entry) => entry.event)).toEqual([
     "response.created",
     "response.output_item.added",
+    "response.reasoning_summary_part.added",
     "response.reasoning_summary_text.delta",
     "response.reasoning_summary_text.done",
+    "response.reasoning_summary_part.done",
     "response.output_item.done",
     "response.incomplete",
   ])
@@ -1532,9 +1534,11 @@ test("emits reasoning lifecycle and the result's terminal status", async () => {
   )
   expect(parsedWrites).toMatchObject([
     {},
-    {},
+    { item: { type: "reasoning", summary: [] } },
+    { part: { type: "summary_text", text: "" }, summary_index: 0 },
     { delta: "considering", summary_index: 0 },
     { text: "considering", summary_index: 0 },
+    { part: { type: "summary_text", text: "considering" }, summary_index: 0 },
     {},
     { type: "response.incomplete", response: { status: "incomplete" } },
   ])

@@ -181,8 +181,10 @@ test("keeps a slow Messages turn alive with frames Codex counts", async () => {
   expect(rest.map((frame) => frame.type)).toEqual([
     "response.created",
     "response.output_item.added",
+    "response.content_part.added",
     "response.output_text.delta",
     "response.output_text.done",
+    "response.content_part.done",
     "response.output_item.done",
     "response.completed",
   ])
