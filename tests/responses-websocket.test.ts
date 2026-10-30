@@ -72,6 +72,7 @@ import {
   CAPI_RESPONSES_MAX_REQUEST_BYTES,
   RESPONSES_RECOVERY_MARGIN_BYTES,
 } from "../src/services/copilot/responses-payload-recovery"
+import { resetRejectedReasoningStateForTest } from "../src/services/copilot/responses-reasoning-state"
 import { sanitizeResponsesStreamEvent } from "../src/services/copilot/responses-terminal-sanitizer"
 import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
@@ -196,6 +197,7 @@ afterEach(() => {
   setIpAllowlistForTest([])
   resetRoutingTelemetryForTest()
   resetProgressUpdatesRejectionsForTest()
+  resetRejectedReasoningStateForTest()
 })
 
 describe("extractResponsesPayload", () => {
@@ -4662,7 +4664,7 @@ describe("responses websocket upstream handling", () => {
     )
   })
 
-  test("strips encrypted reasoning from rehydrated continuation input before forwarding", async () => {
+  test("replays Copilot reasoning state from rehydrated continuation input", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
@@ -4718,12 +4720,65 @@ describe("responses websocket upstream handling", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(lastRequestBody?.previous_response_id).toBeUndefined()
-    expect(JSON.stringify(lastRequestBody?.input)).not.toContain(
-      "encrypted_content",
+    expect(lastRequestBody?.input).toContainEqual({
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "Thought" }],
+      encrypted_content: "token-bound-secret",
+    })
+  })
+
+  test("resends a native WebSocket turn without reasoning state Copilot refuses", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(
+      Response.json(
+        { error: { message: "input item does not belong to this connection" } },
+        { status: 400 },
+      ),
+      createResponsesSseResponse("resp_after_refused_state"),
     )
-    expect(JSON.stringify(lastRequestBody?.input)).not.toContain(
-      "token-bound-secret",
+    const ws = createTestWebSocket()
+
+    await seedProtocolDatabase().then(() =>
+      responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "First" }],
+            },
+            {
+              type: "reasoning",
+              summary: [{ type: "summary_text", text: "Thought" }],
+              encrypted_content: "state-from-another-account",
+            },
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "Follow up" }],
+            },
+          ],
+          tools: [],
+        }),
+      ),
     )
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(lastRequestBody?.input).toContainEqual({
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "Thought" }],
+    })
+    expect(JSON.stringify(lastRequestBody?.input)).not.toContain(
+      "state-from-another-account",
+    )
+    expect(
+      ws.sent.some((frame) => frame.includes("resp_after_refused_state")),
+    ).toBe(true)
   })
 
   test("turns deterministic upstream HTTP errors into terminal WebSocket error frames", async () => {

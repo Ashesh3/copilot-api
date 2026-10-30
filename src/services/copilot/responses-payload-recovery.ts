@@ -6,6 +6,8 @@ import {
 } from "~/lib/attachments"
 import { LocalHTTPError } from "~/lib/error"
 
+import { omitReasoningStateToFit } from "./responses-reasoning-state"
+
 export const CAPI_RESPONSES_MAX_REQUEST_BYTES = 32 * 1024 * 1024
 export const RESPONSES_RECOVERY_MARGIN_BYTES = 64 * 1024
 
@@ -43,6 +45,7 @@ export interface ResponsesPayloadRecoveryResult<T> {
   payload: T
   originalBytes: number
   finalBytes: number
+  omittedReasoningStates: number
   downscaledImages: number
   removedHistoricalBinaries: number
   removedCurrentBinaries: number
@@ -500,6 +503,7 @@ export async function recoverResponsesPayload<T extends object>(
       payload,
       originalBytes,
       finalBytes: originalBytes,
+      omittedReasoningStates: 0,
       downscaledImages: 0,
       removedHistoricalBinaries: 0,
       removedCurrentBinaries: 0,
@@ -509,11 +513,31 @@ export async function recoverResponsesPayload<T extends object>(
 
   const recoveredPayload = structuredClone(payload)
   const record = recoveredPayload as Record<string, unknown>
-  const imageSlots = collectInputImageSlots(record)
   const targetBytes = Math.max(0, maxBytes - recoveryMarginBytes)
+  // Old reasoning state gives way first only when that alone fits, since
+  // downscaling reaches every image, the current turn's included. Otherwise
+  // all of it is kept while images shrink.
+  const reasoning = omitReasoningStateToFit(record, {
+    currentBytes: originalBytes,
+    targetBytes,
+    onlyIfSufficient: true,
+  })
+  if (reasoning.bytes <= targetBytes) {
+    return {
+      payload: recoveredPayload,
+      originalBytes,
+      finalBytes: reasoning.bytes,
+      omittedReasoningStates: reasoning.omitted,
+      downscaledImages: 0,
+      removedHistoricalBinaries: 0,
+      removedCurrentBinaries: 0,
+      reduced: true,
+    }
+  }
+  const imageSlots = collectInputImageSlots(record)
   const { downscaledImages, invalidImageSlots } = await recoverImages({
     imageSlots,
-    originalBytes,
+    originalBytes: reasoning.bytes,
     payloadTargetBytes: targetBytes,
     resizeImage: options.resizeImage ?? resizeResponsesImage,
     signal: options.signal,
@@ -528,6 +552,12 @@ export async function recoverResponsesPayload<T extends object>(
   }
 
   let currentBytes = serializedBytes(recoveredPayload)
+  // Remaining reasoning state gives way before attachments are removed to fit.
+  const remainingReasoning = omitReasoningStateToFit(record, {
+    currentBytes,
+    targetBytes,
+  })
+  currentBytes = remainingReasoning.bytes
   if (currentBytes > targetBytes) {
     const binarySlots = collectInputBinarySlots(record)
     const removeSlots = (current: boolean): void => {
@@ -555,6 +585,7 @@ export async function recoverResponsesPayload<T extends object>(
     payload: recoveredPayload,
     originalBytes,
     finalBytes,
+    omittedReasoningStates: reasoning.omitted + remainingReasoning.omitted,
     downscaledImages,
     removedHistoricalBinaries,
     removedCurrentBinaries,

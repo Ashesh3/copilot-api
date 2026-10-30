@@ -30,6 +30,7 @@ import {
 } from "./messages-tool-map"
 import { omitOptionalResponsesWebSearch } from "./optional-web-search"
 import { associateResponsesFunctionCalls } from "./tool-call-association"
+import { omitCopilotReasoningState } from "./utils"
 
 export type ResponsesChatCandidate = EvaluatedEndpointCandidate<
   "/chat/completions",
@@ -747,6 +748,7 @@ export async function adaptResponsesToChatCandidate(
     toCompactionSummaryRequest(clone(options.source)),
   )
   const source = toolTranslation.source
+  omitCopilotReasoningState(source)
   source.model = options.finalModel ?? source.model
   if (options.finalReasoningEffort !== undefined) {
     source.reasoning = {

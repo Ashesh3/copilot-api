@@ -48,6 +48,30 @@ test("does not replay foreign reasoning into another model after a model switch"
   expect(payload).not.toHaveProperty("input.0.encrypted_content")
 })
 
+test("replays Copilot reasoning state so the model keeps its reasoning", () => {
+  const reasoning = {
+    type: "reasoning" as const,
+    summary: [{ type: "summary_text", text: "Planned the change." }],
+    encrypted_content: "copilot-reasoning-state",
+  }
+  const payload: ResponsesPayload = { model: "gpt-6-astra", input: [reasoning] }
+
+  expandCompactionItems(payload)
+
+  expect(payload.input).toEqual([reasoning])
+})
+
+test.each([null, ""])("drops reasoning state that is %p", (state) => {
+  const payload = {
+    model: "gpt-6-astra",
+    input: [{ type: "reasoning", summary: [], encrypted_content: state }],
+  } as unknown as ResponsesPayload
+
+  expandCompactionItems(payload)
+
+  expect(payload.input).toEqual([{ type: "reasoning", summary: [] }])
+})
+
 test("strips bridge-owned Claude envelopes from the native Responses candidate", () => {
   const encrypted = encodeAnthropicReasoningEnvelope("dual-protocol-model", [
     {

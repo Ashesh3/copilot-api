@@ -61,6 +61,7 @@ import {
 } from "~/services/copilot/create-responses"
 import { stripUnsupportedResponsesInputMetadata } from "~/services/copilot/responses-metadata"
 import { omitOutputTokenReplay } from "~/services/copilot/responses-output-replay"
+import { omitRejectedReasoningState } from "~/services/copilot/responses-reasoning-state"
 
 import { getCompactionPrompt } from "./compact-prompt"
 import {
@@ -229,6 +230,7 @@ const reportCompactionReduction = (
   consola.warn(message, {
     originalBytes: fitted.originalBytes,
     finalBytes: fitted.finalBytes,
+    omittedReasoningStates: fitted.omittedReasoningStates,
     omittedBinaryBlocks: fitted.omittedBinaryBlocks,
     truncatedToolOutputBytes: fitted.truncatedToolOutputBytes,
   })
@@ -318,6 +320,7 @@ const handleCompactAttempt = async (c: Context, body: CompactRequestBody) => {
         // Use native Responses API
         stripUnsupportedResponsesInputMetadata(responsesPayload)
         omitOutputTokenReplay(responsesPayload)
+        omitRejectedReasoningState(responsesPayload)
         const fitted = fitResponsesCompactionPayload(responsesPayload)
         const fittedPayload = fitted.payload
         reportCompactionReduction(

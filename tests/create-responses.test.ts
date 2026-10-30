@@ -36,6 +36,7 @@ import {
   sanitizeResponsesStreamEvent,
   type ResponsesPayload,
 } from "../src/services/copilot/create-responses"
+import { resetRejectedReasoningStateForTest } from "../src/services/copilot/responses-reasoning-state"
 import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
   useProtocolDatabase,
@@ -1676,6 +1677,84 @@ test("returns a structured conflict when a bound Responses account still rejects
   expect(capturedAuthorization).not.toContain(
     "Bearer responses-alternate-token",
   )
+})
+
+test("keeps a bound session when Copilot refuses replayed reasoning state as another account's", async () => {
+  const modelId = "responses-session-foreign-reasoning"
+  const model = {
+    ...responsesCapableModels.data[0],
+    id: modelId,
+    name: modelId,
+  }
+  state.models = { data: [model], object: "list" }
+  for (const [id, token] of [
+    [2221, "responses-reasoning-bound-token"],
+    [2222, "responses-reasoning-alternate-token"],
+  ] as const) {
+    const account = tokenPool.addAccount(`github-${id}`, "individual", id)
+    account.copilotToken = token
+    account.healthy = true
+    account.models = new Set([modelId])
+    account.modelsData = [model]
+  }
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+  const sessionId = Array.from(
+    { length: 1000 },
+    (_, index) => `responses-reasoning-session-${index}`,
+  ).find(
+    (candidate) =>
+      tokenPool.getAccountForModelBySession(modelId, candidate)?.id === 2221,
+  )
+  if (!sessionId) throw new TypeError("Expected affinity key for account 2221")
+  // Copilot reports state minted for another account as 401.
+  queuedResponses.push(
+    Response.json(
+      { error: { message: "Input item does not belong to this connection" } },
+      { status: 401 },
+    ),
+    createSuccessResponse(),
+  )
+  const reasoning = {
+    type: "reasoning",
+    summary: [{ type: "summary_text", text: "Planned the change." }],
+    encrypted_content: "reasoning-state-from-another-account",
+  }
+
+  try {
+    const response = await seedProtocolDatabase().then(() =>
+      server.request("/v1/responses", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          client_metadata: { session_id: sessionId },
+          input: [
+            { type: "message", role: "user", content: "Make the change." },
+            reasoning,
+            { type: "message", role: "user", content: "Continue." },
+          ],
+          model: modelId,
+        }),
+      }),
+    )
+
+    expect(response.status).toBe(200)
+    expect(requestBodies).toHaveLength(2)
+    expect(requestBodies[0].input).toContainEqual(reasoning)
+    expect(requestBodies[1].input).toContainEqual({
+      type: "reasoning",
+      summary: reasoning.summary,
+    })
+    expect(capturedAuthorization).toEqual([
+      "Bearer responses-reasoning-bound-token",
+      "Bearer responses-reasoning-bound-token",
+    ])
+  } finally {
+    resetRejectedReasoningStateForTest()
+  }
 })
 
 test("installs Responses client metadata affinity before provider dispatch", async () => {

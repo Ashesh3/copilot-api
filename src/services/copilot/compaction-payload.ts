@@ -3,6 +3,11 @@ import type { ResponsesPayload } from "~/services/copilot/create-responses"
 import { isDataUri, isLikelyBase64 } from "~/lib/attachments"
 import { LocalHTTPError } from "~/lib/error"
 
+import {
+  omitReasoningStateToFit,
+  type ReasoningStateBudget,
+} from "./responses-reasoning-state"
+
 export const COMPACTION_PAYLOAD_MAX_BYTES = 30 * 1024 * 1024
 
 const CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata"
@@ -16,6 +21,7 @@ export interface CompactionPayloadFitResult<T> {
   payload: T
   originalBytes: number
   finalBytes: number
+  omittedReasoningStates: number
   omittedBinaryBlocks: number
   truncatedToolOutputBytes: number
   reduced: boolean
@@ -46,6 +52,11 @@ interface CompactionPayloadStrategy {
     payload: Record<string, unknown>,
     counts: ReductionCounts,
   ) => void
+  /** Drop replayed reasoning state, oldest first, until the payload fits. */
+  omitReasoningState?: (
+    payload: Record<string, unknown>,
+    budget: ReasoningStateBudget,
+  ) => { bytes: number; omitted: number }
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -384,6 +395,68 @@ const createPayloadTooLargeError = (bytes: number, maxBytes: number) => {
   )
 }
 
+const truncateToolOutputsToFit = (
+  slots: Array<TextSlot>,
+  initialBytes: number,
+  maxBytes: number,
+): number => {
+  let currentBytes = initialBytes
+  let truncatedToolOutputBytes = 0
+  slots.sort((left, right) => right.originalBytes - left.originalBytes)
+
+  for (const slot of slots) {
+    if (currentBytes <= maxBytes) break
+    if (slot.originalBytes <= MINIMUM_RETAINED_EDGE_BYTES * 2) continue
+
+    const originalSerializedBytes = serializedBytes(slot.originalText)
+    const minimumRetainedBytes = MINIMUM_RETAINED_EDGE_BYTES * 2
+    const minimumCandidate = truncateText(
+      slot.originalText,
+      minimumRetainedBytes,
+      slot.hasLoneSurrogate,
+    )
+    const minimumSerializedBytes = serializedBytes(minimumCandidate.text)
+    if (minimumSerializedBytes >= originalSerializedBytes) continue
+
+    const minimumPayloadBytes =
+      currentBytes - originalSerializedBytes + minimumSerializedBytes
+
+    if (minimumPayloadBytes > maxBytes) {
+      slot.setText(minimumCandidate.text)
+      currentBytes = minimumPayloadBytes
+      truncatedToolOutputBytes += minimumCandidate.omittedBytes
+      continue
+    }
+
+    let low = minimumRetainedBytes
+    let high = slot.originalBytes - 1
+    let best = minimumCandidate
+    while (low <= high) {
+      const retainedBytes = Math.floor((low + high) / 2)
+      const candidate = truncateText(
+        slot.originalText,
+        retainedBytes,
+        slot.hasLoneSurrogate,
+      )
+      const candidatePayloadBytes =
+        currentBytes - originalSerializedBytes + serializedBytes(candidate.text)
+
+      if (candidatePayloadBytes <= maxBytes) {
+        best = candidate
+        low = retainedBytes + 1
+      } else {
+        high = retainedBytes - 1
+      }
+    }
+
+    slot.setText(best.text)
+    currentBytes =
+      currentBytes - originalSerializedBytes + serializedBytes(best.text)
+    truncatedToolOutputBytes += best.omittedBytes
+  }
+  return truncatedToolOutputBytes
+}
+
 const fitCompactionPayload = <T extends object>(
   payload: T,
   maxBytes: number,
@@ -395,6 +468,7 @@ const fitCompactionPayload = <T extends object>(
       payload,
       originalBytes,
       finalBytes: originalBytes,
+      omittedReasoningStates: 0,
       omittedBinaryBlocks: 0,
       truncatedToolOutputBytes: 0,
       reduced: false,
@@ -403,68 +477,46 @@ const fitCompactionPayload = <T extends object>(
 
   const reducedPayload = structuredClone(payload)
   const reducedRecord = reducedPayload as Record<string, unknown>
+  // Old reasoning state gives way first only when that alone fits, since
+  // eliding removes every attachment at once. Otherwise it is kept until
+  // attachments are elided, and still goes before any tool output is cut.
+  const reasoning = strategy.omitReasoningState?.(reducedRecord, {
+    currentBytes: originalBytes,
+    targetBytes: maxBytes,
+    onlyIfSufficient: true,
+  }) ?? { bytes: originalBytes, omitted: 0 }
+  if (reasoning.bytes <= maxBytes) {
+    return {
+      payload: reducedPayload,
+      originalBytes,
+      finalBytes: reasoning.bytes,
+      omittedReasoningStates: reasoning.omitted,
+      omittedBinaryBlocks: 0,
+      truncatedToolOutputBytes: 0,
+      reduced: true,
+    }
+  }
   const counts: ReductionCounts = { omittedBinaryBlocks: 0 }
   strategy.elideInlineAttachments(reducedRecord, counts)
 
-  let currentBytes = serializedBytes(reducedPayload)
+  const elidedBytes = serializedBytes(reducedPayload)
+  const remainingReasoning =
+    elidedBytes > maxBytes ?
+      strategy.omitReasoningState?.(reducedRecord, {
+        currentBytes: elidedBytes,
+        targetBytes: maxBytes,
+      })
+    : undefined
+  const currentBytes = remainingReasoning?.bytes ?? elidedBytes
   let truncatedToolOutputBytes = 0
   if (currentBytes > maxBytes) {
     const slots: Array<TextSlot> = []
     strategy.collectToolOutputSlots(reducedRecord, slots)
-    slots.sort((left, right) => right.originalBytes - left.originalBytes)
-
-    for (const slot of slots) {
-      if (currentBytes <= maxBytes) break
-      if (slot.originalBytes <= MINIMUM_RETAINED_EDGE_BYTES * 2) continue
-
-      const originalSerializedBytes = serializedBytes(slot.originalText)
-      const minimumRetainedBytes = MINIMUM_RETAINED_EDGE_BYTES * 2
-      const minimumCandidate = truncateText(
-        slot.originalText,
-        minimumRetainedBytes,
-        slot.hasLoneSurrogate,
-      )
-      const minimumSerializedBytes = serializedBytes(minimumCandidate.text)
-      if (minimumSerializedBytes >= originalSerializedBytes) continue
-
-      const minimumPayloadBytes =
-        currentBytes - originalSerializedBytes + minimumSerializedBytes
-
-      if (minimumPayloadBytes > maxBytes) {
-        slot.setText(minimumCandidate.text)
-        currentBytes = minimumPayloadBytes
-        truncatedToolOutputBytes += minimumCandidate.omittedBytes
-        continue
-      }
-
-      let low = minimumRetainedBytes
-      let high = slot.originalBytes - 1
-      let best = minimumCandidate
-      while (low <= high) {
-        const retainedBytes = Math.floor((low + high) / 2)
-        const candidate = truncateText(
-          slot.originalText,
-          retainedBytes,
-          slot.hasLoneSurrogate,
-        )
-        const candidatePayloadBytes =
-          currentBytes
-          - originalSerializedBytes
-          + serializedBytes(candidate.text)
-
-        if (candidatePayloadBytes <= maxBytes) {
-          best = candidate
-          low = retainedBytes + 1
-        } else {
-          high = retainedBytes - 1
-        }
-      }
-
-      slot.setText(best.text)
-      currentBytes =
-        currentBytes - originalSerializedBytes + serializedBytes(best.text)
-      truncatedToolOutputBytes += best.omittedBytes
-    }
+    truncatedToolOutputBytes = truncateToolOutputsToFit(
+      slots,
+      currentBytes,
+      maxBytes,
+    )
   }
 
   const finalBytes = serializedBytes(reducedPayload)
@@ -476,6 +528,8 @@ const fitCompactionPayload = <T extends object>(
     payload: reducedPayload,
     originalBytes,
     finalBytes,
+    omittedReasoningStates:
+      reasoning.omitted + (remainingReasoning?.omitted ?? 0),
     omittedBinaryBlocks: counts.omittedBinaryBlocks,
     truncatedToolOutputBytes,
     reduced: true,
@@ -495,6 +549,7 @@ export function fitResponsesCompactionPayload<T extends object>(
     collectToolOutputSlots(record, slots) {
       collectToolOutputSlots(record.input, slots)
     },
+    omitReasoningState: omitReasoningStateToFit,
   })
 }
 
