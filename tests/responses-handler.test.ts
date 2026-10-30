@@ -603,3 +603,135 @@ test("opens the Chat text part before its first delta and closes it", async () =
     part: { type: "output_text", text: "Hello", annotations: [] },
   })
 })
+
+/**
+ * Codex applies text and summary deltas to the message or reasoning item it
+ * saw added last, and any `output_item.done` ends that item.
+ */
+function deltasOutsideActiveItem(
+  events: Array<Record<string, unknown>>,
+): Array<string> {
+  let active: string | undefined
+  const misplaced: Array<string> = []
+  for (const event of events) {
+    const item = event.item as { id?: string; type?: string } | undefined
+    if (event.type === "response.output_item.added") {
+      if (item?.type === "message" || item?.type === "reasoning") {
+        active = item.id
+      }
+    } else if (event.type === "response.output_item.done") {
+      active = undefined
+    } else if (
+      (event.type === "response.output_text.delta"
+        || event.type === "response.reasoning_summary_part.added"
+        || event.type === "response.reasoning_summary_text.delta")
+      && event.item_id !== active
+    ) {
+      misplaced.push(`${event.type} ${JSON.stringify(event.delta)}`)
+    }
+  }
+  return misplaced
+}
+
+test("holds Chat reasoning state that arrives after the text started", async () => {
+  const { events, stream } = collectEvents()
+
+  await streamChatCompletionsAsResponses(
+    stream,
+    chatStream([
+      chatChunk({ role: "assistant", content: "Hello" }),
+      chatChunk({
+        content: " world",
+        reasoning_opaque: "late-signature",
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_1",
+            type: "function",
+            function: { name: "shell", arguments: "{}" },
+          },
+        ],
+      }),
+      chatChunk({}, "tool_calls"),
+      "[DONE]",
+    ]),
+    "chat-only",
+  )
+
+  expect(deltasOutsideActiveItem(events)).toEqual([])
+  const added = events.filter(
+    (event) => event.type === "response.output_item.added",
+  )
+  expect(
+    added.map((event) => [
+      event.output_index,
+      (event.item as { type: string }).type,
+    ]),
+  ).toEqual([
+    [0, "message"],
+    [1, "function_call"],
+    [2, "reasoning"],
+  ])
+  const reasoningAdded = events.indexOf(added[2])
+  expect(events[reasoningAdded + 1]).toMatchObject({
+    type: "response.output_item.done",
+    output_index: 2,
+  })
+  const response = events.at(-1)?.response as {
+    output: Array<Record<string, unknown>>
+  }
+  expect(response.output.map((item) => item.type)).toEqual([
+    "reasoning",
+    "message",
+    "function_call",
+  ])
+  expect(
+    readChatReasoningEnvelope(response.output[0].encrypted_content),
+  ).toEqual({ model: "chat-only", reasoning_opaque: "late-signature" })
+})
+
+test("holds interleaved Chat thinking once the answer started", async () => {
+  const { events, stream } = collectEvents()
+
+  await streamChatCompletionsAsResponses(
+    stream,
+    chatStream([
+      chatChunk({ role: "assistant", reasoning_text: "First thought." }),
+      chatChunk({ content: "Answer part." }),
+      chatChunk({
+        reasoning_text: " Second thought.",
+        reasoning_opaque: "sig",
+      }),
+      chatChunk({ content: " More." }),
+      chatChunk({}, "stop"),
+      "[DONE]",
+    ]),
+    "chat-only",
+  )
+
+  expect(deltasOutsideActiveItem(events)).toEqual([])
+  expect(
+    events
+      .filter((event) => event.type === "response.reasoning_summary_text.delta")
+      .map((event) => event.delta),
+  ).toEqual(["First thought."])
+  expect(
+    events.find(
+      (event) => event.type === "response.reasoning_summary_text.done",
+    ),
+  ).toMatchObject({ text: "First thought. Second thought." })
+  const response = events.at(-1)?.response as {
+    output: Array<Record<string, unknown>>
+  }
+  expect(response.output[0]).toMatchObject({
+    type: "reasoning",
+    summary: [{ type: "summary_text", text: "First thought. Second thought." }],
+  })
+  expect(
+    readChatReasoningEnvelope(response.output[0].encrypted_content),
+  ).toEqual({ model: "chat-only", reasoning_opaque: "sig" })
+  expect(response.output[1]).toMatchObject({
+    type: "message",
+    content: [{ type: "output_text", text: "Answer part. More." }],
+  })
+})

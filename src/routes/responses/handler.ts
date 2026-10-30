@@ -1693,6 +1693,12 @@ interface CCStreamState {
   usage: { inputTokens?: number; outputTokens?: number; cachedTokens?: number }
   responseCreated: boolean
   pendingFinishReason?: string
+  /**
+   * A message or tool call was announced. Clients apply text and summary
+   * deltas to the item added last, so reasoning that arrives afterwards is
+   * held for its item's final event.
+   */
+  outputStarted: boolean
   /** Present once the upstream model reasons. */
   reasoning?: CCReasoningState
   /** The upstream Chat model, which binds the reasoning state it returns. */
@@ -1701,8 +1707,8 @@ interface CCStreamState {
 }
 
 interface CCReasoningState {
-  itemId: string
-  outputIndex: number
+  /** Set once the client has seen `response.output_item.added`. */
+  announced?: { readonly itemId: string; readonly outputIndex: number }
   text: string
   /** The client has seen `response.reasoning_summary_part.added`. */
   summaryPartAdded: boolean
@@ -1728,6 +1734,7 @@ const createCCStreamState = (options: {
   nextOutputIndex: 0,
   usage: {},
   responseCreated: false,
+  outputStarted: false,
   reasoningModel: options.reasoningModel,
   ...(options.toolMap ? { toolMap: options.toolMap } : {}),
 })
@@ -2270,6 +2277,7 @@ const emitTextDelta = async (
 ): Promise<void> => {
   if (!s.textItemAdded) {
     s.textItemAdded = true
+    s.outputStarted = true
     s.textOutputIndex = s.nextOutputIndex++
     await writeEvent("response.output_item.added", {
       item: {
@@ -2360,6 +2368,7 @@ async function announceToolCall(
     return
   }
   fcState.itemId = item.id ?? fcState.itemId
+  s.outputStarted = true
   await writeEvent("response.output_item.added", {
     item: { ...item, id: fcState.itemId, arguments: "" },
     output_index: fcState.outputIndex,
@@ -2408,20 +2417,24 @@ async function emitReasoningDoneEvents(
   writeEvent: WriteEventFn,
 ): Promise<void> {
   const { reasoning } = s
+  if (!reasoning) return
+  // Reasoning first seen after the output started is added only now.
+  const announced =
+    reasoning.announced ?? (await announceReasoning(s, reasoning, writeEvent))
   const item = ccReasoningOutput(s)
-  if (!reasoning || !item) return
+  if (!item) return
   if (reasoning.summaryPartAdded) {
     await writeEvent("response.reasoning_summary_text.done", {
-      item_id: reasoning.itemId,
-      output_index: reasoning.outputIndex,
+      item_id: announced.itemId,
+      output_index: announced.outputIndex,
       sequence_number: s.seqNum++,
       summary_index: 0,
       text: reasoning.text,
       type: "response.reasoning_summary_text.done",
     })
     await writeEvent("response.reasoning_summary_part.done", {
-      item_id: reasoning.itemId,
-      output_index: reasoning.outputIndex,
+      item_id: announced.itemId,
+      output_index: announced.outputIndex,
       part: { type: "summary_text", text: reasoning.text },
       sequence_number: s.seqNum++,
       summary_index: 0,
@@ -2430,7 +2443,7 @@ async function emitReasoningDoneEvents(
   }
   await writeEvent("response.output_item.done", {
     item,
-    output_index: reasoning.outputIndex,
+    output_index: announced.outputIndex,
     sequence_number: s.seqNum++,
     type: "response.output_item.done",
   })
@@ -2731,7 +2744,12 @@ async function processChatCompletionsChunk(
   if (finishReason) state.pendingFinishReason = finishReason
 }
 
-/** Stream the summary live; the state is complete only when the turn is. */
+/**
+ * Stream the summary live until the output starts; the state is complete
+ * only when the turn is. Clients apply text and summary deltas to the item
+ * they saw added last, so later reasoning goes out with the item's final
+ * event instead, and none of it is dropped.
+ */
 async function emitReasoningDelta(
   s: CCStreamState,
   delta: ChatCompletionChunk["choices"][number]["delta"],
@@ -2739,28 +2757,32 @@ async function emitReasoningDelta(
 ): Promise<void> {
   const text = delta.reasoning_text ?? ""
   if (!text && !delta.reasoning_opaque && !delta.encrypted_content) return
-  const reasoning = s.reasoning ?? (await announceReasoning(s, writeEvent))
+  s.reasoning ??= { text: "", summaryPartAdded: false }
+  const reasoning = s.reasoning
   // Each chunk's state supersedes the previous one.
   if (delta.reasoning_opaque) reasoning.opaque = delta.reasoning_opaque
   if (delta.encrypted_content)
     reasoning.encryptedContent = delta.encrypted_content
+  reasoning.text += text
+  if (s.outputStarted) return
+  const announced =
+    reasoning.announced ?? (await announceReasoning(s, reasoning, writeEvent))
   if (!text) return
   if (!reasoning.summaryPartAdded) {
     reasoning.summaryPartAdded = true
     await writeEvent("response.reasoning_summary_part.added", {
-      item_id: reasoning.itemId,
-      output_index: reasoning.outputIndex,
+      item_id: announced.itemId,
+      output_index: announced.outputIndex,
       part: { type: "summary_text", text: "" },
       sequence_number: s.seqNum++,
       summary_index: 0,
       type: "response.reasoning_summary_part.added",
     })
   }
-  reasoning.text += text
   await writeEvent("response.reasoning_summary_text.delta", {
     delta: text,
-    item_id: reasoning.itemId,
-    output_index: reasoning.outputIndex,
+    item_id: announced.itemId,
+    output_index: announced.outputIndex,
     sequence_number: s.seqNum++,
     summary_index: 0,
     type: "response.reasoning_summary_text.delta",
@@ -2769,36 +2791,35 @@ async function emitReasoningDelta(
 
 async function announceReasoning(
   s: CCStreamState,
+  reasoning: CCReasoningState,
   writeEvent: WriteEventFn,
-): Promise<CCReasoningState> {
-  const reasoning: CCReasoningState = {
+): Promise<NonNullable<CCReasoningState["announced"]>> {
+  const announced = {
     itemId: `rs_${s.responseId}`,
     outputIndex: s.nextOutputIndex++,
-    text: "",
-    summaryPartAdded: false,
   }
-  s.reasoning = reasoning
+  reasoning.announced = announced
   await writeEvent("response.output_item.added", {
     item: {
-      id: reasoning.itemId,
+      id: announced.itemId,
       type: "reasoning",
       summary: [],
       status: "in_progress",
     },
-    output_index: reasoning.outputIndex,
+    output_index: announced.outputIndex,
     sequence_number: s.seqNum++,
     type: "response.output_item.added",
   })
-  return reasoning
+  return announced
 }
 
 function ccReasoningOutput(
   state: CCStreamState,
 ): ResponseOutputReasoning | undefined {
   const { reasoning } = state
-  if (!reasoning) return undefined
+  if (!reasoning?.announced) return undefined
   return createChatReasoningOutput({
-    id: reasoning.itemId,
+    id: reasoning.announced.itemId,
     model: state.reasoningModel,
     text: reasoning.text,
     opaque: reasoning.opaque,
