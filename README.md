@@ -456,9 +456,9 @@ describes each value.
 Claude desktop reads `GET /v1/models` and offers only Claude models from it.
 Each listed Claude model carries its family in `anthropic_family_tier`, and the
 newest model of each family is marked `is_family_default`. Claude desktop
-starts Claude Code with those models as its Opus, Sonnet, Haiku, and Fable
-defaults. Its connection test sends a one-token Messages request to a Haiku
-model.
+starts Claude Code with those models as its default for each family, such as
+Opus, Sonnet, Haiku, Fable, and Mythos. Its connection test sends a one-token
+Messages request to a Haiku model.
 
 ### Google-compatible clients
 
