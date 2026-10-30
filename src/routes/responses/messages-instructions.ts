@@ -12,6 +12,17 @@ function systemReminder(text: string): AnthropicTextBlock {
   }
 }
 
+/** A developer or system message, which the bridge treats as instructions. */
+export function isResponsesInstruction(item: {
+  role?: unknown
+  type?: unknown
+}): boolean {
+  return (
+    (item.type === undefined || item.type === "message")
+    && (item.role === "system" || item.role === "developer")
+  )
+}
+
 /**
  * Codex adds developer messages mid-thread when permissions, the sandbox,
  * the model or the collaboration mode change. Hoisting them into `system`
@@ -39,11 +50,15 @@ export class MidThreadInstructions {
   }
 
   /**
-   * Place pending instructions before an item, unless it is a tool result:
-   * results must open the user turn that answers the calls.
+   * Place pending instructions before an item, unless it is a tool result,
+   * since results must open the user turn that answers the calls, or another
+   * instruction, which joins the pending ones.
    */
-  settleBefore(type: string | undefined): void {
-    if (type !== "function_call_output") this.flush()
+  settleBefore(item: { role?: unknown; type?: unknown }): void {
+    if (item.type === "function_call_output" || isResponsesInstruction(item)) {
+      return
+    }
+    this.flush()
   }
 
   flush(): void {

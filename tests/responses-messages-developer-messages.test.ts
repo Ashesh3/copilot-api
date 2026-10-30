@@ -128,3 +128,27 @@ test("instructions before the first answer remain the system prompt", async () =
   )
   expect(JSON.stringify(payload.messages)).not.toContain("system-reminder")
 })
+
+test("consecutive instructions during a tool call all follow its result", async () => {
+  const payload = await translate([
+    ...FIRST_TURN.slice(0, 2),
+    {
+      type: "function_call",
+      call_id: "call_1",
+      name: "exec_command",
+      arguments: '{"cmd":"bun test"}',
+    },
+    { type: "message", role: "developer", content: "Approval: never" },
+    { type: "message", role: "developer", content: "Sandbox: read-only" },
+    { type: "function_call_output", call_id: "call_1", output: "2 passed" },
+  ])
+
+  expect(mergeTurns(payload.messages).at(-1)).toEqual({
+    role: "user",
+    content: [
+      { type: "tool_result", tool_use_id: "call_1", content: "2 passed" },
+      reminder("Approval: never"),
+      reminder("Sandbox: read-only"),
+    ],
+  })
+})

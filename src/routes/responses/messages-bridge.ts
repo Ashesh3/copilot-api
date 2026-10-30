@@ -404,7 +404,7 @@ async function convertTolerantResponsesInput(
         readManagedWebSearchReplay(raw.encrypted_content)
       : undefined
     webSearches.settleBefore(raw, webSearch)
-    instructions.settleBefore(type)
+    instructions.settleBefore(raw)
     if (webSearch) {
       webSearches.add(webSearch)
       continue
