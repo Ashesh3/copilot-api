@@ -2,24 +2,38 @@
  * Copilot can refuse long-lived prompt caching (a `cache_control` ttl other
  * than 5m) for an account. Clients such as Claude Code keep asking for it
  * once configured, so after an account refuses, requests to that account
- * send the default lifetime instead of failing every time.
+ * send the default lifetime for an hour instead of failing every time. The
+ * refusal expires so an account that gains long-lived caching uses it again.
  */
 const DEFAULT_CACHE_TTL = "5m"
 const MAX_CACHE_CONTROL_DEPTH = 16
+const REFUSAL_MEMORY_MS = 60 * 60 * 1000
+// Tool inputs and schemas are data the client sent, not request controls.
+const DATA_KEYS = new Set(["input", "input_schema"])
 
-// Account scopes (see copilotAccountScope) that refused long-lived caching.
-const refusingScopes = new Set<string>()
+// When each refusing account scope (see copilotAccountScope) may ask again.
+const refusalExpiry = new Map<string, number>()
 
-export function rememberExtendedCacheTtlRefusal(scope: string): void {
-  refusingScopes.add(scope)
+export function rememberExtendedCacheTtlRefusal(
+  scope: string,
+  now = Date.now(),
+): void {
+  refusalExpiry.set(scope, now + REFUSAL_MEMORY_MS)
 }
 
-export function refusesExtendedCacheTtl(scope: string): boolean {
-  return refusingScopes.has(scope)
+export function refusesExtendedCacheTtl(
+  scope: string,
+  now = Date.now(),
+): boolean {
+  const expiry = refusalExpiry.get(scope)
+  if (expiry === undefined) return false
+  if (now < expiry) return true
+  refusalExpiry.delete(scope)
+  return false
 }
 
 export function resetExtendedCacheTtlRefusalForTest(): void {
-  refusingScopes.clear()
+  refusalExpiry.clear()
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -48,8 +62,8 @@ function visitCacheControls(
   }
   if (!isRecord(value)) return
   if (isExtendedCacheControl(value.cache_control)) visit(value.cache_control)
-  for (const nested of Object.values(value)) {
-    visitCacheControls(nested, visit, depth + 1)
+  for (const [key, nested] of Object.entries(value)) {
+    if (!DATA_KEYS.has(key)) visitCacheControls(nested, visit, depth + 1)
   }
 }
 

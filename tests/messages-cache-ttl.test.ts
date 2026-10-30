@@ -13,6 +13,7 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 import { setModelRedirectsForTest } from "../src/lib/model-redirect"
 import { setModelSettingsForTest } from "../src/lib/model-settings"
 import { state } from "../src/lib/state"
+import { tokenPool } from "../src/lib/token-pool"
 import { server } from "../src/server"
 import { resetExtendedCacheTtlRefusalForTest } from "../src/services/copilot/extended-cache-ttl"
 import {
@@ -25,6 +26,13 @@ useProtocolDatabase()
 
 const originalFetch = globalThis.fetch
 const upstreamBodies: Array<string> = []
+const upstreamAuthorization: Array<string | null> = []
+// Bearer values of accounts that accept long-lived prompt caching.
+const extendedTtlAccounts = new Set<string>()
+const POOLED_ACCOUNTS = {
+  refusing: { id: 97_101, token: "ttl-refusing-token" },
+  accepting: { id: 97_102, token: "ttl-accepting-token" },
+} as const
 
 const models: ModelsResponse = {
   object: "list",
@@ -53,8 +61,13 @@ const models: ModelsResponse = {
 // Copilot refuses long-lived prompt caching for accounts without it.
 const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
   const body = typeof init?.body === "string" ? init.body : ""
+  const authorization = new Headers(init?.headers).get("authorization")
   upstreamBodies.push(body)
-  if (body.includes('"ttl":"1h"')) {
+  upstreamAuthorization.push(authorization)
+  if (
+    body.includes('"ttl":"1h"')
+    && !extendedTtlAccounts.has(authorization ?? "")
+  ) {
     return Response.json(
       {
         error: {
@@ -90,6 +103,8 @@ afterAll(() => {
 beforeEach(() => {
   fetchMock.mockClear()
   upstreamBodies.length = 0
+  upstreamAuthorization.length = 0
+  extendedTtlAccounts.clear()
   resetExtendedCacheTtlRefusalForTest()
   state.accountType = "individual"
   state.copilotToken = "copilot-token"
@@ -103,14 +118,20 @@ beforeEach(() => {
 
 afterEach(() => {
   resetExtendedCacheTtlRefusalForTest()
+  for (const { id } of Object.values(POOLED_ACCOUNTS)) {
+    tokenPool.removeAccountForTest(id)
+  }
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = false
 })
 
-async function postMessages(): Promise<Response> {
+async function postMessages(sessionId?: string): Promise<Response> {
   return await server.request("/v1/messages", {
     method: "POST",
     headers: {
       authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
       "content-type": "application/json",
+      ...(sessionId ? { "x-claude-code-session-id": sessionId } : {}),
     },
     body: JSON.stringify({
       model: "claude-cache-model",
@@ -156,4 +177,59 @@ test("falls back to the default cache lifetime once Copilot refuses 1h", async (
   for (const body of upstreamBodies.slice(1)) {
     expect(body).toContain('"ttl":"5m"')
   }
+})
+
+/** Pool two accounts serving the model; returns a session bound to each. */
+function installPooledAccounts(): Record<keyof typeof POOLED_ACCOUNTS, string> {
+  for (const { id, token } of Object.values(POOLED_ACCOUNTS)) {
+    const account = tokenPool.addAccount(`github-${id}`, "individual", id)
+    account.copilotToken = token
+    account.healthy = true
+    account.models = new Set(["claude-cache-model"])
+    account.modelsData = models.data
+  }
+  tokenPool.rebuildModelIndex()
+  state.isMultiToken = true
+  const sessionFor = (accountId: number): string => {
+    const sessionId = Array.from(
+      { length: 1000 },
+      (_, index) => `ttl-session-${index}`,
+    ).find(
+      (candidate) =>
+        tokenPool.getAccountForModelBySession("claude-cache-model", candidate)
+          ?.id === accountId,
+    )
+    if (!sessionId) throw new TypeError(`No session for account ${accountId}`)
+    return sessionId
+  }
+  return {
+    refusing: sessionFor(POOLED_ACCOUNTS.refusing.id),
+    accepting: sessionFor(POOLED_ACCOUNTS.accepting.id),
+  }
+}
+
+test("keeps 1h caching on pooled accounts that did not refuse it", async () => {
+  const sessions = installPooledAccounts()
+  await seedProtocolDatabase()
+  extendedTtlAccounts.add(`Bearer ${POOLED_ACCOUNTS.accepting.token}`)
+
+  for (const sessionId of [
+    sessions.refusing,
+    sessions.accepting,
+    sessions.refusing,
+  ]) {
+    expect((await postMessages(sessionId)).status).toBe(200)
+  }
+
+  expect(
+    upstreamBodies.map((body, index) => [
+      upstreamAuthorization[index],
+      body.includes('"ttl":"1h"'),
+    ]),
+  ).toEqual([
+    [`Bearer ${POOLED_ACCOUNTS.refusing.token}`, true],
+    [`Bearer ${POOLED_ACCOUNTS.refusing.token}`, false],
+    [`Bearer ${POOLED_ACCOUNTS.accepting.token}`, true],
+    [`Bearer ${POOLED_ACCOUNTS.refusing.token}`, false],
+  ])
 })
