@@ -150,13 +150,17 @@ export async function isProgressUpdatesRejection(
   )
 }
 
-/** The progress update a replayed reasoning item ends with, if any. */
-export function replayedProgressUpdate(
-  model: string,
-  blocks: ReadonlyArray<ReasoningBlock>,
-): string | undefined {
-  if (!isProgressUpdateModel(model)) return undefined
-  const last = blocks.at(-1)
+/**
+ * The progress update a replayed reasoning item ends with, if any. Only an
+ * envelope written under display updates holds narration the client was
+ * shown; other thinking text is reasoning, never repeated as a message.
+ */
+export function replayedProgressUpdate(envelope: {
+  readonly blocks: ReadonlyArray<ReasoningBlock>
+  readonly progressUpdates: boolean
+}): string | undefined {
+  if (!envelope.progressUpdates) return undefined
+  const last = envelope.blocks.at(-1)
   if (last?.type !== "thinking") return undefined
   return isVisibleProgressUpdate(last.thinking) ? last.thinking : undefined
 }
