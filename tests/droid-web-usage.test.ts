@@ -5,16 +5,16 @@ import type { ObservedRequestUsage } from "~/lib/request-usage"
 import type { WebEvent } from "~/services/web/tool-loop"
 
 import { runWithRequestUsageObserver } from "~/lib/request-usage"
-import { droidReportedUsage } from "~/services/web/droid-web-usage"
+import { lastRoundContextUsage } from "~/services/web/context-usage"
 import { runWithWebTools } from "~/services/web/tool-context"
 import { isWebStream, runManagedWebRequest } from "~/services/web/tool-loop"
 
 type JsonRecord = Record<string, unknown>
 
-describe("Droid's reported usage", () => {
+describe("the last round's context usage", () => {
   test("Responses: last round's input, every round's output", () => {
     expect(
-      droidReportedUsage(
+      lastRoundContextUsage(
         {
           input_tokens: 104,
           input_tokens_details: { cached_tokens: 100 },
@@ -42,7 +42,7 @@ describe("Droid's reported usage", () => {
 
   test("Messages: last round's input and cache counters", () => {
     expect(
-      droidReportedUsage(
+      lastRoundContextUsage(
         {
           input_tokens: 10,
           cache_read_input_tokens: 980,
@@ -70,17 +70,44 @@ describe("Droid's reported usage", () => {
     })
   })
 
+  test("Chat: last round's prompt, every round's completion", () => {
+    expect(
+      lastRoundContextUsage(
+        {
+          prompt_tokens: 104,
+          prompt_tokens_details: { cached_tokens: 100 },
+          completion_tokens: 5,
+          total_tokens: 109,
+        },
+        {
+          prompt_tokens: 204,
+          prompt_tokens_details: { cached_tokens: 190 },
+          completion_tokens: 35,
+          completion_tokens_details: { reasoning_tokens: 22 },
+          total_tokens: 239,
+        },
+        "chat",
+      ),
+    ).toEqual({
+      prompt_tokens: 104,
+      prompt_tokens_details: { cached_tokens: 100 },
+      completion_tokens: 35,
+      completion_tokens_details: { reasoning_tokens: 22 },
+      total_tokens: 139,
+    })
+  })
+
   test("keeps no stale input counter and keeps totals it cannot improve", () => {
     expect(
-      droidReportedUsage(
+      lastRoundContextUsage(
         { input_tokens: 10, output_tokens: 5 },
         { input_tokens: 30, cache_read_input_tokens: 900, output_tokens: 35 },
         "messages",
       ),
     ).toEqual({ input_tokens: 10, output_tokens: 35 })
     const total = { input_tokens: 30, output_tokens: 35 }
-    expect(droidReportedUsage(undefined, total, "messages")).toBe(total)
-    expect(droidReportedUsage({}, undefined, "responses")).toBeUndefined()
+    expect(lastRoundContextUsage(undefined, total, "messages")).toBe(total)
+    expect(lastRoundContextUsage({}, undefined, "responses")).toBeUndefined()
   })
 })
 

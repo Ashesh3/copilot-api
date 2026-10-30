@@ -7,8 +7,8 @@ import type {
 import type { FinishedStreamRound, StreamPosition } from "./tool-stream-events"
 import type { ManagedWebUsage } from "./tool-usage"
 
+import { lastRoundContextUsage, servesResponsesClient } from "./context-usage"
 import { finishDroidStreamRound, usesDroidCarriers } from "./droid-web-stream"
-import { droidReportedUsage } from "./droid-web-usage"
 import { isRecord, webToolError } from "./tool-context"
 import {
   checkWebContinuationLimit,
@@ -108,10 +108,12 @@ async function* finishStreamRound(
   position.offset += state.visibleSize(visible)
   if (completed.length === 0) {
     position.offset = 0
-    yield* placeEvents(
-      state.terminalEvents(visible, round.usage, output),
-      position,
-    )
+    // Codex sizes its context by the reported input; accounting keeps totals.
+    const usage =
+      round.index > 0 && servesResponsesClient(prepared, options.protocol) ?
+        lastRoundContextUsage(response.usage, round.usage, options.protocol)
+      : round.usage
+    yield* placeEvents(state.terminalEvents(visible, usage, output), position)
     return undefined
   }
   checkWebContinuationLimit(round.index)
@@ -241,7 +243,7 @@ function* failedRoundEvents(
       output_text: responseOutputText(output),
       usage:
         input.carriers ?
-          droidReportedUsage(response.usage, usage, position.protocol)
+          lastRoundContextUsage(response.usage, usage, position.protocol)
         : usage,
     }
   }

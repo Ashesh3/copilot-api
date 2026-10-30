@@ -428,6 +428,7 @@ async function handleResponsesWebSocketMessage(
                 ...(reviewModel ? { model: "codex-auto-review" } : {}),
               },
               execute,
+              { protocol: "responses" },
             ),
         )
       }),

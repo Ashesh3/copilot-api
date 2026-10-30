@@ -175,6 +175,11 @@ parse, or cache them, and has no local-fetch fallback.**
   HTTP streams and WebSocket turns. Failed Responses usage is excluded, while
   completed rounds remain counted; invalid counts retain known subtotals and
   mark an accounting gap instead of becoming measured zero usage.
+- A Responses client on a Messages or Chat fallback, such as Codex with a
+  Claude model, sizes its context by a response's input tokens. A response
+  with gateway-run rounds therefore reports the last round's input-side
+  tokens, whose prompt holds the earlier rounds, with the output of every
+  round. Request accounting and the dashboard still count every round.
 
 This feature adds no standalone `web_fetch` implementation. Existing caller
 server-tool declarations still pass through subject to upstream support. Page

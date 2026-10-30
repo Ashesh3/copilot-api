@@ -13,6 +13,7 @@ import type { CompletedWebCall } from "./tool-output"
 import type { FinishedStreamRound, StreamPosition } from "./tool-stream-events"
 import type { ManagedWebUsage } from "./tool-usage"
 
+import { lastRoundContextUsage } from "./context-usage"
 import {
   droidCarrierReasoning,
   droidCarrierThinking,
@@ -21,7 +22,6 @@ import {
   DROID_WEB_CARRIER_LABEL,
 } from "./droid-web-protocol"
 import { droidCallNarration, droidResultNarration } from "./droid-web-tools"
-import { droidReportedUsage } from "./droid-web-usage"
 import { webToolError } from "./tool-context"
 import { executeManagedWebCall } from "./tool-executor"
 import {
@@ -339,7 +339,7 @@ export async function* finishDroidStreamRound(
     yield* placeEvents(
       state.terminalEvents(
         visible,
-        droidReportedUsage(response.usage, round.usage, protocol),
+        lastRoundContextUsage(response.usage, round.usage, protocol),
         output,
       ),
       position,
@@ -430,7 +430,7 @@ export async function completeDroidBufferedRequest(
     options.signal?.throwIfAborted()
     usage = sumUsage(usage, response.usage)
     // Droid sizes its context by the reported input; accounting keeps totals.
-    const reported = droidReportedUsage(response.usage, usage, protocol)
+    const reported = lastRoundContextUsage(response.usage, usage, protocol)
     const visible =
       calls.length > 0 ?
         withoutOwned(response, calls, protocol)

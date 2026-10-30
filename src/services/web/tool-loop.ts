@@ -9,6 +9,7 @@ import type {
 import type { ManagedToolResult, WebToolCall } from "./tool-executor"
 import type { CompletedWebCall } from "./tool-output"
 
+import { lastRoundContextUsage, servesResponsesClient } from "./context-usage"
 import {
   completeDroidBufferedRequest,
   usesDroidCarriers,
@@ -57,7 +58,9 @@ export interface ManagedWebRequest {
   accountId?: number
   /**
    * Receives every buffered round the loop answers privately, in order. The
-   * request still resolves to the final round, whose usage covers them all.
+   * request still resolves to the final round, whose usage covers them all;
+   * a Responses client served over another protocol sees the last round's
+   * input instead (see context-usage.ts).
    */
   onRound?: (round: ManagedWebRound) => void
   send: (
@@ -150,7 +153,7 @@ function chargeableUsage(
     : response.usage
 }
 
-/** A copy of the final round carrying the usage summed over every round. */
+/** A copy of the final round carrying the usage its client reads. */
 function withUsage(
   response: Record<string, unknown>,
   usage: Record<string, unknown> | undefined,
@@ -189,6 +192,11 @@ export async function runManagedWebRequest(
       observedUsage,
     })
   let usage: Record<string, unknown> | undefined
+  // Codex sizes its context by the reported input; accounting keeps totals.
+  const reported = (round: number, last: unknown) =>
+    round > 0 && servesResponsesClient(prepared, options.protocol) ?
+      lastRoundContextUsage(last, usage, options.protocol)
+    : usage
   for (let round = 0; round < MAX_MANAGED_WEB_ROUNDS; round++) {
     const intercepted = responseCalls(response, options.protocol).some(
       (call) => !call.clientOwned && prepared.managed.has(call.name),
@@ -217,10 +225,11 @@ export async function runManagedWebRequest(
           protocol: options.protocol,
           callerNames: prepared.context?.callerNames,
         }),
-        usage,
+        reported(round, response.usage),
       )
     const completed = await completeWebCalls(options, prepared, response)
-    if (completed.length === 0) return withUsage(response, usage)
+    if (completed.length === 0)
+      return withUsage(response, reported(round, response.usage))
     checkWebContinuationLimit(round)
     options.onRound?.({ response, completed })
     const payload = continuationPayload(dispatch.processedPayload(), response, {
