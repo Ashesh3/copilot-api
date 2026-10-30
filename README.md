@@ -1096,6 +1096,23 @@ models, which it calls over Messages:
 Droid appends `/responses` to an `openai` base URL and `/v1/messages` to an
 `anthropic` one. It names the models `custom:<model>-<index>`, for example
 `custom:gpt-6.1-sol-0`, in the model picker and in mission settings.
+An `anthropic` base URL that ends in `/v1` also works: the gateway serves
+`/v1/v1/messages` and `/v1/v1/messages/count_tokens` as the Messages routes
+(the public nginx template publishes those two exact paths), so one base URL
+can be shared by both providers.
+
+- Set `maxContextLimit` on each model to the model's prompt limit from
+  `GET /v1/models` (`capabilities.limits.max_prompt_tokens`), so Droid compacts
+  before Copilot refuses the prompt. If Copilot refuses one anyway, the
+  gateway answers with the overflow error Droid compacts on
+  (`context_length_exceeded` over Responses, "prompt is too long" over
+  Messages).
+- Leave `authMode`, `enableThinking` and `thinkingMaxTokens` unset. Droid's
+  reasoning effort, including `max`, reaches Copilot as sent; GPT reasoning
+  state and Claude thinking are replayed on later turns.
+- When a session switches between Claude models, or moves to another account,
+  Claude thinking that the new model or account cannot verify is sent as text
+  instead of being dropped; thinking it can verify stays signed.
 
 **Accounts and missions.** Droid sends no session header, so the gateway names
 each Droid session itself and keeps it on one account that serves its model,
