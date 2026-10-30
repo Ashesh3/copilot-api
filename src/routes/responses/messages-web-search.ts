@@ -21,7 +21,12 @@ import { isAnthropicAssistantMessage } from "../messages/anthropic-types"
  * content is not authenticated.
  */
 const MANAGED_WEB_SEARCH_ENVELOPE_PREFIX = "capi_anthropic_web_search_v1:"
+/** One limit for writing and reading, so every written envelope replays. */
 const MAX_ENVELOPE_LENGTH = 4 * 1024 * 1024
+/** The JSON bytes that stay within the limit once base64url-encoded. */
+const MAX_ENVELOPE_JSON_BYTES = Math.floor(
+  ((MAX_ENVELOPE_LENGTH - MANAGED_WEB_SEARCH_ENVELOPE_PREFIX.length) * 3) / 4,
+)
 
 export interface ManagedWebSearchReplay {
   readonly toolUse: AnthropicToolUseBlock
@@ -71,16 +76,59 @@ function isPosition(index: unknown, count: unknown): boolean {
   )
 }
 
-function encodeReplay(replay: ManagedWebSearchReplay): string {
-  const envelope = {
+function envelopeJson(replay: ManagedWebSearchReplay): string {
+  return JSON.stringify({
     tool_use: replay.toolUse,
     tool_result: replay.toolResult,
     index: replay.index,
     count: replay.count,
+  })
+}
+
+function fitsEnvelope(json: string): boolean {
+  return Buffer.byteLength(json, "utf8") <= MAX_ENVELOPE_JSON_BYTES
+}
+
+/**
+ * The envelope JSON within the limit. A result too large to fit keeps its
+ * beginning and a note of the cut, so the call, its query and most of the
+ * result still replay. That copy differs from the result Claude read, so
+ * Messages may drop the thinking that followed it in its turn; later turns
+ * are produced after the shortened copy and replay it exactly. Undefined only
+ * when the call itself cannot fit.
+ */
+function fitEnvelopeJson(replay: ManagedWebSearchReplay): string | undefined {
+  const json = envelopeJson(replay)
+  if (fitsEnvelope(json)) return json
+  const text = replay.toolResult.content
+  if (typeof text !== "string") return undefined
+  const shortened = (kept: number) =>
+    envelopeJson({
+      ...replay,
+      toolResult: {
+        ...replay.toolResult,
+        content: `${text.slice(0, kept)}\n\n[Result truncated by the gateway: showing the first ${kept} of ${text.length} characters.]`,
+      },
+    })
+  if (!fitsEnvelope(shortened(0))) return undefined
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (fitsEnvelope(shortened(middle))) low = middle
+    else high = middle - 1
   }
+  // Never cut a character in half: the last kept unit cannot open a pair.
+  if (low > 0 && (text.codePointAt(low - 1) ?? 0) > 0xff_ff) low -= 1
+  return shortened(low)
+}
+
+function encodeReplay(replay: ManagedWebSearchReplay): string | undefined {
+  const json = fitEnvelopeJson(replay)
+  if (json === undefined) return undefined
   return (
     MANAGED_WEB_SEARCH_ENVELOPE_PREFIX
-    + Buffer.from(JSON.stringify(envelope), "utf8").toString("base64url")
+    + Buffer.from(json, "utf8").toString("base64url")
   )
 }
 
@@ -148,22 +196,23 @@ export function managedWebSearchCalls(
   })
   const calls = new Map<string, ResponseOutputWebSearchCall>()
   for (const [index, { block, result }] of answered.entries()) {
+    const state = encodeReplay({
+      toolUse: structuredClone(block),
+      toolResult: {
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: result.text,
+        ...(result.isError ? { is_error: true } : {}),
+      },
+      index,
+      count: answered.length,
+    })
     calls.set(block.id, {
       id: `ws_${block.id}`,
       type: "web_search_call",
       status: "completed",
       action: webSearchAction(block.input),
-      encrypted_content: encodeReplay({
-        toolUse: structuredClone(block),
-        toolResult: {
-          type: "tool_result",
-          tool_use_id: block.id,
-          content: result.text,
-          ...(result.isError ? { is_error: true } : {}),
-        },
-        index,
-        count: answered.length,
-      }),
+      ...(state ? { encrypted_content: state } : {}),
     })
   }
   return calls

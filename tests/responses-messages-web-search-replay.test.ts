@@ -165,3 +165,59 @@ test("hosted web_search in a bridged candidate is answered by the gateway", asyn
     expect([...prepared.managed.keys()]).toEqual(["web_search"])
   })
 })
+
+// The replay state is read back only up to 4 MiB.
+const REPLAY_LIMIT = 4 * 1024 * 1024
+const TRUNCATION_NOTE =
+  /\n\n\[Result truncated by the gateway: showing the first (\d+) of (\d+) characters\.\]$/
+
+test.each([
+  ["an ASCII", "x"],
+  ["a multibyte", "\u{1F600}"],
+])(
+  "%s result over the replay limit still replays, shortened",
+  async (_kind, unit) => {
+    const text = unit.repeat(Math.ceil(3_500_000 / unit.length))
+    const round: ManagedWebRound = {
+      response: { id: "msg_large", content: [SEARCH_A] },
+      completed: [
+        {
+          call: { id: "toolu_a", name: SEARCH, input: SEARCH_A.input },
+          result: { text, isError: false },
+        },
+      ],
+    }
+    const output = anthropicResponseToResponsesResult(
+      FINAL,
+      MODEL,
+      { model: MODEL, input: [] },
+      { managedRounds: [round] },
+    ).output as Array<ResponseInputItem>
+    const call = output.find((item) => item.type === "web_search_call")
+    expect(
+      String((call as { encrypted_content?: unknown }).encrypted_content)
+        .length,
+    ).toBeLessThanOrEqual(REPLAY_LIMIT)
+
+    const candidate = await adaptResponsesToMessagesCandidate({
+      source: { model: MODEL, input: [USER, ...output, NEXT] },
+    })
+
+    const turns = mergeTurns(candidate.payload.messages)
+    expect(turns[1]).toEqual({ role: "assistant", content: [SEARCH_A] })
+    const [result] = turns[2].content as Array<Record<string, unknown>>
+    expect(result).toMatchObject({
+      type: "tool_result",
+      tool_use_id: "toolu_a",
+    })
+    const content = String(result.content)
+    const note = TRUNCATION_NOTE.exec(content)
+    expect(note?.[2]).toBe(String(text.length))
+    const kept = content.slice(0, note?.index)
+    expect(kept.length).toBe(Number(note?.[1]))
+    expect(text.startsWith(kept)).toBe(true)
+    // Whole characters only, and most of what the limit allows.
+    expect(kept.length % unit.length).toBe(0)
+    expect(kept.length).toBeGreaterThan(text.length / 4)
+  },
+)

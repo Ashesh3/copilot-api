@@ -255,6 +255,9 @@ in one assistant turn with their results together in the next user turn. A
 request without tools of its own declares the replayed search tool, owned by
 the gateway, because the Anthropic Messages API rejects tool history in a
 request that declares no tools.
+The state is written and read under one 4 MiB limit. A result too large for it
+keeps its beginning and a truncation note, so the call still replays; Messages
+may then drop the thinking that followed the full result in that turn.
 A `web_search_call` without this state keeps its previous text handling, and
 native Responses drops the state with other output ciphertext.
 
