@@ -344,6 +344,23 @@ test.each([
     ],
   },
   {
+    name: "signed with a Copilot item token",
+    content: [
+      {
+        type: "thinking",
+        thinking: "signed",
+        signature: "sig-one@3L4bJTu5bYyr+viSs7WsyXCxgecG5mXE+DG7ZAK5Wj6Z/g==",
+      },
+    ],
+    expected: [
+      {
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "signed" }],
+        encrypted_content: "sig-one",
+      },
+    ],
+  },
+  {
     name: "multiple signed",
     content: [
       { type: "thinking", thinking: "first", signature: "sig-one@rs-one" },
