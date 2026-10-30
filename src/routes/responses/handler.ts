@@ -26,6 +26,7 @@ import {
   resolveCustomProviderModel,
   type CustomProviderModelReference,
 } from "~/lib/custom-providers"
+import { isDroidRequest } from "~/lib/droid-client"
 import {
   type EndpointRouteDecision,
   type EndpointRouteFailure,
@@ -150,9 +151,10 @@ import {
   toRemoteCompactionResult,
 } from "./compaction-trigger"
 import {
+  createContextOverflowErrorBody,
   createContextOverflowFailedEvent,
   isCodexResponsesRequest,
-  readCodexContextOverflow,
+  readUpstreamContextOverflow,
 } from "./context-overflow-response"
 import {
   prepareResponsesCandidates,
@@ -874,12 +876,16 @@ export const handleResponses = async (c: Context) => {
       },
     )
   } catch (error) {
+    const codex =
+      sourcePayload.stream === true && isCodexResponsesRequest(sourcePayload)
     const overflow =
-      sourcePayload.stream === true && isCodexResponsesRequest(sourcePayload) ?
-        await readCodexContextOverflow(error)
+      codex || isDroidRequest(c.req.raw.headers) ?
+        await readUpstreamContextOverflow(error)
       : undefined
     if (!overflow) throw error
     reportHttpError(c, overflow.inspection)
+    if (!codex)
+      return c.json(createContextOverflowErrorBody(overflow.message), 400)
     return streamSSE(c, async (stream) => {
       await stream.writeSSE({
         event: "response.failed",

@@ -2062,6 +2062,51 @@ test("keeps other prompt limit refusals and other Codex errors as HTTP errors", 
   expect(requestBodies).toHaveLength(2)
 })
 
+async function postStreamAs(userAgent: string): Promise<Response> {
+  await seedProtocolDatabase()
+  return await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+      "content-type": "application/json",
+      "user-agent": userAgent,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      stream: true,
+      prompt_cache_key: "droid-session",
+      input: [{ type: "message", role: "user", content: "Continue." }],
+    }),
+  })
+}
+
+test("answers Droid over the prompt limit with OpenAI's context_length_exceeded", async () => {
+  state.models = responsesCapableModels
+  queuedResponses.push(promptLimitRejection(), promptLimitRejection())
+
+  // Droid compacts on this code; it does not recognize Copilot's own one.
+  const droid = await postStreamAs("factory-cli/1.0.0")
+  expect(droid.status).toBe(400)
+  expect(await droid.json()).toEqual({
+    error: {
+      message: "prompt token count of 922500 exceeds the limit of 922000",
+      type: "invalid_request_error",
+      param: "input",
+      code: "context_length_exceeded",
+    },
+  })
+
+  const other = await postStreamAs("OpenAI/JS 6.0.0")
+  expect(other.status).toBe(400)
+  expect(await other.json()).toEqual({
+    error: {
+      code: "model_max_prompt_tokens_exceeded",
+      message: "prompt token count of 922500 exceeds the limit of 922000",
+    },
+  })
+  expect(requestBodies).toHaveLength(2)
+})
+
 test("installs Responses client metadata affinity before provider dispatch", async () => {
   state.models = responsesCapableModels
   for (const clientMetadata of [

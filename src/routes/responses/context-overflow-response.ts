@@ -13,6 +13,12 @@ import { readContextOverflowText } from "~/services/copilot/context-overflow"
  * compaction drops the oldest history and retries. It reads any other 400 as
  * a request error and repeats the same oversized turn. Codex requests are
  * answered in that contract when Copilot refuses a prompt over the limit.
+ *
+ * Droid compacts and retries a turn whose error has OpenAI's
+ * `context_length_exceeded` code or a message it knows as an overflow.
+ * Copilot's own refusal, "prompt token count of N exceeds the limit of M"
+ * with code `model_max_prompt_tokens_exceeded`, is neither, so Droid would
+ * end the turn with an error. Droid requests get OpenAI's error instead.
  */
 
 // Every Codex Responses request carries these client metadata keys.
@@ -47,15 +53,15 @@ export function isCodexResponsesRequest(
   )
 }
 
-export interface CodexContextOverflow {
+export interface UpstreamContextOverflow {
   readonly inspection: UpstreamHttpErrorInspection
   readonly message: string
 }
 
 /** Copilot's refusal of a prompt over the model's limit, if `error` is one. */
-export async function readCodexContextOverflow(
+export async function readUpstreamContextOverflow(
   error: unknown,
-): Promise<CodexContextOverflow | undefined> {
+): Promise<UpstreamContextOverflow | undefined> {
   if (!isHTTPError(error)) return undefined
   const inspection = await inspectHttpError(error)
   if (inspection.kind !== "upstream") return undefined
@@ -64,6 +70,23 @@ export async function readCodexContextOverflow(
     inspection.bodyText,
   )
   return overflow && { inspection, message: overflow.message }
+}
+
+const CONTEXT_OVERFLOW_MESSAGE =
+  "Your input exceeds the context window of this model."
+
+/** OpenAI's HTTP error for input over the model's context window. */
+export function createContextOverflowErrorBody(message: string): {
+  error: Record<string, string>
+} {
+  return {
+    error: {
+      message: message || CONTEXT_OVERFLOW_MESSAGE,
+      type: "invalid_request_error",
+      param: "input",
+      code: "context_length_exceeded",
+    },
+  }
 }
 
 export function createContextOverflowFailedEvent(options: {
@@ -84,9 +107,7 @@ export function createContextOverflowFailedEvent(options: {
       usage: null,
       error: {
         code: "context_length_exceeded",
-        message:
-          options.message
-          || "Your input exceeds the context window of this model.",
+        message: options.message || CONTEXT_OVERFLOW_MESSAGE,
       },
       incomplete_details: null,
     },
