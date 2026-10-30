@@ -9,6 +9,7 @@ import type {
 import type { ManagedToolResult, WebToolCall } from "./tool-executor"
 import type { CompletedWebCall } from "./tool-output"
 
+import { completeDroidBufferedRequest } from "./droid-web-stream"
 import {
   modelAllowsHostedWebSearch,
   modelAllowsWebTools,
@@ -146,6 +147,14 @@ function chargeableUsage(
     : response.usage
 }
 
+/** A copy of the final round carrying the usage summed over every round. */
+function withUsage(
+  response: Record<string, unknown>,
+  usage: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  return usage ? { ...response, usage } : { ...response }
+}
+
 export async function runManagedWebRequest(
   options: ManagedWebRequest,
 ): Promise<WebResponse> {
@@ -169,6 +178,12 @@ export async function runManagedWebRequest(
       first: response,
       observedUsage,
       dispatch,
+    })
+  if (prepared.context?.droid)
+    return await completeDroidBufferedRequest(options, prepared, {
+      first: response,
+      dispatch,
+      observedUsage,
     })
   let usage: Record<string, unknown> | undefined
   for (let round = 0; round < MAX_MANAGED_WEB_ROUNDS; round++) {
@@ -194,16 +209,15 @@ export async function runManagedWebRequest(
     if (round > 0)
       assertPrivateContinuation(response, prepared, options.protocol)
     if (isUnsuccessfulWebResponse(response, options.protocol))
-      return {
-        ...withoutUnexecutedManagedCalls(response, prepared.managed, {
+      return withUsage(
+        withoutUnexecutedManagedCalls(response, prepared.managed, {
           protocol: options.protocol,
           callerNames: prepared.context?.callerNames,
         }),
-        ...(usage ? { usage } : {}),
-      }
+        usage,
+      )
     const completed = await completeWebCalls(options, prepared, response)
-    if (completed.length === 0)
-      return { ...response, ...(usage ? { usage } : {}) }
+    if (completed.length === 0) return withUsage(response, usage)
     checkWebContinuationLimit(round)
     options.onRound?.({ response, completed })
     const payload = continuationPayload(dispatch.processedPayload(), response, {

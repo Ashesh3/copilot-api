@@ -4,11 +4,15 @@ import { LocalHTTPError } from "~/lib/error"
 import { parseReasoningEffort } from "~/lib/model-suffix"
 import { parseRoutingMetadataRecord } from "~/lib/routing-affinity"
 
+import { droidWebToolKind, type DroidWebToolKind } from "./droid-web-protocol"
+
 export type WebProtocol = "messages" | "responses" | "chat"
 export interface ManagedWebTool {
   kind: "search"
   maxUses: number
   source: Record<string, unknown>
+  /** Droid's own WebSearch or FetchUrl, answered with replay carriers. */
+  droid?: DroidWebToolKind
 }
 export interface WebToolsContext {
   enabled: boolean
@@ -21,6 +25,10 @@ export interface WebToolsContext {
   requested: Map<string, ManagedWebTool>
   injected: Map<string, ManagedWebTool>
   uses: Map<string, number>
+  /** The request comes from Factory's Droid; see droid-web-protocol.ts. */
+  droid: boolean
+  /** The wire protocol the client called, when the route has one. */
+  clientProtocol?: WebProtocol
 }
 const context = new AsyncLocalStorage<WebToolsContext>()
 export const webToolsContext = (): WebToolsContext | undefined =>
@@ -233,6 +241,7 @@ function definition(
 export function runWithWebTools<T>(
   source: Record<string, unknown>,
   work: () => T,
+  client: { droid?: boolean; protocol?: WebProtocol } = {},
 ): T {
   const callerNames = new Set<string>()
   const requested = new Map<string, ManagedWebTool>()
@@ -263,6 +272,8 @@ export function runWithWebTools<T>(
       requested,
       injected: new Map(),
       uses: new Map(),
+      droid: client.droid === true,
+      clientProtocol: client.protocol,
     },
     work,
   )
@@ -385,6 +396,49 @@ function defaultManagedTool(active: WebToolsContext): [string, ManagedWebTool] {
   )
 }
 
+/**
+ * The gateway answers Droid's own WebSearch and FetchUrl, only on the wire
+ * protocol Droid called, where replay carriers keep the results in Droid's
+ * history. Then no other gateway search tool is offered beside them. Returns
+ * nothing when the gateway does not answer them.
+ */
+function prepareDroidWebTools(
+  source: Record<string, unknown>,
+  protocol: WebProtocol,
+  options: { active: WebToolsContext; nativeResponses: boolean },
+): PreparedManagedWebTools | undefined {
+  const { active } = options
+  const ownWire =
+    active.droid
+    && protocol === active.clientProtocol
+    && (protocol === "messages"
+      || (protocol === "responses" && options.nativeResponses))
+  if (!ownWire || !active.enabled || !allowsDefaults(source)) return undefined
+  const managed = new Map<string, ManagedWebTool>()
+  const tools: Array<unknown> = Array.isArray(source.tools) ? source.tools : []
+  for (const tool of tools) {
+    const kind = droidWebToolKind(tool)
+    const name = isRecord(tool) ? toolName(tool) : undefined
+    if (kind && name)
+      managed.set(name, { kind: "search", droid: kind, maxUses: 8, source: {} })
+  }
+  const payload = source as PreparedManagedWebTools["payload"]
+  return managed.size > 0 ? { payload, managed, context: active } : undefined
+}
+
+function offersHostedDefault(
+  protocol: WebProtocol,
+  options: WebPreparationOptions,
+  active: WebToolsContext,
+): boolean {
+  // Droid shows no hosted search items, so its tool-using turns get none.
+  return (
+    protocol === "responses"
+    && options.hostedDefault === true
+    && (!active.droid || !active.hasCallerTools)
+  )
+}
+
 export function prepareManagedWebTools(
   source: Record<string, unknown>,
   protocol: WebProtocol,
@@ -397,8 +451,12 @@ export function prepareManagedWebTools(
     managed,
   }
   if (!active || options.disabled) return unchanged
-  const hostedDefault =
-    protocol === "responses" && options.hostedDefault === true
+  const droid = prepareDroidWebTools(source, protocol, {
+    active,
+    nativeResponses: options.nativeResponses === true,
+  })
+  if (droid) return droid
+  const hostedDefault = offersHostedDefault(protocol, options, active)
   const nativeHosted = usesHostedSearch(source, protocol)
   // Stateless translated protocols cannot replay hidden search results after a
   // client-tool handoff. Do not introduce this unsupported combination by default.
