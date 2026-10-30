@@ -14,6 +14,10 @@ import { state } from "~/lib/state"
 
 const NOT_SUPPORTED =
   /\bmodel_not_supported\b|\bthe requested model is not supported\b/iu
+// Any error that says the model cannot be found or used, as Copilot and the
+// gateway word it. Other errors are real failures, even for unlisted models.
+const MODEL_UNAVAILABLE =
+  /\bmodel_not_(?:found|supported)\b|\bmodel\b[^"]{1,80}?\bnot (?:found|supported|available)\b/iu
 const MODEL_IN_PATH = /\/models\/([^/:]+):/u
 
 /** Per model the running test used: why it was unavailable, or undefined. */
@@ -50,11 +54,15 @@ async function unavailableReason(
   response: Response,
 ): Promise<string | undefined> {
   if (response.status < 400) return undefined
-  if (!isListedModel(model)) return "is not available on this account"
   const body = await response
     .clone()
     .text()
     .catch(() => "")
+  if (!isListedModel(model)) {
+    return MODEL_UNAVAILABLE.test(body) ?
+        "is not available on this account"
+      : undefined
+  }
   return NOT_SUPPORTED.test(body) ?
       "is listed, but Copilot rejects it as not supported"
     : undefined
