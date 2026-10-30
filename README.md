@@ -1112,6 +1112,11 @@ the model keeps its evidence and its reasoning stays valid.
   does not apply to these calls. Page reads use Copilot quota.
 - The hosted `web_search` tool is not added to Droid's tool-using Responses
   requests, because Droid does not display hosted search results.
+- Droid treats a response's input and cache tokens as its context size and
+  compacts by it. A response with gateway-run rounds therefore reports the last
+  round's input-side tokens, whose prompt holds the earlier rounds, together
+  with the output of every round. Request accounting and the dashboard still
+  count every round's tokens.
 - Switching a session to another provider drops the stored results, as Droid
   does with any provider's reasoning.
 

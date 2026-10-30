@@ -21,6 +21,7 @@ import {
   DROID_WEB_CARRIER_LABEL,
 } from "./droid-web-protocol"
 import { droidCallNarration, droidResultNarration } from "./droid-web-tools"
+import { droidReportedUsage } from "./droid-web-usage"
 import { webToolError } from "./tool-context"
 import { executeManagedWebCall } from "./tool-executor"
 import {
@@ -336,7 +337,11 @@ export async function* finishDroidStreamRound(
   if (calls.length === 0 || responseCalls(visible, protocol).length > 0) {
     position.offset = 0
     yield* placeEvents(
-      state.terminalEvents(visible, round.usage, output),
+      state.terminalEvents(
+        visible,
+        droidReportedUsage(response.usage, round.usage, protocol),
+        output,
+      ),
       position,
     )
     return undefined
@@ -424,18 +429,20 @@ export async function completeDroidBufferedRequest(
     )
     options.signal?.throwIfAborted()
     usage = sumUsage(usage, response.usage)
+    // Droid sizes its context by the reported input; accounting keeps totals.
+    const reported = droidReportedUsage(response.usage, usage, protocol)
     const visible =
       calls.length > 0 ?
         withoutOwned(response, calls, protocol)
       : withoutUnexecutedManagedCalls(response, prepared.managed, { protocol })
     shown.push(...records(visible[field]))
     if (calls.length === 0)
-      return mergedResponse(visible, shown, { usage, protocol })
+      return mergedResponse(visible, shown, { usage: reported, protocol })
     const ran = await runBufferedDroidCalls(options, prepared, calls)
     shown.push(...ran.items)
     options.onRound?.({ response, completed: ran.completed })
     if (responseCalls(visible, protocol).length > 0)
-      return mergedResponse(visible, shown, { usage, protocol })
+      return mergedResponse(visible, shown, { usage: reported, protocol })
     checkWebContinuationLimit(round)
     const payload = continuationPayload(
       input.dispatch.processedPayload(),

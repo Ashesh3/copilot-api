@@ -194,8 +194,9 @@ describe("Droid carrier mode on streamed Responses", () => {
     expect(
       (completed.response.output as Array<JsonRecord>).map((item) => item.id),
     ).toEqual(["rs_1", narration.id, carrier.id, "msg_2"])
+    // Droid's context is the last round's prompt; output covers both rounds.
     expect(completed.response.usage).toMatchObject({
-      input_tokens: 20,
+      input_tokens: 10,
       output_tokens: 8,
     })
 
@@ -313,7 +314,7 @@ describe("Droid carrier mode on streamed Responses", () => {
     expect(decodeDroidWebCarrier(items[2].encrypted_content)?.narration).toBe(
       NARRATION,
     )
-    expect(result.usage).toMatchObject({ input_tokens: 20, output_tokens: 8 })
+    expect(result.usage).toMatchObject({ input_tokens: 10, output_tokens: 8 })
   })
 })
 
@@ -473,7 +474,7 @@ describe("Droid carrier mode on streamed Messages", () => {
     expect(blocks.get(3)).toEqual({ type: "text", text: "Bun 1.4 shipped." })
     const delta = output.find((e) => e.type === "message_delta") as JsonRecord
     expect(delta.delta).toMatchObject({ stop_reason: "end_turn" })
-    expect(delta.usage).toMatchObject({ input_tokens: 20, output_tokens: 8 })
+    expect(delta.usage).toMatchObject({ input_tokens: 10, output_tokens: 8 })
 
     const turn = [
       { role: "assistant", content: [signedThinking, searchUse] },

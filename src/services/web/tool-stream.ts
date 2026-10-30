@@ -8,6 +8,7 @@ import type { FinishedStreamRound, StreamPosition } from "./tool-stream-events"
 import type { ManagedWebUsage } from "./tool-usage"
 
 import { finishDroidStreamRound, usesDroidCarriers } from "./droid-web-stream"
+import { droidReportedUsage } from "./droid-web-usage"
 import { isRecord, webToolError } from "./tool-context"
 import {
   checkWebContinuationLimit,
@@ -180,7 +181,13 @@ async function* consumeRound(
     }
     if (state.failed) {
       if (state.transparent && round === 0) yield event
-      else yield* failedRoundEvents(state, { event, parsed, position })
+      else
+        yield* failedRoundEvents(state, {
+          event,
+          parsed,
+          position,
+          carriers: input.carriers,
+        })
       return
     }
     if (repeatedStart(parsed, round, position)) continue
@@ -208,6 +215,7 @@ function* failedRoundEvents(
     event: WebEvent
     parsed: Record<string, unknown>
     position: StreamPosition
+    carriers: boolean
   },
 ): Generator<WebEvent> {
   const { event, parsed, position } = input
@@ -226,11 +234,15 @@ function* failedRoundEvents(
       )
     }
     const output = [...(position.output ?? []), ...records(visible.output)]
+    const usage = sumUsage(position.usage, response.usage)
     parsed.response = {
       ...visible,
       output,
       output_text: responseOutputText(output),
-      usage: sumUsage(position.usage, response.usage),
+      usage:
+        input.carriers ?
+          droidReportedUsage(response.usage, usage, position.protocol)
+        : usage,
     }
   }
   yield remap(event, parsed, position)
