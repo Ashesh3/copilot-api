@@ -23,6 +23,7 @@ import {
   omitRejectedReasoningState,
   readReasoningStateRejection,
   reasoningStateRecoverySteps,
+  recoverReasoningItemIds,
   rememberAcceptedReasoningState,
   rememberRejectedReasoningState,
   stripReasoningState,
@@ -750,12 +751,21 @@ async function sendResponsesWithRecovery(options: {
 }): Promise<ResponsesAttempt> {
   // The gateway replays reasoning state, so it owns this recovery whether or
   // not the caller allows compatibility retries.
-  const recover = async (attempt: ResponsesAttempt) =>
-    await resendWithoutRejectedReasoningState({
-      attempt,
+  const recover = async (attempt: ResponsesAttempt) => {
+    let activeAttempt = attempt
+    const payload = await recoverReasoningItemIds(
+      attempt.payload,
+      attempt.response,
+    )
+    if (payload && consumeExtraSend(options.retryBudget)) {
+      activeAttempt = { payload, ...(await options.send(payload, true)) }
+    }
+    return await resendWithoutRejectedReasoningState({
+      attempt: activeAttempt,
       retryBudget: options.retryBudget,
       send: async (payload) => await options.send(payload, true),
     })
+  }
   const attempt = await recover({
     payload: options.payload,
     ...(await options.send(options.payload, false)),

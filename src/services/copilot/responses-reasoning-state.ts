@@ -54,6 +54,7 @@ const QUOTED_STATE =
 // Copilot message for item state issued to another account, or expired. Item
 // IDs and previous response IDs are rejected with different messages.
 const FOREIGN_STATE = /\binput item does not belong to this connection\b/u
+const FOREIGN_ITEM_ID = /\binput item id does not belong to this connection\b/u
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -93,6 +94,40 @@ export function hasReasoningState(body: Record<string, unknown>): boolean {
   return reasoningStateItems(body).length > 0
 }
 
+/**
+ * A replayed reasoning ID can be refused independently of its ciphertext.
+ * Retry self-contained reasoning without those IDs before considering removal
+ * of encrypted state. Reference-only items still need their IDs to resolve.
+ */
+export async function recoverReasoningItemIds(
+  body: Record<string, unknown>,
+  response: Response,
+): Promise<Record<string, unknown> | undefined> {
+  if (response.status !== 400) return undefined
+  if (
+    !reasoningStateItems(body).some(
+      (item) => typeof item.id === "string" && item.id.length > 0,
+    )
+  ) {
+    return undefined
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(await response.clone().text()) as unknown
+  } catch {
+    return undefined
+  }
+  const rejection = readConnectionOwnershipRejection(parsed)
+  if (rejection === undefined || !FOREIGN_ITEM_ID.test(rejection)) {
+    return undefined
+  }
+  const repaired = structuredClone(body)
+  for (const item of reasoningStateItems(repaired)) {
+    Reflect.deleteProperty(item, "id")
+  }
+  return repaired
+}
+
 /** Remove the replayed state `select` picks, returning fingerprints of it. */
 export function stripReasoningState(
   body: Record<string, unknown>,
@@ -104,6 +139,8 @@ export function stripReasoningState(
     if (!select(item.encrypted_content, value)) continue
     removed.push(value)
     Reflect.deleteProperty(item, "encrypted_content")
+    // Do not turn refused state into an ID reference on this or later turns.
+    Reflect.deleteProperty(item, "id")
   }
   return removed
 }
