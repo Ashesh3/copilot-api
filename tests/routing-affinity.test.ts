@@ -7,6 +7,7 @@ import {
   installRoutingAffinityFallback,
   normalizeRoutingAffinityKey,
   resolveClaudeRoutingAffinity,
+  resolveDroidMessagesRoutingAffinity,
   resolveDroidRoutingAffinity,
   resolveResponsesRequestRoutingAffinity,
   resolveResponsesRoutingAffinity,
@@ -139,6 +140,154 @@ test("installs a Responses fallback only without another identity", () => {
   })
   const header = { key: "header-session", source: "copilot_session" as const }
   expect(installed(header, undefined)).toEqual(header)
+})
+
+// The shape Droid 1.0 sends with its "anthropic" provider: a system prompt,
+// then a first user turn of start-up reminders and the first prompt.
+const DROID = new Headers({ "user-agent": "factory-cli/1.0.0" })
+const DROID_SYSTEM = [
+  { type: "text", text: "You are Droid, an AI software engineering agent." },
+  { type: "text", text: "Comments: add one only when needed." },
+]
+
+function droidMessages(options: {
+  model?: string
+  prompt?: string
+  system?: unknown
+  firstTurnBreakpoint?: boolean
+  later?: Array<Record<string, unknown>>
+}): Record<string, unknown> {
+  const breakpoint =
+    options.firstTurnBreakpoint === false ?
+      {}
+    : { cache_control: { type: "ephemeral" } }
+  return {
+    model: options.model ?? "claude-opus-5.5",
+    system: options.system ?? [
+      ...DROID_SYSTEM.slice(0, -1),
+      {
+        ...DROID_SYSTEM.at(-1),
+        cache_control: { type: "ephemeral", ttl: "1h" },
+      },
+    ],
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: String.raw`<system-reminder>Working directory: C:\work</system-reminder>`,
+          },
+          {
+            type: "text",
+            text: "<system-reminder>Current date: 2026-10-30.</system-reminder>",
+            ...breakpoint,
+          },
+        ],
+      },
+      {
+        role: "user",
+        content:
+          options.later ?
+            [{ type: "text", text: options.prompt ?? "Fix the failing test." }]
+          : [
+              {
+                type: "text",
+                text: options.prompt ?? "Fix the failing test.",
+                ...breakpoint,
+              },
+            ],
+      },
+      ...(options.later ?? []),
+    ],
+  }
+}
+
+test("names a Droid Messages session by its pinned prefix", () => {
+  const first = resolveDroidMessagesRoutingAffinity(DROID, droidMessages({}))
+  expect(first?.source).toBe("droid_session")
+  expect(first?.key).toMatch(/^droid-messages:[\da-f]{64}$/u)
+
+  // Later turns repeat the prefix while Droid moves its cache breakpoints.
+  const later = droidMessages({
+    firstTurnBreakpoint: false,
+    later: [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Plan.", signature: "sig" },
+          { type: "tool_use", id: "toolu_1", name: "Read", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: "ok",
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+    ],
+  })
+  expect(resolveDroidMessagesRoutingAffinity(DROID, later)).toEqual(first)
+  // A string prompt is the same text as a one-block prompt.
+  const stringPrompt = droidMessages({ firstTurnBreakpoint: false })
+  ;(stringPrompt.messages as Array<Record<string, unknown>>)[1].content =
+    "Fix the failing test."
+  expect(resolveDroidMessagesRoutingAffinity(DROID, stringPrompt)).toEqual(
+    first,
+  )
+  // Another Claude model continues the same session.
+  expect(
+    resolveDroidMessagesRoutingAffinity(
+      DROID,
+      droidMessages({ model: "claude-sonnet-5.5" }),
+    ),
+  ).toEqual(first)
+})
+
+function droidMessagesKey(
+  payload: Record<string, unknown>,
+): string | undefined {
+  return resolveDroidMessagesRoutingAffinity(DROID, payload)?.key
+}
+
+test("gives other Droid sessions and side calls their own digest", () => {
+  const first = droidMessagesKey(droidMessages({}))
+  const others = [
+    droidMessagesKey(droidMessages({ prompt: "Fix the other test." })),
+    droidMessagesKey(
+      droidMessages({ system: [{ type: "text", text: "Write a title." }] }),
+    ),
+    droidMessagesKey(droidMessages({ model: "gpt-6.1-sol" })),
+  ]
+  expect(new Set([first, ...others]).size).toBe(4)
+  // Only a digest of the prompt is kept.
+  for (const value of [first, ...others])
+    expect(value).toMatch(/^droid-messages:[\da-f]{64}$/u)
+})
+
+test("does not name a Messages session for other clients or without a user turn", () => {
+  expect(
+    resolveDroidMessagesRoutingAffinity(
+      new Headers({ "user-agent": "claude-cli/2.0.0" }),
+      droidMessages({}),
+    ),
+  ).toBeUndefined()
+  for (const messages of [
+    [],
+    [{ role: "assistant", content: "Prefill." }],
+    "not messages",
+  ])
+    expect(
+      resolveDroidMessagesRoutingAffinity(DROID, {
+        model: "claude-opus-5.5",
+        messages,
+      }),
+    ).toBeUndefined()
 })
 
 test("extracts Responses session then thread metadata best effort", () => {

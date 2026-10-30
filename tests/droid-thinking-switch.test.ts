@@ -172,11 +172,11 @@ afterEach(() => {
   state.isMultiToken = false
 })
 
-async function droidTurn(
+async function droidRequest(
   model: string,
   messages: Array<Record<string, unknown>>,
-): Promise<string> {
-  const response = await server.request("/v1/v1/messages", {
+): Promise<Response> {
+  return await server.request("/v1/v1/messages", {
     method: "POST",
     headers: {
       "anthropic-version": "2023-06-01",
@@ -193,6 +193,13 @@ async function droidTurn(
       messages,
     }),
   })
+}
+
+async function droidTurn(
+  model: string,
+  messages: Array<Record<string, unknown>>,
+): Promise<string> {
+  const response = await droidRequest(model, messages)
   expect(response.status).toBe(200)
   return await response.text()
 }
@@ -277,11 +284,19 @@ async function installPooledAccounts(): Promise<void> {
   await seedProtocolDatabase()
 }
 
-test("keeps the answering account's thinking when the pool moves a Droid session", async () => {
+test("keeps the answering account's thinking when a compacted Droid session moves accounts", async () => {
   await installPooledAccounts()
   const plan = { role: "user", content: "Plan the change." }
 
   await droidTurn("claude-sonnet-5.5", [plan])
+  const [firstAccount] = upstreamAccounts
+  const firstId = POOLED_ACCOUNT_IDS.find(
+    (id) => firstAccount === `Bearer token-${id}`,
+  )
+  const otherId = POOLED_ACCOUNT_IDS.find((id) => id !== firstId)
+  if (firstId === undefined || otherId === undefined)
+    throw new Error("Expected the session on a pooled account")
+  const otherAccount = `Bearer token-${otherId}`
   const firstTurn = {
     role: "assistant",
     content: [thinking("claude-sonnet-5.5", "sig-claude-sonnet-5.5-1")],
@@ -290,20 +305,29 @@ test("keeps the answering account's thinking when the pool moves a Droid session
     type: "text",
     text: "<thinking>\nclaude-sonnet-5.5 reasoned.\n</thinking>",
   }
-  // Droid sends no session identity, so the pool moves it when the first
-  // account becomes unavailable.
-  tokenPool.deleteAccount(FIRST_ACCOUNT_ID)
+  const implement = { role: "user", content: "Now implement it." }
+  // The session's pinned prefix keeps it on its account. When that account
+  // leaves the pool, the session reports it instead of moving.
+  tokenPool.deleteAccount(firstId)
   await seedProtocolDatabase()
-
-  await droidTurn("claude-sonnet-5.5", [
+  const stuck = await droidRequest("claude-sonnet-5.5", [
     plan,
     firstTurn,
-    { role: "user", content: "Now implement it." },
+    implement,
   ])
+  expect(stuck.status).toBe(409)
+  expect(await stuck.json()).toMatchObject({
+    error: { code: "conversation_account_unavailable" },
+  })
+
+  // Compaction replaces the first turn with a summary: a new identity, which
+  // the pool places on the remaining account.
+  const summary = { role: "user", content: "Summary: the plan is ready." }
+  await droidTurn("claude-sonnet-5.5", [summary, firstTurn, implement])
   await droidTurn("claude-sonnet-5.5", [
-    plan,
+    summary,
     firstTurn,
-    { role: "user", content: "Now implement it." },
+    implement,
     {
       role: "assistant",
       content: [
@@ -320,11 +344,11 @@ test("keeps the answering account's thinking when the pool moves a Droid session
   ])
 
   expect(upstreamAccounts).toEqual([
-    "Bearer token-97201",
-    "Bearer token-97202",
-    "Bearer token-97202",
-    "Bearer token-97202",
-    "Bearer token-97202",
+    firstAccount,
+    otherAccount,
+    otherAccount,
+    otherAccount,
+    otherAccount,
   ])
   expect(upstreamBodies[2]).toHaveProperty("messages.1.content", [
     readableFirst,

@@ -143,6 +143,75 @@ export function resolveDroidRoutingAffinity(
     : undefined
 }
 
+/** JSON with sorted keys and without cache breakpoints, which Droid moves. */
+function canonicalPrefix(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonicalPrefix(item))
+  if (typeof value !== "object" || value === null) return value
+  const record = value as Record<string, unknown>
+  const canonical: Record<string, unknown> = {}
+  for (const key of Object.keys(record).sort()) {
+    if (key !== "cache_control") canonical[key] = canonicalPrefix(record[key])
+  }
+  return canonical
+}
+
+/** Text content as a block list, the form Droid uses with breakpoints. */
+function contentBlocks(content: unknown): unknown {
+  return typeof content === "string" ?
+      [{ type: "text", text: content }]
+    : content
+}
+
+function isRoutingRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/** The user messages before the first assistant message. */
+function firstUserTurn(messages: unknown): Array<unknown> | undefined {
+  if (!Array.isArray(messages)) return undefined
+  const turn: Array<unknown> = []
+  for (const message of messages) {
+    if (!isRoutingRecord(message) || message.role !== "user") break
+    turn.push(contentBlocks(message.content))
+  }
+  return turn.length > 0 ? turn : undefined
+}
+
+/**
+ * Droid's Messages requests carry no session identity, unlike its Responses
+ * requests. Every request of a session repeats the prefix Droid pins with
+ * cache breakpoints: the system prompt and the first user turn, which holds
+ * the session's start-up context and first prompt. A digest of that prefix,
+ * with the model family, names the session without retaining its content.
+ * Forks and side chats share it; a compaction rewrites it and so starts a
+ * new identity.
+ */
+export function resolveDroidMessagesRoutingAffinity(
+  headers: Headers,
+  payload: { model?: unknown; system?: unknown; messages?: unknown },
+): RoutingAffinity | undefined {
+  if (!isDroidRequest(headers)) return undefined
+  const turn = firstUserTurn(payload.messages)
+  if (!turn) return undefined
+  const family =
+    typeof payload.model === "string" ?
+      (/^[a-z]+/iu.exec(payload.model.trim())?.[0].toLowerCase() ?? "")
+    : ""
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify(
+        canonicalPrefix([
+          "copilot-api/droid-messages/v1",
+          family,
+          contentBlocks(payload.system ?? []),
+          turn,
+        ]),
+      ),
+    )
+    .digest("hex")
+  return { key: `droid-messages:${digest}`, source: "droid_session" }
+}
+
 export function resolveResponsesRoutingAffinity(
   clientMetadata: unknown,
 ): RoutingAffinity | undefined {

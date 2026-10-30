@@ -721,9 +721,10 @@ assignments with their eligible weighted targets separately from request counts.
 Conversation ownership is stored permanently in SQLite using a compact 32-byte
 identity digest, stable account ID and last admitted model. Percentage edits and
 restarts do not move recorded conversations, including Codex forks that share their parent's account
-affinity. Recognized Claude, Copilot and Codex session/thread identifiers are
-supported; without a stable identifier, the existing first-eligible default
-remains. Existing equal hashing continues until the first percentage save, while
+affinity. Recognized Claude, Copilot and Codex session/thread identifiers and
+[Factory Droid](#factory-droid) sessions are supported; without a stable
+identifier, the existing first-eligible default remains. Existing equal hashing
+continues until the first percentage save, while
 observed assignments are recorded. Dormant conversations never observed by this
 version cannot be distinguished from new ones at activation.
 
@@ -1088,6 +1089,20 @@ models, which it calls over Messages:
 Droid appends `/responses` to an `openai` base URL and `/v1/messages` to an
 `anthropic` one. It names the models `custom:<model>-<index>`, for example
 `custom:gpt-6.1-sol-0`, in the model picker and in mission settings.
+
+**Accounts and missions.** Droid sends no session header, so the gateway names
+each Droid session itself and keeps it on one account that serves its model,
+as for other identified conversations. Over Responses the identity is Droid's
+`prompt_cache_key`, which is the session ID. Over Messages it is a digest of
+the system prompt and the session's first user turn, which Droid repeats on
+every request; the gateway keeps only the digest. Forks, rewinds and side
+chats in the app stay with their parent. A new identity starts when a
+compaction rewrites the first turn of a Messages session, and for
+`droid exec --fork` with the `openai` provider. Mission workers, validators
+and their subagents are separate sessions, spread across the eligible
+accounts. A session whose account is removed or stops serving its model gets
+an explicit continuity error rather than moving; start a new session or
+restore the account.
 
 **Web search and page reading.** Droid's built-in `WebSearch` and `FetchUrl`
 normally run on Factory's servers. When a Droid model calls them through the
