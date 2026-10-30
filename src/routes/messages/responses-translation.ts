@@ -65,6 +65,8 @@ import {
 
 const MESSAGE_TYPE = "message"
 const CODEX_PHASE_MODEL = "gpt-5.3-codex"
+// Copilot response item IDs are opaque base64 tokens, not `rs_` identifiers.
+const COPILOT_ITEM_TOKEN = /^[\d+/A-Za-z]{32,}={0,2}$/u
 
 export const THINKING_TEXT = "Thinking..."
 
@@ -382,17 +384,21 @@ const createReasoningContent = (
   const thinking = block.thinking === THINKING_TEXT ? "" : block.thinking
   const summary =
     thinking ? [{ type: "summary_text" as const, text: thinking }] : []
+  const plainItemId = Boolean(id) && /^rs[_-]/.test(id)
   if (
     !signature
     || !id
     || signatureParts.length !== 2
-    || !/^rs[_-]/.test(id)
     || signature.startsWith(ANTHROPIC_REASONING_ENVELOPE_PREFIX)
+    || (!plainItemId && !COPILOT_ITEM_TOKEN.test(id))
   ) {
     return thinking ? createOutPutTextContent(thinking) : undefined
   }
+  // Copilot issues reasoning item IDs as opaque, account-bound tokens. The
+  // encrypted state alone carries the reasoning, as Codex replays it, so only
+  // a plain item ID is echoed; a token ID never costs the reasoning itself.
   return {
-    id,
+    ...(plainItemId ? { id } : {}),
     type: "reasoning",
     summary,
     encrypted_content: signature,
