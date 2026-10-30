@@ -29,6 +29,7 @@ import { tokenPool } from "~/lib/token-pool"
 import { server } from "~/server"
 
 import { integrationDataDirectory, integrationDataRoot } from "./data-dir"
+import { recordLiveModelResponse, reportSkippedLiveTests } from "./live-models"
 
 export const TEST_TIMEOUT = 60_000
 
@@ -41,6 +42,7 @@ export const INTEGRATION_GATEWAY_KEY = randomBytes(32).toString("base64url")
 // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- Registers a per-file Bun lifecycle hook.
 export function useIntegrationFixture(): void {
   afterAll(async () => {
+    reportSkippedLiveTests()
     const checked = resolve(integrationDataDirectory)
     if (!checked.startsWith(`${integrationDataRoot}${sep}`))
       throw new Error("Unsafe integration fixture cleanup path")
@@ -157,7 +159,9 @@ export async function request(
   })
   if (!hasSuppliedRequestCredential(probe))
     headers.set("authorization", `Bearer ${INTEGRATION_GATEWAY_KEY}`)
-  return rawRequest(path, { ...init, headers })
+  const response = await rawRequest(path, { ...init, headers })
+  await recordLiveModelResponse(path, init?.body, response)
+  return response
 }
 
 /** Auth-boundary tests must use this helper so missing/invalid credentials stay intact. */

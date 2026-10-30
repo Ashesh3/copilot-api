@@ -1,9 +1,8 @@
 import "./data-dir"
 
-import { describe, test, expect, beforeAll } from "bun:test"
+import { describe, expect, beforeAll } from "bun:test"
 
-import { state } from "~/lib/state"
-
+import { skipUnlessListed, test } from "./live-models"
 import {
   useIntegrationFixture,
   initializeTestState,
@@ -68,42 +67,6 @@ const EMBEDDING_MODELS = [
   "text-embedding-ada-002",
 ]
 
-function isModelAvailable(modelId: string): boolean {
-  return state.models?.data.some((m) => m.id === modelId) ?? false
-}
-
-// Error response shape from the API (wrapped by forwardError)
-interface ErrorBody {
-  error?: { code?: string; message?: string; type?: string }
-}
-
-/**
- * Check if a response is a "model not supported" error (400/404).
- * The upstream error JSON is stringified into error.message by forwardError,
- * so we check for the code inside the serialized message string.
- * Returns true if the response should be skipped (caller should return early).
- */
-async function isModelNotSupported(res: Response): Promise<boolean> {
-  if (res.status === 400 || res.status === 404) {
-    const cloned = res.clone()
-    try {
-      const body = (await cloned.json()) as ErrorBody
-      const msg = body.error?.message ?? ""
-      if (
-        msg.includes("model_not_supported")
-        || msg.includes("not supported")
-        || body.error?.code === "model_not_supported"
-      ) {
-        console.log(`Skipping — upstream rejected model`)
-        return true
-      }
-    } catch {
-      // Not JSON — not a model_not_supported error
-    }
-  }
-  return false
-}
-
 // Helper types for response validation
 interface ChatCompletionChoice {
   message: { role: string; content: string | null }
@@ -142,17 +105,19 @@ describe("Per-model: ChatCompletions (non-streaming)", () => {
     test(
       modelId,
       async () => {
-        if (!isModelAvailable(modelId)) {
-          console.log(`Skipping ${modelId} — not in models list`)
+        if (
+          skipUnlessListed(
+            `Per-model: ChatCompletions (non-streaming) > ${modelId}`,
+            modelId,
+          )
+        )
           return
-        }
         const res = await postJSON("/v1/chat/completions", {
           model: modelId,
           messages: [{ role: "user", content: "Say hello in one word." }],
           max_tokens: 10,
           stream: false,
         })
-        if (await isModelNotSupported(res)) return
         expect(res.status).toBe(200)
         const body = (await res.json()) as ChatCompletionBody
         expect(body.choices.length).toBeGreaterThan(0)
@@ -169,17 +134,19 @@ describe("Per-model: ChatCompletions (streaming)", () => {
     test(
       modelId,
       async () => {
-        if (!isModelAvailable(modelId)) {
-          console.log(`Skipping ${modelId} — not in models list`)
+        if (
+          skipUnlessListed(
+            `Per-model: ChatCompletions (streaming) > ${modelId}`,
+            modelId,
+          )
+        )
           return
-        }
         const res = await postJSON("/v1/chat/completions", {
           model: modelId,
           messages: [{ role: "user", content: "Say hello in one word." }],
           max_tokens: 10,
           stream: true,
         })
-        if (await isModelNotSupported(res)) return
         expect(res.status).toBe(200)
         const events = await collectSSEEvents(res)
         expect(events.length).toBeGreaterThan(0)
@@ -198,17 +165,19 @@ describe("Per-model: Messages API (non-streaming)", () => {
     test(
       modelId,
       async () => {
-        if (!isModelAvailable(modelId)) {
-          console.log(`Skipping ${modelId} — not in models list`)
+        if (
+          skipUnlessListed(
+            `Per-model: Messages API (non-streaming) > ${modelId}`,
+            modelId,
+          )
+        )
           return
-        }
         const res = await postJSON("/v1/messages", {
           model: modelId,
           messages: [{ role: "user", content: "Say hello in one word." }],
           max_tokens: 10,
           stream: false,
         })
-        if (await isModelNotSupported(res)) return
         expect(res.status).toBe(200)
         const body = (await res.json()) as AnthropicBody
         expect(body.type).toBe("message")
@@ -226,17 +195,19 @@ describe("Per-model: Messages API (streaming)", () => {
     test(
       modelId,
       async () => {
-        if (!isModelAvailable(modelId)) {
-          console.log(`Skipping ${modelId} — not in models list`)
+        if (
+          skipUnlessListed(
+            `Per-model: Messages API (streaming) > ${modelId}`,
+            modelId,
+          )
+        )
           return
-        }
         const res = await postJSON("/v1/messages", {
           model: modelId,
           messages: [{ role: "user", content: "Say hello in one word." }],
           max_tokens: 10,
           stream: true,
         })
-        if (await isModelNotSupported(res)) return
         expect(res.status).toBe(200)
         const events = await collectSSEEvents(res)
         expect(events.length).toBeGreaterThan(0)
@@ -255,16 +226,18 @@ describe("Per-model: Responses API (non-streaming)", () => {
     test(
       modelId,
       async () => {
-        if (!isModelAvailable(modelId)) {
-          console.log(`Skipping ${modelId} — not in models list`)
+        if (
+          skipUnlessListed(
+            `Per-model: Responses API (non-streaming) > ${modelId}`,
+            modelId,
+          )
+        )
           return
-        }
         const res = await postJSON("/v1/responses", {
           model: modelId,
           input: "Say hello in one word.",
           stream: false,
         })
-        if (await isModelNotSupported(res)) return
         expect(res.status).toBe(200)
         const body = (await res.json()) as ResponsesBody
         expect(body.status).toBe("completed")
@@ -281,16 +254,18 @@ describe("Per-model: Responses API (streaming)", () => {
     test(
       modelId,
       async () => {
-        if (!isModelAvailable(modelId)) {
-          console.log(`Skipping ${modelId} — not in models list`)
+        if (
+          skipUnlessListed(
+            `Per-model: Responses API (streaming) > ${modelId}`,
+            modelId,
+          )
+        )
           return
-        }
         const res = await postJSON("/v1/responses", {
           model: modelId,
           input: "Say hello in one word.",
           stream: true,
         })
-        if (await isModelNotSupported(res)) return
         expect(res.status).toBe(200)
         const events = await collectSSEEvents(res)
         expect(events.length).toBeGreaterThan(0)
@@ -311,15 +286,12 @@ describe("Per-model: Embeddings", () => {
     test(
       modelId,
       async () => {
-        if (!isModelAvailable(modelId)) {
-          console.log(`Skipping ${modelId} — not in models list`)
+        if (skipUnlessListed(`Per-model: Embeddings > ${modelId}`, modelId))
           return
-        }
         const res = await postJSON("/v1/embeddings", {
           model: modelId,
           input: ["Hello, world!"],
         })
-        if (await isModelNotSupported(res)) return
         expect(res.status).toBe(200)
         const body = (await res.json()) as EmbeddingBody
         expect(body.data.length).toBeGreaterThan(0)
