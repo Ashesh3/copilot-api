@@ -2,6 +2,7 @@ import {
   hasExtendedCacheTtl,
   removeExtendedCacheTtl,
 } from "./extended-cache-ttl"
+import { rewriteRejectedThinking } from "./thinking-provenance"
 
 export type CompatibilityRetryEndpoint =
   | "/chat/completions"
@@ -302,7 +303,7 @@ function classifyParsedCompatibilityRetry(options: {
   ) {
     return {
       kind: "invalid_thinking_signature",
-      normalize: stripAssistantThinkingBlocks,
+      normalize: rewriteRejectedThinking,
     }
   }
 

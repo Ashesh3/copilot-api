@@ -1817,6 +1817,129 @@ test("remembers refused reasoning state only for the account that refused it", a
   }
 })
 
+/** A turn whose output carries reasoning state the account issued. */
+function issuingResponse(state: string, stream: boolean): Response {
+  const reasoning = {
+    id: "rs_issued",
+    type: "reasoning",
+    summary: [],
+    encrypted_content: state,
+  }
+  const response = {
+    id: "resp_issued",
+    object: "response",
+    created_at: 1,
+    model: "gpt-4o",
+    status: "completed",
+    output: [reasoning],
+    usage: null,
+    error: null,
+    incomplete_details: null,
+  }
+  if (!stream) return Response.json(response)
+  const events = [
+    {
+      type: "response.created",
+      sequence_number: 0,
+      response: { ...response, status: "in_progress", output: [] },
+    },
+    {
+      type: "response.output_item.done",
+      sequence_number: 1,
+      output_index: 0,
+      item: reasoning,
+    },
+    { type: "response.completed", sequence_number: 2, response },
+  ]
+  return new Response(
+    events
+      .map(
+        (event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+      )
+      .join(""),
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
+async function postReplayTurn(options: {
+  modelId: string
+  sessionId: string
+  reasoning: Array<Record<string, unknown>>
+  stream: boolean
+}): Promise<Response> {
+  await seedProtocolDatabase()
+  return await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      client_metadata: { session_id: options.sessionId },
+      input: [
+        { type: "message", role: "user", content: "Make the change." },
+        ...options.reasoning,
+        { type: "message", role: "user", content: "Continue." },
+      ],
+      model: options.modelId,
+      stream: options.stream,
+    }),
+  })
+}
+
+function replayedStates(body: Record<string, unknown>): Array<unknown> {
+  return (body.input as Array<Record<string, unknown>>)
+    .filter((item) => item.type === "reasoning")
+    .map((item) => item.encrypted_content)
+}
+
+for (const stream of [false, true]) {
+  test(`keeps state the account issued when Copilot refuses state replayed beside it (stream=${stream})`, async () => {
+    const modelId = `responses-issued-reasoning-${stream}`
+    const sessions = installReasoningAccounts(modelId)
+    const issued = `state-issued-by-2221-${stream}`
+    const foreign = `state-issued-by-2222-${stream}`
+    const replay = [foreign, issued].map((state) => ({
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: `Reasoning ${state}.` }],
+      encrypted_content: state,
+    }))
+    queuedResponses.push(
+      issuingResponse(issued, stream),
+      foreignStateRejection(),
+      createSuccessResponse(),
+      createSuccessResponse(),
+    )
+
+    try {
+      for (const reasoning of [[], replay, replay]) {
+        const response = await postReplayTurn({
+          modelId,
+          sessionId: sessions[2221],
+          reasoning,
+          stream,
+        })
+        expect(response.status).toBe(200)
+        await response.text()
+      }
+
+      expect(requestBodies.map((body) => replayedStates(body))).toEqual([
+        [],
+        [foreign, issued],
+        // The refusal removes only the state the account did not issue.
+        [undefined, issued],
+        // And only that state is remembered as refused.
+        [undefined, issued],
+      ])
+      expect(new Set(capturedAuthorization)).toEqual(
+        new Set([`Bearer ${REASONING_BOUND_TOKEN}`]),
+      )
+    } finally {
+      resetRejectedReasoningStateForTest()
+    }
+  })
+}
+
 // Copilot checks each replayed item's ID before its state.
 function itemIdRejection(status = 401): Response {
   return Response.json(
@@ -2059,6 +2182,51 @@ test("keeps other prompt limit refusals and other Codex errors as HTTP errors", 
 
   expect(other.status).toBe(400)
   expect(codex.status).toBe(400)
+  expect(requestBodies).toHaveLength(2)
+})
+
+async function postStreamAs(userAgent: string): Promise<Response> {
+  await seedProtocolDatabase()
+  return await server.request("/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+      "content-type": "application/json",
+      "user-agent": userAgent,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      stream: true,
+      prompt_cache_key: "droid-session",
+      input: [{ type: "message", role: "user", content: "Continue." }],
+    }),
+  })
+}
+
+test("answers Droid over the prompt limit with OpenAI's context_length_exceeded", async () => {
+  state.models = responsesCapableModels
+  queuedResponses.push(promptLimitRejection(), promptLimitRejection())
+
+  // Droid compacts on this code; it does not recognize Copilot's own one.
+  const droid = await postStreamAs("factory-cli/1.0.0")
+  expect(droid.status).toBe(400)
+  expect(await droid.json()).toEqual({
+    error: {
+      message: "prompt token count of 922500 exceeds the limit of 922000",
+      type: "invalid_request_error",
+      param: "input",
+      code: "context_length_exceeded",
+    },
+  })
+
+  const other = await postStreamAs("OpenAI/JS 6.0.0")
+  expect(other.status).toBe(400)
+  expect(await other.json()).toEqual({
+    error: {
+      code: "model_max_prompt_tokens_exceeded",
+      message: "prompt token count of 922500 exceeds the limit of 922000",
+    },
+  })
   expect(requestBodies).toHaveLength(2)
 })
 

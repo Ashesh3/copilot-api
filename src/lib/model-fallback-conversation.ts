@@ -1,3 +1,4 @@
+import { isDroidRequest } from "~/lib/droid-client"
 import {
   getRoutingAffinity,
   normalizeRoutingAffinityKey,
@@ -44,6 +45,8 @@ export function getModelFallbackConversationIdentity(options: {
     typeof metadata.user_id === "string" ?
       metadata.user_id.match(/_session_(.+)$/u)?.[1]
     : undefined,
+    // Only Droid's prompt cache key names one session; see routing affinity.
+    headers && isDroidRequest(headers) ? payload.prompt_cache_key : undefined,
     options.conversationKey,
   ]
   for (const value of identities) {

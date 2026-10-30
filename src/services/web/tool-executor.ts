@@ -5,11 +5,14 @@ import {
 
 import type { ManagedWebTool, WebToolsContext } from "./tool-context"
 
+import { executeDroidWebCall } from "./droid-web-tools"
 import { isRecord } from "./tool-context"
 
 export interface ManagedToolResult {
   text: string
   isError: boolean
+  /** A short outcome for clients that show gateway-run calls to the user. */
+  narration?: string
 }
 export interface WebToolCall {
   id: string
@@ -22,6 +25,12 @@ export async function executeManagedWebCall(
   tool: ManagedWebTool,
   options: { context: WebToolsContext; signal?: AbortSignal },
 ): Promise<ManagedToolResult> {
+  if (tool.droid)
+    return await executeDroidWebCall(
+      call,
+      { ...tool, droid: tool.droid },
+      options,
+    )
   const { context, signal } = options
   signal?.throwIfAborted()
   const used = context.uses.get(tool.kind) ?? 0

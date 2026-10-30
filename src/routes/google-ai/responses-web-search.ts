@@ -12,6 +12,7 @@ import {
 } from "~/services/copilot/mcp-web-search"
 import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
 import { assertNoClientWebCalls } from "~/services/web/tool-output"
+import { SearchLoopUsage } from "~/services/web/tool-usage"
 
 export const MAX_GOOGLE_RESPONSES_WEB_SEARCH_USES = 8
 
@@ -52,9 +53,12 @@ export async function resolvePreparedGoogleResponsesWebSearch(options: {
     Number.isInteger(options.maxUses) && Number(options.maxUses) > 0 ?
       Math.min(Number(options.maxUses), MAX_GOOGLE_RESPONSES_WEB_SEARCH_USES)
     : MAX_GOOGLE_RESPONSES_WEB_SEARCH_USES
+  // The client sees the final round; request accounting counts every round.
+  const rounds = new SearchLoopUsage("responses")
 
   while (true) {
     const calls = searchCalls(current)
+    rounds.round(current, calls.length)
     if (calls.length > 0 || uses > 0)
       assertNoClientWebCalls(
         current as unknown as Record<string, unknown>,
@@ -90,6 +94,7 @@ export async function resolvePreparedGoogleResponsesWebSearch(options: {
       stream: false,
       tool_choice: "auto",
     }
+    rounds.next()
     current = await options.createResponse(currentPayload)
   }
 }

@@ -47,6 +47,15 @@ import {
   serializeAnthropicMessagesRequest,
   validateAnthropicRequestHeaderOptions,
 } from "./messages-contract"
+import {
+  createThinkingStreamRecorder,
+  foreignThinkingProducers,
+  recordResponseThinking,
+  rememberRejectedThinkingProducers,
+  rewriteLearnedForeignThinking,
+  rewriteRejectedThinking,
+  type ThinkingSource,
+} from "./thinking-provenance"
 
 /**
  * Native Anthropic Messages endpoint on the Copilot API.
@@ -302,17 +311,32 @@ async function retryAnthropicCompatibility(
     return attempt
   }
   const retryBody = structuredClone(attempt.body)
+  // Thinking from the account that answered stays signed on its retry.
+  const normalize =
+    decision.kind === "invalid_thinking_signature" ?
+      (body: Record<string, unknown>) =>
+        rewriteRejectedThinking(body, attempt.accountId)
+    : decision.normalize
   if (
-    !decision.normalize(retryBody)
+    !normalize(retryBody)
     || !options.options?.retryBudget
     || !claimCompatibilityRetry(options.options.retryBudget)
   ) {
     return attempt
   }
-  return {
+  // Thinking that this model rejected stays readable on later turns.
+  const rejectedProducers =
+    decision.kind === "invalid_thinking_signature" ?
+      foreignThinkingProducers(attempt.body)
+    : undefined
+  const retry = {
     body: retryBody,
     ...(await dispatchAnthropicAttempt(options, retryBody, true)),
   }
+  if (rejectedProducers && retry.response.ok) {
+    rememberRejectedThinkingProducers(rejectedProducers, options.modelId)
+  }
+  return retry
 }
 
 function omitLearnedDisabledThinking(
@@ -354,14 +378,16 @@ async function dispatchAnthropicMessages(
     options.options?.compaction ?
       fitAnthropicCompactionPayload(preparedBody)
     : null
-  const body = omitRefusedExtendedCacheTtl(
-    omitLearnedDisabledThinking(
-      fitted?.payload ?? preparedBody,
-      options.modelId,
-    ),
-    copilotAccountScope(
-      options.options?.routedAccountPin?.accountId
-        ?? getSelectedRoutedAccountId(),
+  const body = rewriteLearnedForeignThinking(
+    omitRefusedExtendedCacheTtl(
+      omitLearnedDisabledThinking(
+        fitted?.payload ?? preparedBody,
+        options.modelId,
+      ),
+      copilotAccountScope(
+        options.options?.routedAccountPin?.accountId
+          ?? getSelectedRoutedAccountId(),
+      ),
     ),
   )
   omitConfiguredReasoningEffort("messages", body, [options.modelId])
@@ -379,6 +405,10 @@ async function dispatchAnthropicMessages(
     ...(await dispatchAnthropicAttempt(options, body, false)),
   })
   const { body: activeBody, response } = attempt
+  const source: ThinkingSource = {
+    model: options.modelId,
+    account: attempt.accountId,
+  }
 
   if (!response.ok) {
     consola.error(
@@ -396,8 +426,25 @@ async function dispatchAnthropicMessages(
   // with that accepted request, including compatibility removals.
   reportProcessedPayload(normalizeAnthropicMessagesRequest(activeBody))
   if (stream) {
-    return events(response) as AsyncIterable<AnthropicStreamChunk>
+    return recordStreamedThinking(
+      events(response) as AsyncIterable<AnthropicStreamChunk>,
+      source,
+    )
   }
 
-  return (await response.json()) as AnthropicResponse
+  const result = (await response.json()) as AnthropicResponse
+  recordResponseThinking(result, source)
+  return result
+}
+
+/** Relay upstream events while recording which model signed their thinking. */
+async function* recordStreamedThinking(
+  chunks: AsyncIterable<AnthropicStreamChunk>,
+  source: ThinkingSource,
+): AsyncIterable<AnthropicStreamChunk> {
+  const record = createThinkingStreamRecorder(source)
+  for await (const chunk of chunks) {
+    record(chunk)
+    yield chunk
+  }
 }

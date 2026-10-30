@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { createHash } from "node:crypto"
 
+import { isDroidRequest } from "~/lib/droid-client"
+
 const MAX_AFFINITY_KEY_LENGTH = 512
 const CODEX_TURN_METADATA_KEY = "x-codex-turn-metadata"
 
@@ -11,6 +13,7 @@ export type RoutingAffinitySource =
   | "claude_metadata"
   | "codex_metadata"
   | "codex_thread"
+  | "droid_session"
 
 export interface RoutingAffinity {
   key: string
@@ -122,6 +125,91 @@ export function resolveClaudeRoutingAffinity(
   if (!metadataRecord) return undefined
   const userMetadata = parseRoutingMetadataRecord(metadataRecord.user_id)
   return affinity(userMetadata?.session_id, "claude_metadata")
+}
+
+/**
+ * Droid sends no session header or client metadata. Its Responses
+ * `prompt_cache_key` is its session's cache identity: the session ID, which
+ * the app's forks, rewinds and side chats of that session keep. Other clients
+ * may share one cache key across conversations, so only Droid's names a
+ * session.
+ */
+export function resolveDroidRoutingAffinity(
+  headers: Headers,
+  promptCacheKey: unknown,
+): RoutingAffinity | undefined {
+  return isDroidRequest(headers) ?
+      affinity(promptCacheKey, "droid_session")
+    : undefined
+}
+
+/** JSON with sorted keys and without cache breakpoints, which Droid moves. */
+function canonicalPrefix(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonicalPrefix(item))
+  if (typeof value !== "object" || value === null) return value
+  const record = value as Record<string, unknown>
+  const canonical: Record<string, unknown> = {}
+  for (const key of Object.keys(record).sort()) {
+    if (key !== "cache_control") canonical[key] = canonicalPrefix(record[key])
+  }
+  return canonical
+}
+
+/** Text content as a block list, the form Droid uses with breakpoints. */
+function contentBlocks(content: unknown): unknown {
+  return typeof content === "string" ?
+      [{ type: "text", text: content }]
+    : content
+}
+
+function isRoutingRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/** The user messages before the first assistant message. */
+function firstUserTurn(messages: unknown): Array<unknown> | undefined {
+  if (!Array.isArray(messages)) return undefined
+  const turn: Array<unknown> = []
+  for (const message of messages) {
+    if (!isRoutingRecord(message) || message.role !== "user") break
+    turn.push(contentBlocks(message.content))
+  }
+  return turn.length > 0 ? turn : undefined
+}
+
+/**
+ * Droid's Messages requests carry no session identity, unlike its Responses
+ * requests. Every request of a session repeats the prefix Droid pins with
+ * cache breakpoints: the system prompt and the first user turn, which holds
+ * the session's start-up context and first prompt. A digest of that prefix,
+ * with the model family, names the session without retaining its content.
+ * Forks and side chats share it; a compaction rewrites it and so starts a
+ * new identity.
+ */
+export function resolveDroidMessagesRoutingAffinity(
+  headers: Headers,
+  payload: { model?: unknown; system?: unknown; messages?: unknown },
+): RoutingAffinity | undefined {
+  if (!isDroidRequest(headers)) return undefined
+  const turn = firstUserTurn(payload.messages)
+  if (!turn) return undefined
+  const family =
+    typeof payload.model === "string" ?
+      (/^[a-z]+/iu.exec(payload.model.trim())?.[0].toLowerCase() ?? "")
+    : ""
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify(
+        canonicalPrefix([
+          "copilot-api/droid-messages/v1",
+          family,
+          contentBlocks(payload.system ?? []),
+          turn,
+        ]),
+      ),
+    )
+    .digest("hex")
+  return { key: `droid-messages:${digest}`, source: "droid_session" }
 }
 
 export function resolveResponsesRoutingAffinity(
@@ -301,12 +389,18 @@ export function installRoutingAffinityFallback(
   state.affinity = fallback
 }
 
-export function installResponsesRoutingAffinity(clientMetadata: unknown): void {
+/**
+ * Install a Responses request's identity. `fallback` applies only when
+ * neither the headers nor the client metadata identify the conversation.
+ */
+export function installResponsesRoutingAffinity(
+  clientMetadata: unknown,
+  fallback?: RoutingAffinity,
+): void {
   const state = routingAffinityStorage.getStore()
   if (!state) return
-  const affinity = resolveResponsesRequestRoutingAffinity(
-    clientMetadata,
-    state.affinity,
-  )
+  const affinity =
+    resolveResponsesRequestRoutingAffinity(clientMetadata, state.affinity)
+    ?? fallback
   if (affinity) state.affinity = affinity
 }

@@ -81,6 +81,7 @@ import {
 import {
   installRoutingAffinityFallback,
   resolveClaudeRoutingAffinity,
+  resolveDroidMessagesRoutingAffinity,
 } from "~/lib/routing-affinity"
 import {
   createSentryChatSpanOptions,
@@ -283,7 +284,11 @@ export async function handleCompletion(c: Context) {
       modelProviderPreference: c.req.header("x-model-provider-preference"),
     })
   installRoutingAffinityFallback(
-    resolveClaudeRoutingAffinity(anthropicPayload.metadata),
+    resolveClaudeRoutingAffinity(anthropicPayload.metadata)
+      ?? resolveDroidMessagesRoutingAffinity(
+        c.req.raw.headers,
+        anthropicPayload,
+      ),
   )
   const conversationId = setSentryConversationIdFromRequest(c, anthropicPayload)
   logger.debug("Received Anthropic request", {

@@ -349,6 +349,31 @@ test("authenticated generation streams disable buffering without timeouts", asyn
   expect(messagesLocation).not.toContain("_timeout")
 })
 
+test("public nginx template forwards the exact doubled Messages paths", async () => {
+  const template = await read("sites-available/public-domain.conf.template")
+  const location = (route: string): string | undefined =>
+    template.match(
+      new RegExp(
+        `location = ${route.replaceAll("/", String.raw`\/`)} \\{([\\s\\S]*?)\\n {2}\\}`,
+      ),
+    )?.[1]
+  const messages = location("/v1/v1/messages")
+  const countTokens = location("/v1/v1/messages/count_tokens")
+
+  // Anthropic SDKs append /v1/messages to a ".../v1" base URL.
+  expect(messages).toBeDefined()
+  expect(messages).toContain("limit_except POST OPTIONS { deny all; }")
+  expect(messages).toContain("proxy_pass {{UPSTREAM_URL}};")
+  expect(messages).toContain("proxy_http_version 1.1;")
+  expect(messages).toContain("proxy_request_buffering off;")
+  expect(messages).toContain("proxy_buffering off;")
+  expect(messages).not.toContain("_timeout")
+  expect(countTokens).toBeDefined()
+  expect(countTokens).toContain("limit_except POST OPTIONS { deny all; }")
+  expect(countTokens).toContain("proxy_pass {{UPSTREAM_URL}};")
+  expect(template).not.toMatch(/location[^{\n]*\/v1\/v1\/(?!messages)/)
+})
+
 test("codex desktop /codex/responses location disables proxy buffering", async () => {
   const template = await read(
     "sites-available/codex-desktop-spoof.conf.template",

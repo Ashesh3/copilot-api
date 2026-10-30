@@ -4,8 +4,11 @@ import type {
   ManagedWebRequest,
   WebEvent,
 } from "./tool-loop"
+import type { FinishedStreamRound, StreamPosition } from "./tool-stream-events"
 import type { ManagedWebUsage } from "./tool-usage"
 
+import { lastRoundContextUsage, servesResponsesClient } from "./context-usage"
+import { finishDroidStreamRound, usesDroidCarriers } from "./droid-web-stream"
 import { isRecord, webToolError } from "./tool-context"
 import {
   checkWebContinuationLimit,
@@ -24,6 +27,7 @@ import {
   withoutUnexecutedManagedCalls,
   type CompletedWebCall,
 } from "./tool-output"
+import { eventFor, placeEvents, remap } from "./tool-stream-events"
 import { updateUsageSnapshot } from "./tool-usage-output"
 
 // Implemented protocol adapters retain ordinary text streaming and hold tool-call
@@ -46,6 +50,10 @@ export async function* streamManagedWebRequest(
   }
   let usage: Record<string, unknown> | undefined
   const allOutput: Array<Record<string, unknown>> = []
+  // Droid replays carriers, so its rounds may hand off to client tools.
+  const carriers = usesDroidCarriers(prepared)
+  const finish = carriers ? finishDroidStreamRound : finishStreamRound
+  const responsesClient = servesResponsesClient(prepared)
   for (let round = 0; round < MAX_MANAGED_WEB_ROUNDS; round++) {
     position.usage = usage
     position.output = allOutput
@@ -59,47 +67,24 @@ export async function* streamManagedWebRequest(
       round,
       position,
       observedUsage,
+      carriers,
+      // Droid and Codex size their context by the last round's input.
+      lastRoundContext: carriers || (round > 0 && responsesClient),
     })
     if (state.failed || (state.transparent && round === 0)) return
     const response = state.finish()
     usage = sumUsage(usage, response.usage)
-    const completed =
-      state.canReturnWithoutExecution(round) ?
-        []
-      : await completeWebCalls(options, prepared, response)
-    const visible = state.visibleResponse(response, completed)
-    const visibleOutput =
-      options.protocol === "responses" ? records(visible.output) : []
-    allOutput.push(...visibleOutput)
-    // Replay only genuine upstream items; helper output stays in private history.
-    for (const event of state.pendingEvents()) {
-      const parsed = JSON.parse(event.data ?? "{}") as Record<string, unknown>
-      yield remap(event, parsed, position)
-    }
-    position.offset += state.visibleSize(visible)
-    if (completed.length === 0) {
-      position.offset = 0
-      for (const event of state.terminalEvents(visible, usage, allOutput)) {
-        const parsed =
-          event.data === "[DONE]" ?
-            undefined
-          : (JSON.parse(event.data ?? "{}") as Record<string, unknown>)
-        yield parsed ? remap(event, parsed, position) : event
-      }
-      return
-    }
-    checkWebContinuationLimit(round)
-    const payload = continuationPayload(dispatch.processedPayload(), response, {
-      completed,
-      protocol: options.protocol,
+    const next = yield* finish(options, prepared, {
+      state,
+      response,
+      index: round,
+      position,
+      usage,
+      output: allOutput,
+      observedUsage,
+      dispatch,
     })
-    observedUsage.nextRound()
-    const next = await dispatch.send(payload)
-    if (!isWebStream(next))
-      throw webToolError(
-        "web_tool_protocol_error",
-        "Expected streaming tool continuation.",
-      )
+    if (!next) return
     source = next
   }
   throw webToolError(
@@ -108,13 +93,46 @@ export async function* streamManagedWebRequest(
   )
 }
 
-interface StreamPosition {
-  protocol: WebProtocol
-  offset: number
-  sequence: number
-  id?: unknown
-  usage?: Record<string, unknown>
-  output?: Array<Record<string, unknown>>
+/** Answer a round's managed calls privately; return the continuation stream. */
+async function* finishStreamRound(
+  options: ManagedWebRequest,
+  prepared: PreparedManagedWebTools,
+  round: FinishedStreamRound<RoundState>,
+): AsyncGenerator<WebEvent, AsyncIterable<WebEvent> | undefined> {
+  const { state, response, position, output } = round
+  const completed =
+    state.canReturnWithoutExecution(round.index) ?
+      []
+    : await completeWebCalls(options, prepared, response)
+  const visible = state.visibleResponse(response, completed)
+  if (options.protocol === "responses") output.push(...records(visible.output))
+  // Replay only genuine upstream items; helper output stays in private history.
+  yield* placeEvents(state.pendingEvents(), position)
+  position.offset += state.visibleSize(visible)
+  if (completed.length === 0) {
+    position.offset = 0
+    // Codex sizes its context by the reported input; accounting keeps totals.
+    const usage =
+      round.index > 0 && servesResponsesClient(prepared) ?
+        lastRoundContextUsage(response.usage, round.usage, options.protocol)
+      : round.usage
+    yield* placeEvents(state.terminalEvents(visible, usage, output), position)
+    return undefined
+  }
+  checkWebContinuationLimit(round.index)
+  const payload = continuationPayload(
+    round.dispatch.processedPayload(),
+    response,
+    { completed, protocol: options.protocol },
+  )
+  round.observedUsage.nextRound()
+  const next = await round.dispatch.send(payload)
+  if (!isWebStream(next))
+    throw webToolError(
+      "web_tool_protocol_error",
+      "Expected streaming tool continuation.",
+    )
+  return next
 }
 
 function repeatedStart(
@@ -146,6 +164,8 @@ async function* consumeRound(
     round: number
     position: StreamPosition
     observedUsage: ManagedWebUsage
+    carriers: boolean
+    lastRoundContext: boolean
   },
 ): AsyncGenerator<WebEvent> {
   const { source, round, position } = input
@@ -158,7 +178,8 @@ async function* consumeRound(
     }
     const parsed = state.accept(event)
     input.observedUsage.observe(state.observedUsage, state.intercepted)
-    if (round > 0 && parsed) state.assertPrivateContinuation(parsed)
+    if (round > 0 && parsed && !input.carriers)
+      state.assertPrivateContinuation(parsed)
     if (!parsed) {
       if (state.done) break
       if (event.data && event.data !== "[DONE]") yield event
@@ -166,7 +187,13 @@ async function* consumeRound(
     }
     if (state.failed) {
       if (state.transparent && round === 0) yield event
-      else yield* failedRoundEvents(state, { event, parsed, position })
+      else
+        yield* failedRoundEvents(state, {
+          event,
+          parsed,
+          position,
+          lastRoundContext: input.lastRoundContext,
+        })
       return
     }
     if (repeatedStart(parsed, round, position)) continue
@@ -194,6 +221,7 @@ function* failedRoundEvents(
     event: WebEvent
     parsed: Record<string, unknown>
     position: StreamPosition
+    lastRoundContext: boolean
   },
 ): Generator<WebEvent> {
   const { event, parsed, position } = input
@@ -212,36 +240,20 @@ function* failedRoundEvents(
       )
     }
     const output = [...(position.output ?? []), ...records(visible.output)]
+    const usage = sumUsage(position.usage, response.usage)
     parsed.response = {
       ...visible,
       output,
       output_text: responseOutputText(output),
-      usage: sumUsage(position.usage, response.usage),
+      usage:
+        input.lastRoundContext ?
+          lastRoundContextUsage(response.usage, usage, position.protocol)
+        : usage,
     }
   }
   yield remap(event, parsed, position)
 }
 
-function remap(
-  event: WebEvent,
-  parsed: Record<string, unknown>,
-  position: StreamPosition,
-): WebEvent {
-  const { offset, id, protocol } = position
-  const output = { ...parsed }
-  if (typeof output.index === "number") output.index += offset
-  if (typeof output.output_index === "number") output.output_index += offset
-  if (protocol === "responses") {
-    output.sequence_number = position.sequence++
-    if (isRecord(output.response) && id)
-      output.response = { ...output.response, id }
-  }
-  if (protocol === "chat" && id) output.id = id
-  return { ...event, data: JSON.stringify(output) }
-}
-function eventFor(type: string, body: Record<string, unknown>): WebEvent {
-  return { event: type, data: JSON.stringify({ ...body, type }) }
-}
 function textValue(value: unknown): string {
   return typeof value === "string" ? value : ""
 }

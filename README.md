@@ -168,10 +168,23 @@ parse, or cache them, and has no local-fetch fallback.**
   so later turns lose the search results and the reasoning that followed them.
   Hosted `web_search` offered without client tools runs through the gateway
   there, instead of reaching the client as a function call it cannot run.
+- Factory Droid's own `WebSearch` and `FetchUrl` tools run through the gateway
+  in the same way, with visible narration and a replayable carrier; see
+  [Factory Droid](#factory-droid).
 - Observed model usage is retained across managed rounds, including cancelled
   HTTP streams and WebSocket turns. Failed Responses usage is excluded, while
   completed rounds remain counted; invalid counts retain known subtotals and
   mark an accounting gap instead of becoming measured zero usage.
+- A Responses client such as Codex sizes its context by a response's input
+  tokens. A response with gateway-run rounds therefore reports the last
+  round's input-side tokens, whose prompt holds the earlier rounds, with the
+  output of every round, on native Responses as on a Messages or Chat
+  fallback. Request accounting and the dashboard still count every round.
+  Hosted search that the gateway runs for a Chat-only model follows the same
+  rule.
+- When the gateway runs the hosted search tool of a Messages, Chat or Google
+  client, such as Claude Code's `web_search`, the client sees the final
+  round's usage, and request accounting counts every round.
 
 This feature adds no standalone `web_fetch` implementation. Existing caller
 server-tool declarations still pass through subject to upstream support. Page
@@ -718,9 +731,10 @@ assignments with their eligible weighted targets separately from request counts.
 Conversation ownership is stored permanently in SQLite using a compact 32-byte
 identity digest, stable account ID and last admitted model. Percentage edits and
 restarts do not move recorded conversations, including Codex forks that share their parent's account
-affinity. Recognized Claude, Copilot and Codex session/thread identifiers are
-supported; without a stable identifier, the existing first-eligible default
-remains. Existing equal hashing continues until the first percentage save, while
+affinity. Recognized Claude, Copilot and Codex session/thread identifiers and
+[Factory Droid](#factory-droid) sessions are supported; without a stable
+identifier, the existing first-eligible default remains. Existing equal hashing
+continues until the first percentage save, while
 observed assignments are recorded. Dormant conversations never observed by this
 version cannot be distinguished from new ones at activation.
 
@@ -1055,6 +1069,122 @@ credential-authenticated.
 Advanced TLS and proxy templates live under `nginx/`, including WebSocket
 upgrade headers and disabled response buffering without project-defined
 request pacing, body caps, or proxy timeouts.
+
+### Factory Droid
+
+Droid (the CLI and the Factory desktop app) uses the gateway as BYOK custom
+models in `~/.factory/settings.json`. Use the `openai` provider for GPT models,
+which Droid calls over Responses, and the `anthropic` provider for Claude
+models, which it calls over Messages:
+
+```json
+{
+  "customModels": [
+    {
+      "model": "gpt-6.1-sol",
+      "provider": "openai",
+      "baseUrl": "https://copilot.example.com/v1",
+      "apiKey": "replace-with-gateway-key"
+    },
+    {
+      "model": "claude-opus-5.5",
+      "provider": "anthropic",
+      "baseUrl": "https://copilot.example.com",
+      "apiKey": "replace-with-gateway-key"
+    }
+  ]
+}
+```
+
+Droid appends `/responses` to an `openai` base URL and `/v1/messages` to an
+`anthropic` one. It names the models `custom:<model>-<index>`, for example
+`custom:gpt-6.1-sol-0`, in the model picker and in mission settings.
+An `anthropic` base URL that ends in `/v1` also works: the gateway serves
+`/v1/v1/messages` and `/v1/v1/messages/count_tokens` as the Messages routes
+(the public nginx template publishes those two exact paths), so one base URL
+can be shared by both providers.
+
+- Set `maxContextLimit` on each model to the model's prompt limit from
+  `GET /v1/models` (`capabilities.limits.max_prompt_tokens`), so Droid compacts
+  before Copilot refuses the prompt. If Copilot refuses one anyway, the
+  gateway answers with the overflow error Droid compacts on
+  (`context_length_exceeded` over Responses, "prompt is too long" over
+  Messages).
+- Leave `authMode`, `enableThinking` and `thinkingMaxTokens` unset. Droid's
+  reasoning effort, including `max`, reaches Copilot as sent; GPT reasoning
+  state and Claude thinking are replayed on later turns.
+- When a session switches between Claude models, or moves to another account,
+  Claude thinking that the new model or account cannot verify is sent as text
+  instead of being dropped; thinking it can verify stays signed.
+
+**Accounts and missions.** Droid sends no session header, so the gateway names
+each Droid session itself and keeps it on one account that serves its model,
+as for other identified conversations. Over Responses the identity is Droid's
+`prompt_cache_key`, which is the session ID. Over Messages it is a digest of
+the system prompt and the session's first user turn, which Droid repeats on
+every request; the gateway keeps only the digest. Forks, rewinds and side
+chats in the app stay with their parent. A new identity starts when a
+compaction rewrites the first turn of a Messages session, and for
+`droid exec --fork` with the `openai` provider. Mission workers, validators
+and their subagents are separate sessions, spread across the eligible
+accounts. A session whose account is removed or stops serving its model gets
+an explicit continuity error rather than moving; start a new session or
+restore the account.
+
+**Web search and page reading.** Droid's built-in `WebSearch` and `FetchUrl`
+normally run on Factory's servers. When a Droid model calls them through the
+gateway, the gateway runs them instead: GitHub's Copilot web search answers
+searches and GitHub's hosted browser reads pages, as for other clients. This
+needs no configuration. Droid shows each call as a line in the transcript, for
+example `Searching the web (copilot-api): "bun 1.4" → sources: bun.sh`. The
+calls and their results come back inside an opaque reasoning item (Responses)
+or thinking block (Messages) that Droid stores and sends back. The gateway
+turns it back into the exact tool calls and results on every later request, so
+the model keeps its evidence and its reasoning stays valid.
+
+- This applies to models that Droid reaches on their native protocol: GPT models
+  through the `openai` provider and Claude models through the `anthropic`
+  provider. With other combinations, or the `generic-chat-completion-api`
+  provider, Droid keeps running its own tools.
+- Each response may run eight searches and eight page reads. Results are
+  model-extracted content, not raw HTML. Local and private addresses and links
+  that Droid would open through Factory connectors cannot be read; the model
+  gets a clear error for them.
+- GitHub, not your machine, opens the pages, so Droid's sandbox network prompt
+  does not apply to these calls. Page reads use Copilot quota.
+- The hosted `web_search` tool is not added to Droid's tool-using Responses
+  requests, because Droid does not display hosted search results.
+- Droid treats a response's input and cache tokens as its context size and
+  compacts by it. A response with gateway-run rounds therefore reports the last
+  round's input-side tokens, whose prompt holds the earlier rounds, together
+  with the output of every round. Request accounting and the dashboard still
+  count every round's tokens.
+- Switching a session to another provider drops the stored results, as Droid
+  does with any provider's reasoning.
+
+**Images.** Droid's `GenerateImage` tool always uses Factory's image models and
+Factory billing; Droid cannot point it at a custom endpoint. To use Copilot's
+image models, give Droid a skill that calls the gateway's
+[Images API](#openai-compatible-clients). For example, with `COPILOT_API_BASE`
+and `COPILOT_API_KEY` set in Droid's environment, save this as
+`~/.factory/skills/copilot-images/SKILL.md`:
+
+````md
+---
+name: copilot-images
+description: Generate an image with Copilot's image models through copilot-api.
+---
+Write a detailed prompt, then run (PowerShell):
+
+```powershell
+$body = @{ model = "gpt-image-2.5-sunburst"; prompt = "<prompt>"; size = "1024x1024" } | ConvertTo-Json
+$r = Invoke-RestMethod -Method Post -Uri "$env:COPILOT_API_BASE/v1/images/generations" `
+  -Headers @{ Authorization = "Bearer $env:COPILOT_API_KEY" } -ContentType "application/json" -Body $body
+[IO.File]::WriteAllBytes("<file>.png", [Convert]::FromBase64String($r.data[0].b64_json))
+```
+
+Report the saved path. For edits, post the image to `/v1/images/edits`.
+````
 
 ## CLI reference
 

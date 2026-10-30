@@ -31,6 +31,7 @@ import {
 } from "~/services/copilot/mcp-web-search"
 import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
 import { assertNoClientWebCalls } from "~/services/web/tool-output"
+import { SearchLoopUsage } from "~/services/web/tool-usage"
 
 import {
   type AnthropicResponse,
@@ -125,10 +126,13 @@ export const resolveWebSearchCalls = async (
     readChatWebSearchMaxUses(payload),
     maxUses,
   )
+  // The client sees the final round; request accounting counts every round.
+  const rounds = new SearchLoopUsage("chat")
 
   while (true) {
     iteration += 1
     const webSearchCalls = extractWebSearchCalls(current)
+    rounds.round(current, webSearchCalls.length)
     if (webSearchCalls.length > 0 || iteration > 1)
       assertNoClientWebCalls(
         current as unknown as Record<string, unknown>,
@@ -171,6 +175,7 @@ export const resolveWebSearchCalls = async (
       tool_choice: "auto",
     }
 
+    rounds.next()
     current = await Sentry.startSpan(
       createSentryChatSpanOptions({
         inputMessages: currentPayload.messages,
@@ -221,6 +226,8 @@ export const resolveResponsesWebSearchCalls = async (
     readResponsesWebSearchMaxUses(payload),
     requestOptions.maxUses,
   )
+  // The client sees the final round; request accounting counts every round.
+  const rounds = new SearchLoopUsage("responses")
 
   while (true) {
     iteration += 1
@@ -230,6 +237,7 @@ export const resolveResponsesWebSearchCalls = async (
         && !item.namespace
         && item.name === "web_search",
     )
+    rounds.round(current, webSearchCalls.length)
     if (webSearchCalls.length > 0 || iteration > 1)
       assertNoClientWebCalls(
         current as unknown as Record<string, unknown>,
@@ -277,6 +285,7 @@ export const resolveResponsesWebSearchCalls = async (
       stream: false,
       tool_choice: "auto",
     }
+    rounds.next()
     current = await Sentry.startSpan(
       createSentryChatSpanOptions({
         inputMessages: stringifyResponsesInput(currentPayload.input),

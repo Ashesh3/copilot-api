@@ -528,6 +528,20 @@ temperature/top-p, or invalid thinking signatures. Unknown validation failures,
 WebSocket sends, and continuations after output are never compatibility-retried;
 the final attempt alone owns any failure body.
 
+Copilot rejects Claude thinking that another model signed, as after a
+conversation switches Claude models, and signatures are scoped to the provider
+deployment that served them, so a pool that moves a conversation to another
+account can also see them rejected. Factory Droid keeps signed thinking across
+both moves. The gateway records which model and account produced each thinking
+signature it relays (digests only, in memory, bounded). The invalid-signature
+retry keeps the blocks the requested model signed on the answering account and
+rewrites the others as `<thinking>` text, the form Droid itself uses for
+thinking it cannot replay; redacted thinking from another source has no
+readable form and is omitted. If that source signed every block, all readable
+thinking becomes text. After a retry that rewrote another model's thinking
+succeeds, later sends rewrite that model pair's thinking before dispatch, so
+the conversation does not fail once on every turn.
+
 The Responses WebSocket accepts JSON text frames with
 `type: "response.create"` or `type: "response.interrupt"`. Binary frames, invalid
 JSON, unsupported message types, and invalid initiators receive recoverable

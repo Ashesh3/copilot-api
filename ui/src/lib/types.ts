@@ -325,6 +325,7 @@ export interface RoutingAffinitySources {
   claude_metadata: number
   codex_metadata: number
   codex_thread: number
+  droid_session: number
   unidentified: number
 }
 

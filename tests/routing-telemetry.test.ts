@@ -249,6 +249,7 @@ test("aggregates fixed routing affinity sources without retaining raw keys", () 
     "claude_metadata",
     "codex_metadata",
     "codex_thread",
+    "droid_session",
   ] as const
   for (const [index, affinitySource] of sources.entries()) {
     recordRoutingSelection({
@@ -288,6 +289,7 @@ test("aggregates fixed routing affinity sources without retaining raw keys", () 
     claude_metadata: 1,
     codex_metadata: 1,
     codex_thread: 1,
+    droid_session: 1,
     unidentified: 1,
   })
   expect(Object.keys(snapshot.affinitySources).sort()).toEqual(
@@ -336,6 +338,7 @@ test("windows, prunes, resets, and bounds affinity source counters", () => {
     claude_metadata: 0,
     codex_metadata: 0,
     codex_thread: 0,
+    droid_session: 0,
     unidentified: 1,
   })
 
@@ -354,6 +357,7 @@ test("windows, prunes, resets, and bounds affinity source counters", () => {
     claude_metadata: 0,
     codex_metadata: 0,
     codex_thread: 0,
+    droid_session: 0,
     unidentified: 0,
   })
 })
@@ -404,6 +408,7 @@ test("aligns affinity source counters with selection modes", () => {
     claude_metadata: 0,
     codex_metadata: 0,
     codex_thread: 0,
+    droid_session: 0,
     unidentified: 3,
   })
 })

@@ -29,6 +29,7 @@ import {
   isAnthropicToolResultBlock,
   isAnthropicToolUseBlock,
 } from "~/routes/messages/anthropic-types"
+import { expandDroidMessagesCarriers } from "~/services/web/droid-web-protocol"
 
 import {
   type AnthropicRequestHeaders,
@@ -1040,6 +1041,8 @@ export function prepareAnthropicMessagesRequest(options: {
   const body = cloneAnthropicMessagesBody(options.payload)
   if (body.max_tokens === null) deleteOwnField(body, "max_tokens")
   validateAnthropicMessagesPayload(body)
+  // Droid replays gateway-run web calls as carriers; restore the real turns.
+  body.messages = expandDroidMessagesCarriers(body.messages)
   const messageControlsNormalized = normalizeMessageOutputControls(body)
   normalizeOptionalPayloadFields(body)
   const normalizationClasses: Array<CopilotContractNormalizationClass> = []

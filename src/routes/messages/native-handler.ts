@@ -49,6 +49,7 @@ import {
 import { createRetryBudget } from "~/services/copilot/transport-retry"
 import { isCallerOwnedWebSearch } from "~/services/web/tool-context"
 import { assertNoClientWebCalls } from "~/services/web/tool-output"
+import { SearchLoopUsage } from "~/services/web/tool-usage"
 
 import {
   type AnthropicErrorEvent,
@@ -658,6 +659,8 @@ export async function resolveNativeWebSearch(
       ?? MAX_NATIVE_WEB_SEARCH_USES,
   )
   let searchUses = 0
+  // The client sees the final round; request accounting counts every round.
+  const rounds = new SearchLoopUsage("messages")
 
   while (true) {
     iteration += 1
@@ -676,6 +679,7 @@ export async function resolveNativeWebSearch(
         && block.name === "web_search"
         && !isCallerOwnedWebSearch("web_search"),
     )
+    rounds.round(response, calls.length)
     if (calls.length > 0 || searchUses > 0)
       assertNoClientWebCalls(
         response as unknown as Record<string, unknown>,
@@ -718,6 +722,7 @@ export async function resolveNativeWebSearch(
         { role: "user", content: results },
       ],
     }
+    rounds.next()
   }
 }
 
