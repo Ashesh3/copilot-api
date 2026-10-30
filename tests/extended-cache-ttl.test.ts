@@ -41,6 +41,12 @@ test("leaves cache_control inside tool inputs and schemas alone", () => {
         input_schema: { type: "object", properties: { note: toolData } },
       },
     ],
+    output_config: {
+      format: {
+        type: "json_schema",
+        schema: { type: "object", default: toolData },
+      },
+    },
     messages: [
       {
         role: "assistant",

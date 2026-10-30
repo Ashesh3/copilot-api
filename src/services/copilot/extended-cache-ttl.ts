@@ -8,8 +8,9 @@
 const DEFAULT_CACHE_TTL = "5m"
 const MAX_CACHE_CONTROL_DEPTH = 16
 const REFUSAL_MEMORY_MS = 60 * 60 * 1000
-// Tool inputs and schemas are data the client sent, not request controls.
-const DATA_KEYS = new Set(["input", "input_schema"])
+// Tool inputs, tool schemas and structured-output schemas are data the client
+// sent, not request controls.
+const DATA_KEYS = new Set(["input", "input_schema", "schema"])
 
 // When each refusing account scope (see copilotAccountScope) may ask again.
 const refusalExpiry = new Map<string, number>()
