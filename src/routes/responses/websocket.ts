@@ -205,6 +205,8 @@ export interface WebSocketErrorFrameOptions {
   code: string
   message: string
   status: number
+  /** Response headers the client acts on, such as `retry-after`. */
+  headers?: Record<string, string>
   param?: string
   requestId?: string
   type?: string
@@ -2240,6 +2242,7 @@ export function sendWebSocketError(
     JSON.stringify({
       type: "error",
       status: options.status,
+      ...(options.headers ? { headers: options.headers } : {}),
       error: {
         code: options.code,
         message: options.message,
@@ -2270,11 +2273,13 @@ function normalizeWebSocketError(
       type: error.errorType,
     }
   }
+  const headers = retryHeaders(inspection)
   if (inspection?.localError) {
     const local = inspection.localError
     const code = mapLocalWebSocketErrorCode(local, inspection.status)
     return {
       code,
+      ...headers,
       message: local.message,
       ...(local.param ? { param: local.param } : {}),
       status: inspection.status,
@@ -2286,6 +2291,7 @@ function normalizeWebSocketError(
       code:
         inspection.clientError?.code
         ?? mapHttpStatusToWebSocketErrorCode(inspection.status),
+      ...headers,
       message: "Upstream request failed",
       status: inspection.status,
       type: "websocket_error",
@@ -2298,6 +2304,7 @@ function normalizeWebSocketError(
   if (inspection) {
     return {
       code: mapHttpStatusToWebSocketErrorCode(inspection.status),
+      ...headers,
       message: "Upstream request failed",
       status: inspection.status,
       type: "websocket_error",
@@ -2310,6 +2317,15 @@ function normalizeWebSocketError(
     status: 500,
     type: "websocket_error",
   }
+}
+
+// Codex waits out a frame's `retry-after` before it retries; without one it
+// treats a rate limit as final.
+function retryHeaders(inspection: HttpErrorInspection | undefined): {
+  headers?: Record<string, string>
+} {
+  const retryAfter = inspection?.responseHeaders["retry-after"]
+  return retryAfter ? { headers: { "retry-after": retryAfter } } : {}
 }
 
 function mapLocalWebSocketErrorCode(

@@ -5008,6 +5008,35 @@ describe("responses websocket upstream handling", () => {
     expect(otherFrame.type).toBe("error")
   })
 
+  test("passes retry-after on a rate-limited WebSocket error frame", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    queuedResponses.push(rateLimitedResponse("0"), rateLimitedResponse("17"))
+    const ws = createTestWebSocket()
+
+    await seedProtocolDatabase().then(() =>
+      responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [],
+          tools: [],
+        }),
+      ),
+    )
+
+    const errorFrame = JSON.parse(ws.sent.at(-1) ?? "{}") as {
+      headers?: Record<string, string>
+      status?: number
+      type?: string
+    }
+    expect(errorFrame.type).toBe("error")
+    expect(errorFrame.status).toBe(429)
+    expect(errorFrame.headers).toEqual({ "retry-after": "17" })
+  })
+
   test("emits one Responses failure family when a native source ends after a delta", async () => {
     state.models = responsesCapableModels
     queuedResponses.push(
@@ -6162,6 +6191,13 @@ function continueTurnFrame(clientMetadata?: Record<string, string>): string {
     ],
     tools: [],
   })
+}
+
+function rateLimitedResponse(retryAfter: string): Response {
+  return Response.json(
+    { error: { code: "rate_limited", message: "Rate limited" } },
+    { status: 429, headers: { "retry-after": retryAfter } },
+  )
 }
 
 function createResponsesSseResponse(
