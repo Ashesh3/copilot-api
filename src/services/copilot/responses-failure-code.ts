@@ -1,13 +1,19 @@
 import type { HttpErrorInspection } from "~/lib/error"
 
+import { HTTP_TOO_MANY_REQUESTS_STATUS } from "~/lib/error"
+
 import {
   readContextOverflow,
   readContextOverflowText,
 } from "./context-overflow"
 
-const TOO_MANY_REQUESTS = 429
 // Rate limits, timeouts and conflicts may pass; other client errors repeat.
-const TRANSIENT_CLIENT_STATUSES = new Set([408, 409, 425, TOO_MANY_REQUESTS])
+const TRANSIENT_CLIENT_STATUSES = new Set([
+  408,
+  409,
+  425,
+  HTTP_TOO_MANY_REQUESTS_STATUS,
+])
 
 function isContextOverflow(inspection: HttpErrorInspection): boolean {
   if (inspection.kind === "upstream") {
@@ -39,7 +45,7 @@ export function classifyResponsesFailure(
 ): string {
   const { status } = inspection
   if (isContextOverflow(inspection)) return "context_length_exceeded"
-  if (status === TOO_MANY_REQUESTS) return "rate_limit_exceeded"
+  if (status === HTTP_TOO_MANY_REQUESTS_STATUS) return "rate_limit_exceeded"
   if (status >= 400 && status < 500 && !TRANSIENT_CLIENT_STATUSES.has(status)) {
     return "invalid_prompt"
   }
