@@ -37,7 +37,7 @@ function signatureFingerprints(block: Record<string, unknown>): Array<string> {
   )
   if (block.type === "redacted_thinking" && typeof block.data === "string")
     values.push(block.data)
-  // The existing Chat bridge places reasoning_opaque in the Responses item ID.
+  // Earlier Chat-served turns kept reasoning_opaque in the Responses item ID.
   if (
     block.type === "reasoning"
     && typeof block.id === "string"

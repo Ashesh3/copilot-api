@@ -11,6 +11,7 @@ import {
   REQUEST_SNAPSHOT_MAX_ARRAY_LENGTH,
   snapshotRequestPlainDataRecord,
 } from "~/lib/plain-data-snapshot"
+import { isChatReasoningEnvelope } from "~/routes/responses/chat-reasoning-provenance"
 import { ANTHROPIC_REASONING_ENVELOPE_PREFIX } from "~/routes/responses/messages-reasoning-provenance"
 import { withoutLegacyWebResults } from "~/services/web/legacy-history"
 
@@ -177,6 +178,7 @@ export function finalizeNativeResponsesRequest(
   return { body, normalizationClasses }
 }
 
+/** Gateway envelopes hold another provider's reasoning, never Copilot state. */
 function stripForeignReasoningEnvelopes(body: ResponsesWireBody): void {
   if (!Array.isArray(body.input)) return
   for (const item of body.input) {
@@ -184,7 +186,8 @@ function stripForeignReasoningEnvelopes(body: ResponsesWireBody): void {
       item.type === "reasoning"
       && "encrypted_content" in item
       && typeof item.encrypted_content === "string"
-      && item.encrypted_content.startsWith(ANTHROPIC_REASONING_ENVELOPE_PREFIX)
+      && (item.encrypted_content.startsWith(ANTHROPIC_REASONING_ENVELOPE_PREFIX)
+        || isChatReasoningEnvelope(item.encrypted_content))
     ) {
       Reflect.deleteProperty(item, "encrypted_content")
     }

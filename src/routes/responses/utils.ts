@@ -6,6 +6,7 @@ import type {
 
 import { isModelFallbackActive } from "~/lib/model-fallback"
 
+import { isChatReasoningEnvelope } from "./chat-reasoning-provenance"
 import {
   ANTHROPIC_REASONING_ENVELOPE_PREFIX,
   decodeAnthropicReasoningEnvelope,
@@ -114,8 +115,8 @@ const isReplayableReasoningState = (value: unknown, model: string): boolean => {
 
 /**
  * Only native Responses can use Copilot reasoning state. Translated routes
- * drop it from their own copy of the history and keep bridge-owned Claude
- * state; model fallback keeps it for providers that accept it.
+ * drop it from their own copy of the history and keep gateway-owned Claude
+ * and Chat state; model fallback keeps it for providers that accept it.
  */
 export const omitCopilotReasoningState = (payload: {
   input?: unknown
@@ -130,6 +131,7 @@ export const omitCopilotReasoningState = (payload: {
       && !record.encrypted_content.startsWith(
         ANTHROPIC_REASONING_ENVELOPE_PREFIX,
       )
+      && !isChatReasoningEnvelope(record.encrypted_content)
     ) {
       Reflect.deleteProperty(record, "encrypted_content")
     }

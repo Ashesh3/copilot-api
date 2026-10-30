@@ -13,6 +13,7 @@ import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
 import { setSsePreflushDeadlineForTest } from "~/lib/sse-lifecycle"
 import { state } from "~/lib/state"
+import { readChatReasoningEnvelope } from "~/routes/responses/chat-reasoning-provenance"
 import { server } from "~/server"
 
 import {
@@ -589,8 +590,10 @@ test("Responses translated to Chat preserves target signed reasoning on the next
     output: Array<Record<string, unknown>>
   }
   const reasoning = body.output.find((item) => item.type === "reasoning")
-  expect(reasoning).toMatchObject({
-    id: "fallback-opaque",
+  expect(reasoning?.id).toMatch(/^rs_chat_\d+$/)
+  expect(readChatReasoningEnvelope(reasoning?.encrypted_content)).toEqual({
+    model: "target-model",
+    reasoning_opaque: "fallback-opaque",
     encrypted_content: "fallback-encrypted",
   })
   const next = await post("/v1/responses", {
@@ -629,9 +632,12 @@ test("Responses streaming through Chat emits signed reasoning and preserves the 
   }
   const reasoning = result.output.find((item) => item.type === "reasoning")
   expect(reasoning).toMatchObject({
-    id: "fallback-opaque",
     type: "reasoning",
     summary: [{ type: "summary_text", text: "fallback thinking" }],
+  })
+  expect(readChatReasoningEnvelope(reasoning?.encrypted_content)).toEqual({
+    model: "target-model",
+    reasoning_opaque: "fallback-opaque",
   })
   expect(
     frames
@@ -647,6 +653,44 @@ test("Responses streaming through Chat emits signed reasoning and preserves the 
   expect(next.status).toBe(200)
   expect(JSON.stringify(calls[2].body)).toContain(
     '"reasoning_opaque":"fallback-opaque"',
+  )
+})
+
+test("Responses through a Chat fallback never reads reasoning state from an item ID", async () => {
+  const first = await post("/v1/responses", {
+    model: "source-model",
+    input: "hello",
+  })
+  expect(first.status).toBe(200)
+  await first.text()
+
+  const next = await post("/v1/responses", {
+    model: "source-model",
+    input: [
+      { role: "user", content: "hello" },
+      {
+        type: "reasoning",
+        id: "c2lnbmF0dXJlLWluLWFuLWlk",
+        summary: [{ type: "summary_text", text: "Earlier thinking." }],
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "fallback answer" }],
+      },
+      { role: "user", content: "continue" },
+    ],
+  })
+
+  expect(next.status).toBe(200)
+  expect(calls.map((call) => call.body.model)).toEqual([
+    "source-model",
+    "target-model",
+    "target-model",
+  ])
+  expect(JSON.stringify(calls[2].body)).toContain("Earlier thinking.")
+  expect(JSON.stringify(calls[2].body)).not.toContain(
+    "c2lnbmF0dXJlLWluLWFuLWlk",
   )
 })
 

@@ -3,6 +3,7 @@ import { afterAll, expect, test } from "bun:test"
 import type { ResponsesPayload } from "../src/services/copilot/create-responses"
 
 import { setModelSettingsForTest } from "../src/lib/model-settings"
+import { encodeChatReasoningEnvelope } from "../src/routes/responses/chat-reasoning-provenance"
 import { encodeAnthropicReasoningEnvelope } from "../src/routes/responses/messages-reasoning-provenance"
 import { expandCompactionItems } from "../src/routes/responses/utils"
 import {
@@ -104,6 +105,35 @@ test("strips bridge-owned Claude envelopes from the native Responses candidate",
   expect(candidate.body).toHaveProperty(
     "input.0.summary.0.text",
     "Visible reasoning stays available.",
+  )
+  expect(source).toHaveProperty("input.0.encrypted_content", encrypted)
+})
+
+test("strips gateway-owned Chat reasoning from the native Responses candidate", () => {
+  const encrypted = encodeChatReasoningEnvelope("chat-only-model", {
+    reasoning_opaque: "chat-reasoning-state",
+  })
+  const source: ResponsesPayload = {
+    model: "gpt-5.5",
+    input: [
+      {
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Chat model reasoning." }],
+        encrypted_content: encrypted,
+      },
+    ],
+  }
+
+  expandCompactionItems(source)
+  const candidate = finalizeNativeResponsesRequest(
+    prepareResponsesRequest(source),
+    { model: "gpt-5.5", implicitDefault: false },
+  )
+
+  expect(candidate.body).not.toHaveProperty("input.0.encrypted_content")
+  expect(candidate.body).toHaveProperty(
+    "input.0.summary.0.text",
+    "Chat model reasoning.",
   )
   expect(source).toHaveProperty("input.0.encrypted_content", encrypted)
 })

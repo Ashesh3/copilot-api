@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
 
+import { encodeChatReasoningEnvelope } from "~/routes/responses/chat-reasoning-provenance"
 import { adaptResponsesToChatCandidate } from "~/routes/responses/responses-chat-adapter"
 import { COMPACTION_PAYLOAD_MAX_BYTES } from "~/services/copilot/compaction-payload"
 
@@ -340,5 +341,104 @@ describe("Responses Chat fallback candidate", () => {
     expect(JSON.stringify(candidate.payload)).toContain("before")
     expect(JSON.stringify(candidate.payload)).toContain("after")
     expect(JSON.stringify(candidate.payload)).not.toContain(marker)
+  })
+})
+
+const READ_CALL = {
+  id: "call_read",
+  type: "function" as const,
+  function: { name: "read", arguments: "{}" },
+}
+
+function reasoningTurn(model: string, encrypted: string | undefined) {
+  return {
+    model,
+    input: [
+      { type: "message", role: "user", content: "Fix it." },
+      {
+        id: "rs_chat_1",
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Checked the file." }],
+        ...(encrypted ? { encrypted_content: encrypted } : {}),
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Reading it." }],
+      },
+      {
+        type: "function_call",
+        call_id: "call_read",
+        name: "read",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_read",
+        output: "contents",
+      },
+    ],
+    tools: [
+      {
+        type: "function",
+        name: "read",
+        parameters: { type: "object", properties: {} },
+      },
+    ],
+  }
+}
+
+describe("Chat reasoning state replay", () => {
+  test("returns a model's own state with the text and calls it produced", async () => {
+    const encrypted = encodeChatReasoningEnvelope("chat-only", {
+      reasoning_opaque: "opaque-state",
+    })
+
+    const candidate = await adaptResponsesToChatCandidate({
+      source: reasoningTurn("chat-only", encrypted),
+    })
+
+    expect(candidate.payload.messages).toEqual([
+      { role: "user", content: "Fix it." },
+      {
+        role: "assistant",
+        content: "Reading it.",
+        reasoning_text: "Checked the file.",
+        reasoning_opaque: "opaque-state",
+        tool_calls: [READ_CALL],
+      },
+      { role: "tool", tool_call_id: "call_read", content: "contents" },
+    ])
+  })
+
+  test("gives another model only the reasoning summary", async () => {
+    const encrypted = encodeChatReasoningEnvelope("chat-only", {
+      reasoning_opaque: "opaque-state",
+    })
+
+    const candidate = await adaptResponsesToChatCandidate({
+      source: reasoningTurn("other-chat", encrypted),
+    })
+
+    const serialized = JSON.stringify(candidate.payload.messages)
+    expect(serialized).toContain("Checked the file.")
+    expect(serialized).not.toContain("opaque-state")
+    expect(serialized).not.toContain("capi_chat_v1:")
+    expect(serialized).not.toContain("reasoning_")
+  })
+
+  test("does not replay a model's own reasoning that carries no state", async () => {
+    const encrypted = encodeChatReasoningEnvelope("chat-only", {})
+
+    const candidate = await adaptResponsesToChatCandidate({
+      source: reasoningTurn("chat-only", encrypted),
+    })
+
+    expect(candidate.payload.messages).toEqual([
+      { role: "user", content: "Fix it." },
+      { role: "assistant", content: "Reading it." },
+      { role: "assistant", content: null, tool_calls: [READ_CALL] },
+      { role: "tool", tool_call_id: "call_read", content: "contents" },
+    ])
   })
 })

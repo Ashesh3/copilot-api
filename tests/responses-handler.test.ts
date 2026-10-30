@@ -6,6 +6,7 @@ import type {
 } from "../src/services/copilot/create-responses"
 
 import { LocalHTTPError } from "../src/lib/error"
+import { readChatReasoningEnvelope } from "../src/routes/responses/chat-reasoning-provenance"
 import {
   assertResponsesChatFallbackTranslation,
   responsesToChatCompletions,
@@ -452,4 +453,116 @@ test("rejects a lossy Responses to Chat fallback before conversion", () => {
       },
     })
   }
+})
+
+function collectEvents(): {
+  events: Array<Record<string, unknown>>
+  stream: { writeSSE: (message: { data: string }) => Promise<void> }
+} {
+  const events: Array<Record<string, unknown>> = []
+  return {
+    events,
+    stream: {
+      writeSSE(message) {
+        events.push(JSON.parse(message.data) as Record<string, unknown>)
+        return Promise.resolve()
+      },
+    },
+  }
+}
+
+function chatChunk(
+  delta: Record<string, unknown>,
+  finishReason: string | null = null,
+): Record<string, unknown> {
+  return {
+    id: "chat_reasoning",
+    created: 1,
+    model: "chat-only",
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  }
+}
+
+test("streams Chat reasoning live and binds its state to the upstream model", async () => {
+  const { events, stream } = collectEvents()
+
+  await streamChatCompletionsAsResponses(
+    stream,
+    chatStream([
+      chatChunk({ role: "assistant", reasoning_text: "Weighing " }),
+      chatChunk({ reasoning_text: "the options." }),
+      chatChunk({ content: "Use the cache.", reasoning_opaque: "partial" }),
+      chatChunk({ reasoning_opaque: "complete" }, "stop"),
+      "[DONE]",
+    ]),
+    { model: "client-model", reasoningModel: "chat-only" },
+  )
+
+  expect(events.map((event) => event.type)).toEqual([
+    "response.created",
+    "response.output_item.added",
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.delta",
+    "response.output_item.added",
+    "response.output_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_summary_part.done",
+    "response.output_item.done",
+    "response.output_text.done",
+    "response.output_item.done",
+    "response.completed",
+  ])
+  expect(events.map((event) => event.sequence_number)).toEqual(
+    events.map((_, index) => index),
+  )
+  const response = events.at(-1)?.response as {
+    model: string
+    output: Array<Record<string, unknown>>
+  }
+  expect(response.model).toBe("client-model")
+  expect(response.output.map((item) => item.type)).toEqual([
+    "reasoning",
+    "message",
+  ])
+  expect(response.output[0]).toMatchObject({
+    id: "rs_resp_chat_reasoning",
+    summary: [{ type: "summary_text", text: "Weighing the options." }],
+  })
+  expect(events[9]).toMatchObject({ item: response.output[0] })
+  expect(
+    readChatReasoningEnvelope(response.output[0].encrypted_content),
+  ).toEqual({ model: "chat-only", reasoning_opaque: "complete" })
+})
+
+test("completes Chat reasoning before the output it produced", async () => {
+  const { events, stream } = collectEvents()
+
+  await streamChatCompletionsAsResponses(
+    stream,
+    chatStream([
+      chatChunk({ role: "assistant", content: "Answer." }),
+      chatChunk({ reasoning_opaque: "late-state" }, "stop"),
+      "[DONE]",
+    ]),
+    "chat-only",
+  )
+
+  const done = events.filter(
+    (event) => event.type === "response.output_item.done",
+  )
+  expect(done.map((event) => [event.output_index, event.item])).toEqual([
+    [1, expect.objectContaining({ type: "reasoning", summary: [] }) as unknown],
+    [0, expect.objectContaining({ type: "message" }) as unknown],
+  ])
+  const response = events.at(-1)?.response as {
+    output: Array<Record<string, unknown>>
+  }
+  expect(response.output.map((item) => item.type)).toEqual([
+    "reasoning",
+    "message",
+  ])
+  expect(
+    readChatReasoningEnvelope(response.output[0].encrypted_content),
+  ).toEqual({ model: "chat-only", reasoning_opaque: "late-state" })
 })

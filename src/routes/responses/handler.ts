@@ -46,7 +46,6 @@ import {
   applyModelFallbackToPayload,
   getModelFallbackRedirect,
   captureModelFallbackNotice,
-  isModelFallbackActive,
   runWithModelFallback,
 } from "~/lib/model-fallback"
 import { applyResponsesModelFallbackNotice } from "~/lib/model-fallback-notice"
@@ -140,6 +139,7 @@ import {
   resolvePreparedResponsesWebSearchCalls,
   type ResponsesChatCompletionFactory,
 } from "./chat-fallback-completion"
+import { encodeChatReasoningEnvelope } from "./chat-reasoning-provenance"
 import { chatCompactionSummary } from "./compact-summary"
 import {
   hasCompactionTrigger,
@@ -1693,23 +1693,34 @@ interface CCStreamState {
   usage: { inputTokens?: number; outputTokens?: number; cachedTokens?: number }
   responseCreated: boolean
   pendingFinishReason?: string
-  preserveFallbackThinking: boolean
-  reasoningText: string
-  reasoningOpaque?: string
-  encryptedContent?: string
+  /** Present once the upstream model reasons. */
+  reasoning?: CCReasoningState
+  /** The upstream Chat model, which binds the reasoning state it returns. */
+  reasoningModel: string
   toolMap?: ResponsesChatToolMap
+}
+
+interface CCReasoningState {
+  itemId: string
+  outputIndex: number
+  text: string
+  /** The client has seen `response.reasoning_summary_part.added`. */
+  summaryPartAdded: boolean
+  opaque?: string
+  encryptedContent?: string
 }
 
 type WriteEventFn = (event: string, data: unknown) => Promise<void>
 
-const createCCStreamState = (
-  model: string,
-  toolMap?: ResponsesChatToolMap,
-): CCStreamState => ({
+const createCCStreamState = (options: {
+  readonly model: string
+  readonly reasoningModel: string
+  readonly toolMap?: ResponsesChatToolMap
+}): CCStreamState => ({
   seqNum: 0,
   responseId: "resp_cc",
   createdAt: Math.floor(Date.now() / 1000),
-  resolvedModel: model,
+  resolvedModel: options.model,
   accumulatedText: "",
   textItemAdded: false,
   messageItemId: "msg_cc_001",
@@ -1717,9 +1728,8 @@ const createCCStreamState = (
   nextOutputIndex: 0,
   usage: {},
   responseCreated: false,
-  preserveFallbackThinking: isModelFallbackActive(),
-  reasoningText: "",
-  ...(toolMap ? { toolMap } : {}),
+  reasoningModel: options.reasoningModel,
+  ...(options.toolMap ? { toolMap: options.toolMap } : {}),
 })
 
 /** Restore a translated Chat tool call to the identity the client declared. */
@@ -2071,28 +2081,55 @@ function mapResponsesControlsToChat(
   }
 }
 
+/**
+ * A Chat turn's reasoning. Its Chat state travels in `encrypted_content`,
+ * bound to the upstream model, never in the item ID: clients drop IDs they
+ * cannot replay.
+ */
+function createChatReasoningOutput(options: {
+  readonly id: string
+  readonly model: string
+  readonly text: string | null | undefined
+  readonly opaque: string | null | undefined
+  readonly encryptedContent: string | null | undefined
+}): ResponseOutputReasoning | undefined {
+  const { encryptedContent, opaque, text } = options
+  if (!text && !opaque && !encryptedContent) return undefined
+  const envelope = encodeChatReasoningEnvelope(options.model, {
+    ...(opaque ? { reasoning_opaque: opaque } : {}),
+    ...(encryptedContent ? { encrypted_content: encryptedContent } : {}),
+  })
+  return {
+    id: options.id,
+    type: "reasoning",
+    summary: text ? [{ type: "summary_text", text }] : [],
+    status: "completed",
+    ...(envelope ? { encrypted_content: envelope } : {}),
+  }
+}
+
 const chatCompletionToResponsesResult = (
   response: ChatCompletionResponse,
-  model: string,
-  toolMap?: ResponsesChatToolMap,
+  options: {
+    readonly model: string
+    /** The upstream Chat model, which binds the reasoning state it returned. */
+    readonly reasoningModel: string
+    readonly toolMap?: ResponsesChatToolMap
+  },
 ): ResponsesResult => {
+  const { model, toolMap } = options
   const choice = response.choices[0]
   const output: Array<ResponseOutputItem> = []
   let outputText = ""
 
-  if (choice.message.reasoning_opaque || choice.message.encrypted_content) {
-    output.push({
-      id: choice.message.reasoning_opaque ?? `rs_${response.id}`,
-      type: "reasoning",
-      summary:
-        choice.message.reasoning_text ?
-          [{ type: "summary_text", text: choice.message.reasoning_text }]
-        : [],
-      ...(choice.message.encrypted_content ?
-        { encrypted_content: choice.message.encrypted_content }
-      : {}),
-    } satisfies ResponseOutputReasoning)
-  }
+  const reasoning = createChatReasoningOutput({
+    id: `rs_${response.id}`,
+    model: options.reasoningModel,
+    text: choice.message.reasoning_text,
+    opaque: choice.message.reasoning_opaque,
+    encryptedContent: choice.message.encrypted_content,
+  })
+  if (reasoning) output.push(reasoning)
 
   // Map text content
   if (choice.message.content) {
@@ -2335,6 +2372,9 @@ const emitDoneEvents = async (
   finishReason: string,
   writeEvent: WriteEventFn,
 ): Promise<"response.completed" | "response.incomplete"> => {
+  // Clients record items in the order they complete. Reasoning comes before
+  // the text and calls it produced, even when its state arrived after them.
+  await emitReasoningDoneEvents(s, writeEvent)
   const pending: Array<{ index: number; emit: () => Promise<void> }> = []
   if (s.accumulatedText) {
     pending.push({
@@ -2351,24 +2391,40 @@ const emitDoneEvents = async (
   pending.sort((left, right) => left.index - right.index)
   for (const entry of pending) await entry.emit()
 
-  const reasoning = fallbackStreamReasoning(s)
-  if (reasoning) {
-    const outputIndex = s.nextOutputIndex++
-    await writeEvent("response.output_item.added", {
-      item: { ...reasoning, status: "in_progress" },
-      output_index: outputIndex,
+  return await emitResponseCompleted(s, finishReason, writeEvent)
+}
+
+async function emitReasoningDoneEvents(
+  s: CCStreamState,
+  writeEvent: WriteEventFn,
+): Promise<void> {
+  const { reasoning } = s
+  const item = ccReasoningOutput(s)
+  if (!reasoning || !item) return
+  if (reasoning.summaryPartAdded) {
+    await writeEvent("response.reasoning_summary_text.done", {
+      item_id: reasoning.itemId,
+      output_index: reasoning.outputIndex,
       sequence_number: s.seqNum++,
-      type: "response.output_item.added",
+      summary_index: 0,
+      text: reasoning.text,
+      type: "response.reasoning_summary_text.done",
     })
-    await writeEvent("response.output_item.done", {
-      item: reasoning,
-      output_index: outputIndex,
+    await writeEvent("response.reasoning_summary_part.done", {
+      item_id: reasoning.itemId,
+      output_index: reasoning.outputIndex,
+      part: { type: "summary_text", text: reasoning.text },
       sequence_number: s.seqNum++,
-      type: "response.output_item.done",
+      summary_index: 0,
+      type: "response.reasoning_summary_part.done",
     })
   }
-
-  return await emitResponseCompleted(s, finishReason, writeEvent)
+  await writeEvent("response.output_item.done", {
+    item,
+    output_index: reasoning.outputIndex,
+    sequence_number: s.seqNum++,
+    type: "response.output_item.done",
+  })
 }
 
 const emitTextDoneEvents = async (
@@ -2506,9 +2562,11 @@ const emitResponseCompleted = async (
     })
   }
 
-  const finalOutput = inOutputOrder(indexed)
-  const reasoning = fallbackStreamReasoning(s)
-  if (reasoning) finalOutput.push(reasoning)
+  const reasoning = ccReasoningOutput(s)
+  const finalOutput = [
+    ...(reasoning ? [reasoning] : []),
+    ...inOutputOrder(indexed),
+  ]
 
   let finalStatus = "completed"
   let incompleteDetails: ResponsesResult["incomplete_details"] = null
@@ -2535,6 +2593,11 @@ const emitResponseCompleted = async (
 
 export interface ChatResponsesStreamTarget {
   readonly model: string
+  /**
+   * The upstream Chat model, which binds the reasoning state it returns.
+   * Defaults to `model`.
+   */
+  readonly reasoningModel?: string
   /** Restores client tool identities on translated tool calls. */
   readonly toolMap?: ResponsesChatToolMap
   /** Receives reported usage even if the stream stalls before its terminal. */
@@ -2551,12 +2614,16 @@ export const streamChatCompletionsAsResponses = async (
   state: CCStreamState
   terminal?: "response.completed" | "response.incomplete"
 }> => {
-  const { model, toolMap, onUsage } =
+  const { model, reasoningModel, toolMap, onUsage } =
     typeof target === "string" ? { model: target } : target
   return await streamChatCompletionsAsResponsesWithState({
     stream,
     ccStream,
-    state: createCCStreamState(model, toolMap),
+    state: createCCStreamState({
+      model,
+      reasoningModel: reasoningModel ?? model,
+      toolMap,
+    }),
     onUsage: (usage) => onUsage?.(mapCCStreamUsage(usage)),
   })
 }
@@ -2633,14 +2700,8 @@ async function processChatCompletionsChunk(
   }
   const choice = chunk.choices.at(0)
   if (choice?.delta) {
-    if (state.preserveFallbackThinking) {
-      if (choice.delta.reasoning_text)
-        state.reasoningText += choice.delta.reasoning_text
-      if (choice.delta.reasoning_opaque)
-        state.reasoningOpaque = choice.delta.reasoning_opaque
-      if (choice.delta.encrypted_content)
-        state.encryptedContent = choice.delta.encrypted_content
-    }
+    // Reasoning precedes the output a chunk carries with it.
+    await emitReasoningDelta(state, choice.delta, writeEvent)
     const content = choice.delta.content as string | undefined
     if (content) await emitTextDelta(state, content, writeEvent)
     for (const toolCall of choice.delta.tool_calls ?? []) {
@@ -2652,28 +2713,79 @@ async function processChatCompletionsChunk(
   if (finishReason) state.pendingFinishReason = finishReason
 }
 
-function fallbackStreamReasoning(
+/** Stream the summary live; the state is complete only when the turn is. */
+async function emitReasoningDelta(
+  s: CCStreamState,
+  delta: ChatCompletionChunk["choices"][number]["delta"],
+  writeEvent: WriteEventFn,
+): Promise<void> {
+  const text = delta.reasoning_text ?? ""
+  if (!text && !delta.reasoning_opaque && !delta.encrypted_content) return
+  const reasoning = s.reasoning ?? (await announceReasoning(s, writeEvent))
+  // Each chunk's state supersedes the previous one.
+  if (delta.reasoning_opaque) reasoning.opaque = delta.reasoning_opaque
+  if (delta.encrypted_content)
+    reasoning.encryptedContent = delta.encrypted_content
+  if (!text) return
+  if (!reasoning.summaryPartAdded) {
+    reasoning.summaryPartAdded = true
+    await writeEvent("response.reasoning_summary_part.added", {
+      item_id: reasoning.itemId,
+      output_index: reasoning.outputIndex,
+      part: { type: "summary_text", text: "" },
+      sequence_number: s.seqNum++,
+      summary_index: 0,
+      type: "response.reasoning_summary_part.added",
+    })
+  }
+  reasoning.text += text
+  await writeEvent("response.reasoning_summary_text.delta", {
+    delta: text,
+    item_id: reasoning.itemId,
+    output_index: reasoning.outputIndex,
+    sequence_number: s.seqNum++,
+    summary_index: 0,
+    type: "response.reasoning_summary_text.delta",
+  })
+}
+
+async function announceReasoning(
+  s: CCStreamState,
+  writeEvent: WriteEventFn,
+): Promise<CCReasoningState> {
+  const reasoning: CCReasoningState = {
+    itemId: `rs_${s.responseId}`,
+    outputIndex: s.nextOutputIndex++,
+    text: "",
+    summaryPartAdded: false,
+  }
+  s.reasoning = reasoning
+  await writeEvent("response.output_item.added", {
+    item: {
+      id: reasoning.itemId,
+      type: "reasoning",
+      summary: [],
+      status: "in_progress",
+    },
+    output_index: reasoning.outputIndex,
+    sequence_number: s.seqNum++,
+    type: "response.output_item.added",
+  })
+  return reasoning
+}
+
+function ccReasoningOutput(
   state: CCStreamState,
 ): ResponseOutputReasoning | undefined {
-  if (
-    !state.preserveFallbackThinking
-    || (!state.reasoningOpaque
-      && !state.reasoningText
-      && !state.encryptedContent)
-  )
-    return undefined
-  return {
-    id: state.reasoningOpaque ?? `rs_${state.responseId}`,
-    type: "reasoning",
-    summary:
-      state.reasoningText ?
-        [{ type: "summary_text", text: state.reasoningText }]
-      : [],
-    status: "completed",
-    ...(state.encryptedContent ?
-      { encrypted_content: state.encryptedContent }
-    : {}),
-  }
+  const { reasoning } = state
+  if (!reasoning) return undefined
+  return createChatReasoningOutput({
+    id: reasoning.itemId,
+    model: state.reasoningModel,
+    text: reasoning.text,
+    opaque: reasoning.opaque,
+    encryptedContent: reasoning.encryptedContent,
+  })
 }
 
 const handleWithAnthropicMessages = async (options: {
@@ -2891,11 +3003,11 @@ export const handleWithChatCompletions = async (
           ccResponse.choices[0]?.message?.content ?? "",
         )
 
-        const result = chatCompletionToResponsesResult(
-          ccResponse,
-          responseModel,
-          options.toolMap,
-        )
+        const result = chatCompletionToResponsesResult(ccResponse, {
+          model: responseModel,
+          reasoningModel: ccPayload.model,
+          toolMap: options.toolMap,
+        })
         return c.json(result)
       },
     )
@@ -2962,16 +3074,20 @@ export const handleWithChatCompletions = async (
           )
           finishSpan()
 
-          const result = chatCompletionToResponsesResult(
-            response,
-            responseModel,
-            options.toolMap,
-          )
+          const result = chatCompletionToResponsesResult(response, {
+            model: responseModel,
+            reasoningModel: ccPayload.model,
+            toolMap: options.toolMap,
+          })
           return c.json(result)
         }
 
         return streamSSE(c, async (sseStream) => {
-          const chatState = createCCStreamState(responseModel, options.toolMap)
+          const chatState = createCCStreamState({
+            model: responseModel,
+            reasoningModel: ccPayload.model,
+            toolMap: options.toolMap,
+          })
           const failureState = createResponsesStreamFailureState(responseModel)
           const lifecycle = createResponsesTerminalLifecycle({
             c,
@@ -3112,11 +3228,11 @@ async function completeBufferedChatResponse(
       })
       setSentryOutputMessages(span, response.choices[0]?.message.content ?? "")
     }
-    return chatCompletionToResponsesResult(
-      response,
-      options.responseModel,
-      options.toolMap,
-    )
+    return chatCompletionToResponsesResult(response, {
+      model: options.responseModel,
+      reasoningModel: options.ccPayload.model,
+      toolMap: options.toolMap,
+    })
   }
   // Compaction keeps its existing tracing. Only buffered client SSE needs the
   // Chat span otherwise provided by the streaming fallback branch.
@@ -3158,7 +3274,7 @@ export function chatCompactionTriggerResult(
   model: string,
 ): ResponsesResult {
   return toRemoteCompactionResult(
-    chatCompletionToResponsesResult(response, model),
+    chatCompletionToResponsesResult(response, { model, reasoningModel: model }),
     chatCompactionSummary(response),
   )
 }
@@ -3203,11 +3319,11 @@ function handleStreamingChatFallbackWebSearch(
             maxUses: options.webSearchMaxUses,
             signal: c.req.raw.signal,
           })
-          return chatCompletionToResponsesResult(
-            response,
-            options.responseModel,
-            options.toolMap,
-          )
+          return chatCompletionToResponsesResult(response, {
+            model: options.responseModel,
+            reasoningModel: options.ccPayload.model,
+            toolMap: options.toolMap,
+          })
         })(),
       )
       if (stream.aborted || stream.closed) {

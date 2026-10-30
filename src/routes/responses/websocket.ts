@@ -1808,6 +1808,7 @@ async function streamChatCompletionsOverWs(options: {
 
   await streamChatCompletionsAsResponses(wsStream, ccStream, {
     model: responseContext.model,
+    reasoningModel: ccPayload.model,
     toolMap,
     onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
   })
@@ -2021,6 +2022,7 @@ async function streamCustomProviderCompletion(options: {
     stream as AsyncIterable<{ data?: string; event?: string }>,
     {
       model: payload.model,
+      reasoningModel: candidate.payload.model,
       toolMap: candidate.toolMap,
       onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
     },
@@ -2117,6 +2119,7 @@ async function streamCustomProviderOverWs(options: {
     chatResponseAsStream(response),
     {
       model: payload.model,
+      reasoningModel: candidate.payload.model,
       toolMap: candidate.toolMap,
       onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
     },
@@ -2189,6 +2192,7 @@ async function streamChatWebSearchOverWs(options: {
     chatResponseAsStream(response),
     {
       model: responseContext.model,
+      reasoningModel: ccPayload.model,
       toolMap,
       onUsage: (usage) => updateWebSocketChatUsage(turn, usage),
     },
