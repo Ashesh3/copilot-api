@@ -21,6 +21,8 @@ import {
   reasoningStateRecoverySteps,
   recoverReasoningItemIds,
   rememberAcceptedReasoningState,
+  rememberIssuedReasoningState,
+  rememberIssuedReasoningStateEvent,
   rememberRejectedReasoningState,
   stripReasoningState,
 } from "~/services/copilot/responses-reasoning-state"
@@ -483,8 +485,10 @@ export type CreateResponsesReturn = ResponsesResult | ResponsesStream
 async function* sanitizeResponsesStream(
   response: Response,
   collaboration: ResponsesCollaboration | undefined,
+  account: string,
 ): ResponsesStream {
   for await (const event of events(response)) {
+    rememberIssuedReasoningStateEvent(event.data, account)
     yield restoreResponsesCollaborationEvent(
       sanitizeResponsesStreamEvent(event),
       collaboration,
@@ -672,19 +676,18 @@ const createResponsesCore = async (
     consola.error("Failed to create responses")
     throw new HTTPError("Failed to create responses", response, activePayload)
   }
-  rememberAcceptedReasoningState(
-    activePayload,
-    reasoningStateAccount(attempt.accountId),
-  )
+  const account = reasoningStateAccount(attempt.accountId)
+  rememberAcceptedReasoningState(activePayload, account)
 
   if (body.stream) {
     return {
-      response: sanitizeResponsesStream(response, collaboration),
+      response: sanitizeResponsesStream(response, collaboration, account),
       processedPayload: activePayload,
     }
   }
 
   const result = (await response.json()) as ResponsesResult
+  rememberIssuedReasoningState(result.output, account)
   restoreResponsesCollaboration(result, collaboration)
   return { response: result, processedPayload: activePayload }
 }
