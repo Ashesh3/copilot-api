@@ -247,6 +247,54 @@ test("native compaction discards unsupported metadata before applying the payloa
   ])
 })
 
+test("native compaction removes replayed output ciphertext before applying the payload budget", async () => {
+  const toolCall = {
+    type: "function_call",
+    call_id: "call_compact_replay",
+    name: "run_build",
+    arguments: "{}",
+  }
+  const toolResult = {
+    type: "function_call_output",
+    call_id: "call_compact_replay",
+    output: "BUILD SUCCEEDED",
+  }
+  const answer = {
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: "The build passed." }],
+  }
+  const response = await seedProtocolDatabase().then(() =>
+    server.request("/responses/compact", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "compact-model",
+        input: [
+          { ...toolCall, encrypted_content: "encrypted-call" },
+          toolResult,
+          {
+            ...answer,
+            encrypted_content: "x".repeat(COMPACTION_PAYLOAD_MAX_BYTES),
+          },
+        ],
+      }),
+    }),
+  )
+
+  expect(await readSummary(response)).toBe("Task state preserved.")
+  expect(upstreamPath).toBe("/responses")
+  expect(upstreamBody.input).toEqual([
+    toolCall,
+    toolResult,
+    answer,
+    expect.objectContaining({ type: "message", role: "user" }),
+  ])
+})
+
 test("compaction prefers all final-answer text after commentary", async () => {
   result = responsesResult([
     {

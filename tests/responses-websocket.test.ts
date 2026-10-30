@@ -1662,6 +1662,123 @@ describe("responses websocket message handling", () => {
     expect(input).toEqual(sourceInput)
   })
 
+  test("omits Codex output-token replay before native WebSocket sends and continuations", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    const include = ["reasoning.encrypted_content", "output.encrypted_content"]
+    const streamOptions = { reasoning_summary_delivery: "sequential_cutoff" }
+    const answer = {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "First answer." }],
+    }
+    const replayedAnswer = {
+      type: "message",
+      role: "assistant",
+      phase: "final_answer",
+      content: [{ type: "output_text", text: "Earlier answer." }],
+    }
+    const followup = {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Continue the task." }],
+    }
+    const firstPrompt = {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Start the task." }],
+    }
+    const providerResponse = (responseId: string) => {
+      const upstreamInclude = lastRequestBody?.include
+      if (
+        Array.isArray(upstreamInclude)
+        && upstreamInclude.includes("output.encrypted_content")
+      ) {
+        return createInvalidRequestBodyResponse(
+          "Invalid value: 'output.encrypted_content'. Supported values are: 'file_search_call.results', 'web_search_call.results', 'web_search_call.action.sources', 'message.input_image.image_url', 'computer_call_output.output.image_url', 'code_interpreter_call.outputs', 'reasoning.encrypted_content', and 'message.output_text.logprobs'.",
+        )
+      }
+      const upstreamInput = lastRequestBody?.input
+      const replaysCiphertext =
+        Array.isArray(upstreamInput)
+        && upstreamInput.some(
+          (item: unknown) =>
+            typeof item === "object"
+            && item !== null
+            && (item as Record<string, unknown>).type === "message"
+            && Object.hasOwn(item, "encrypted_content"),
+        )
+      return replaysCiphertext ?
+          createInvalidRequestBodyResponse(
+            "Encrypted content could not be decrypted or parsed.",
+          )
+        : createResponsesSseResponse(responseId, [answer])
+    }
+    queuedFetchHandlers.push(
+      () => providerResponse("resp_include_parent"),
+      () => providerResponse("resp_include_child"),
+    )
+    const ws = createTestWebSocket()
+
+    await seedProtocolDatabase().then(() =>
+      responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "gpt-5.4",
+          input: [firstPrompt],
+          include,
+          stream_options: streamOptions,
+        }),
+      ),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "response.completed",
+      response: { id: "resp_include_parent" },
+    })
+    expect(lastRequestBody?.include).toEqual(["reasoning.encrypted_content"])
+    expect(lastRequestBody?.stream_options).toEqual(streamOptions)
+
+    await seedProtocolDatabase().then(() =>
+      responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          previous_response_id: "resp_include_parent",
+          input: [
+            { ...replayedAnswer, encrypted_content: "openai-ciphertext" },
+            followup,
+          ],
+          include,
+          stream_options: streamOptions,
+        }),
+      ),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "response.completed",
+      response: { id: "resp_include_child" },
+    })
+    expect(lastRequestBody?.include).toEqual(["reasoning.encrypted_content"])
+    expect(lastRequestBody?.stream_options).toEqual(streamOptions)
+    expect(lastRequestBody?.input).toEqual([
+      firstPrompt,
+      answer,
+      replayedAnswer,
+      followup,
+    ])
+    expect(
+      ws.data.responseSnapshots.get("resp_include_child")?.input,
+    ).toContainEqual({
+      ...replayedAnswer,
+      encrypted_content: "openai-ciphertext",
+    })
+  })
+
   test("does not retry a native WebSocket compatibility 400", async () => {
     state.copilotToken = "copilot-token"
     state.models = responsesCapableModels
@@ -5678,6 +5795,13 @@ function createAnthropicMessageResponse(
     stop_sequence: null,
     usage: { input_tokens: 2, output_tokens: 3 },
   })
+}
+
+function createInvalidRequestBodyResponse(message: string): Response {
+  return Response.json(
+    { error: { code: "invalid_request_body", message } },
+    { status: 400 },
+  )
 }
 
 function createResponsesSseResponse(
