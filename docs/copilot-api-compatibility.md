@@ -244,6 +244,20 @@ blocks. The tag identifies the encoding, not trusted or authenticated content;
 the upstream provider still verifies its signatures. The native Responses
 candidate removes these envelopes while retaining readable summaries.
 
+Gateway-managed web search on this bridge returns every round, not only the
+last one. Each earlier round's thinking and text become reasoning items and
+`commentary` messages, and each managed call becomes a completed
+`web_search_call` (`ws_` plus the tool-use ID) showing its query or opened
+page. The call's `encrypted_content` holds the exact Messages `tool_use` and
+`tool_result` the loop sent, under the `capi_anthropic_web_search_v1:` tag, so
+a later turn rebuilds the same assistant and user turns: parallel calls stay
+in one assistant turn with their results together in the next user turn. A
+request without tools of its own declares the replayed search tool, owned by
+the gateway, because the Anthropic Messages API rejects tool history in a
+request that declares no tools.
+A `web_search_call` without this state keeps its previous text handling, and
+native Responses drops the state with other output ciphertext.
+
 For Messages-to-Responses/Chat routing, system and developer instructions retain
 their roles and position. Request effort and structured output are translated.
 Claude's `DeferredToolPlaceholder` sentinel is omitted while discovered real

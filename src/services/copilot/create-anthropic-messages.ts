@@ -9,6 +9,7 @@ import type {
   AnthropicResponse,
 } from "~/routes/messages/anthropic-types"
 import type { RetryBudget } from "~/services/copilot/transport-retry"
+import type { ManagedWebRound } from "~/services/web/tool-loop"
 
 import { getSelectedRoutedAccountId, routedFetch } from "~/lib/account-router"
 import { getModelEndpointSupport } from "~/lib/endpoint-routing"
@@ -113,6 +114,8 @@ export const createAnthropicMessages = async (
     initiator?: "agent" | "user"
     modelProviderPreference?: string
     alreadyAdapted?: boolean
+    /** Receives each gateway-managed web round answered before the result. */
+    onManagedWebRound?: (round: ManagedWebRound) => void
     preserveValidatedControls?: boolean
     routedAccountPin?: RoutedAccountPin
     retryBudget?: RetryBudget
@@ -189,6 +192,7 @@ export const createAnthropicMessages = async (
     disabled: options?.compaction,
     accountId: operationOptions.routedAccountPin.accountId,
     signal: options?.signal,
+    onRound: options?.onManagedWebRound,
     send: async (body, _managed, reportProcessedPayload) =>
       await dispatchAnthropicMessages(
         { ...dispatchOptions, preparedBody: body },

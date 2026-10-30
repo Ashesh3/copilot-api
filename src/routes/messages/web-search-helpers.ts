@@ -761,6 +761,10 @@ const emitResponsesOutputItem = async (
         // Text and summaries arrive once, through the deltas below.
         ...(item.type === "message" ? { content: [] } : {}),
         ...(item.type === "reasoning" ? { summary: [] } : {}),
+        // Replay state is part of the finished item only.
+        ...(item.type === "web_search_call" ?
+          { encrypted_content: undefined }
+        : {}),
       },
       output_index: ctx.outputIndex,
       sequence_number: seq++,

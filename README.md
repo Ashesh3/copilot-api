@@ -158,6 +158,13 @@ parse, or cache them, and has no local-fetch fallback.**
   only exact legacy gateway `web_result_*` artifacts, not genuine messages.
   Gateway tool use is bounded to eight calls per request, with tighter
   caller limits honored.
+- On the Responses-to-Messages bridge (Codex with a Claude model), every
+  managed round is returned the way native hosted search is: the round's
+  reasoning and narration (as `commentary`), then a `web_search_call` per
+  search. Its opaque `encrypted_content` carries the private tool call and
+  result, so the next turn replays the exact history Claude answered after.
+  Hosted `web_search` offered without client tools runs through the gateway
+  there, instead of reaching the client as a function call it cannot run.
 - Observed model usage is retained across managed rounds, including cancelled
   HTTP streams and WebSocket turns. Failed Responses usage is excluded, while
   completed rounds remain counted; invalid counts retain known subtotals and

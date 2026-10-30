@@ -271,6 +271,7 @@ export interface ResponseOutputWebSearchCall {
   type: "web_search_call"
   status: "in_progress" | "searching" | "completed" | "failed"
   action?: Record<string, unknown>
+  encrypted_content?: string
 }
 
 export interface ResponseOutputMessage {

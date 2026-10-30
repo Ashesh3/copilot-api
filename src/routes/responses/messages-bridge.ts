@@ -28,6 +28,7 @@ import type {
   ResponseUsage,
 } from "~/services/copilot/create-responses"
 import type { ResponsesWireBody } from "~/services/copilot/responses-contract"
+import type { ManagedWebRound } from "~/services/web/tool-loop"
 
 import {
   readAnthropicUsage,
@@ -51,6 +52,7 @@ import {
   consumeExtraSend,
   createRetryBudget,
 } from "~/services/copilot/transport-retry"
+import { adoptManagedWebSearchTool } from "~/services/web/tool-context"
 
 import type { ResponsesAttachmentCache } from "./attachment-cache"
 
@@ -87,6 +89,12 @@ import {
   createResponsesMessagesToolMap,
   type ResponsesMessagesToolMap,
 } from "./messages-tool-map"
+import {
+  declareReplayedWebSearchTools,
+  ManagedWebSearchHistory,
+  managedWebSearchCalls,
+  readManagedWebSearchReplay,
+} from "./messages-web-search"
 import { omitOptionalResponsesWebSearch } from "./optional-web-search"
 import { associateResponsesFunctionCalls } from "./tool-call-association"
 import { checkResponsesToMessagesTranslation } from "./translation-fidelity"
@@ -336,9 +344,16 @@ async function convertTolerantResponsesInput(
   state: TolerantMessagesState,
   signal: AbortSignal | undefined,
   sharedAttachmentCache: ResponsesAttachmentCache | undefined,
-): Promise<{ messages: Array<AnthropicMessage>; system: Array<string> }> {
+): Promise<{
+  messages: Array<AnthropicMessage>
+  system: Array<string>
+  /** Tool names of replayed gateway-managed searches. */
+  webSearchTools: ReadonlySet<string>
+}> {
   const messages: Array<AnthropicMessage> = []
   const system: Array<string> = []
+  const webSearches = new ManagedWebSearchHistory(messages)
+  const webSearchTools = webSearches.toolNames
   const resolveAttachment: ResponsesAttachmentCache["resolve"] =
     sharedAttachmentCache?.resolve
     ?? (async ({ expectPdf, signal, value }) =>
@@ -348,9 +363,11 @@ async function convertTolerantResponsesInput(
   }
   if (typeof source.input === "string") {
     messages.push({ role: "user", content: source.input })
-    return { messages, system }
+    return { messages, system, webSearchTools }
   }
-  if (!Array.isArray(source.input)) return { messages, system }
+  if (!Array.isArray(source.input)) {
+    return { messages, system, webSearchTools }
+  }
 
   const associations = associateResponsesFunctionCalls(
     source.input,
@@ -362,6 +379,7 @@ async function convertTolerantResponsesInput(
     const precedingProgressUpdate = pendingProgressUpdate
     pendingProgressUpdate = undefined
     if (!isRecord(item)) {
+      webSearches.flush()
       if (stringifyTolerantValue(item)) {
         addTranslationFinding(state.findings, {
           class: "unknown_item",
@@ -378,6 +396,15 @@ async function convertTolerantResponsesInput(
     const raw = normalizeResponsesAgentMessage(item, state.findings)
     if (!raw) continue
     const type = typeof raw.type === "string" ? raw.type : undefined
+    const webSearch =
+      type === "web_search_call" ?
+        readManagedWebSearchReplay(raw.encrypted_content)
+      : undefined
+    webSearches.settleBefore(raw, webSearch)
+    if (webSearch) {
+      webSearches.add(webSearch)
+      continue
+    }
     if (type === "function_call") {
       const id = associations.callIdByIndex.get(itemIndex)
       if (!id) continue
@@ -559,7 +586,8 @@ async function convertTolerantResponsesInput(
     })
     appendTolerantTextMessage(messages, "user", FUTURE_RESPONSES_ITEM_CONTEXT)
   }
-  return { messages, system }
+  webSearches.flush()
+  return { messages, system, webSearchTools }
 }
 
 function repairAnthropicSchema(value: unknown): Record<string, unknown> {
@@ -599,7 +627,11 @@ function convertTolerantResponsesTools(
     }
     const type = typeof raw.type === "string" ? raw.type : undefined
     if (type === "web_search" || type?.startsWith("web_search_")) {
-      tools.push(createWebSearchAnthropicTool(raw))
+      const tool = createWebSearchAnthropicTool(raw)
+      // The gateway runs hosted search: a Responses client such as Codex
+      // cannot execute a returned `web_search` function call.
+      adoptManagedWebSearchTool(tool.name)
+      tools.push(tool)
       continue
     }
     if (
@@ -701,7 +733,10 @@ export async function adaptResponsesToMessagesCandidate(options: {
     options.signal,
     options.attachmentCache,
   )
-  const tools = convertTolerantResponsesTools(source, state.findings)
+  const tools = declareReplayedWebSearchTools(
+    convertTolerantResponsesTools(source, state.findings),
+    converted.webSearchTools,
+  )
   const toolChoice = convertTolerantResponsesChoice(
     source,
     tools,
@@ -820,22 +855,23 @@ export async function executePreparedResponsesMessagesBridge(options: {
 }): Promise<ResponsesResult> {
   const anthropicPayload = structuredClone(options.payload)
   anthropicPayload.stream = false
-  const { progressUpdates, response } = await dispatchResponsesMessages({
-    compaction: options.compaction,
-    dispatchOptions: {
-      alreadyAdapted: true,
+  const { managedRounds, progressUpdates, response } =
+    await dispatchResponsesMessages({
       compaction: options.compaction,
-      signal: options.signal,
-    },
-    nativeOptions: options.nativeOptions,
-    payload: anthropicPayload,
-  })
+      dispatchOptions: {
+        alreadyAdapted: true,
+        compaction: options.compaction,
+        signal: options.signal,
+      },
+      nativeOptions: options.nativeOptions,
+      payload: anthropicPayload,
+    })
   reportDroppedThinking(response, anthropicPayload.model)
   const result = anthropicResponseToResponsesResult(
     response,
     options.nativeOptions.requestedModel ?? options.responseContext.model,
     structuredClone(options.responseContext),
-    { progressUpdates },
+    { managedRounds, progressUpdates },
   )
   return completeCompactionTrigger(options.responseContext, response, result)
 }
@@ -878,21 +914,22 @@ export async function executeResponsesMessagesBridge(options: {
     { attachmentsNormalized: options.attachmentsNormalized },
   )
   anthropicPayload.stream = false
-  const { progressUpdates, response } = await dispatchResponsesMessages({
-    compaction: options.compaction,
-    dispatchOptions: {
+  const { managedRounds, progressUpdates, response } =
+    await dispatchResponsesMessages({
       compaction: options.compaction,
-      preserveValidatedControls: options.preserveValidatedControls,
-      signal: options.signal,
-    },
-    nativeOptions: options.nativeOptions,
-    payload: anthropicPayload,
-  })
+      dispatchOptions: {
+        compaction: options.compaction,
+        preserveValidatedControls: options.preserveValidatedControls,
+        signal: options.signal,
+      },
+      nativeOptions: options.nativeOptions,
+      payload: anthropicPayload,
+    })
   const result = anthropicResponseToResponsesResult(
     response,
     options.nativeOptions.requestedModel ?? options.payload.model,
     options.payload,
-    { progressUpdates },
+    { managedRounds, progressUpdates },
   )
   return completeCompactionTrigger(options.payload, response, result)
 }
@@ -900,16 +937,29 @@ export async function executeResponsesMessagesBridge(options: {
 /**
  * Send a translated Responses turn to Messages, asking Claude 5.5 models for
  * readable progress updates. If Copilot rejects that display, send the same
- * turn once without it rather than failing the client's request.
+ * turn once without it rather than failing the client's request. Rounds the
+ * gateway answered with managed web search come back with the result.
  */
 async function dispatchResponsesMessages(options: {
   readonly compaction?: boolean
   readonly dispatchOptions: Parameters<typeof createNativeMessages>[2]
   readonly nativeOptions: NativeMessagesRequestOptions
   readonly payload: AnthropicMessagesPayload
-}): Promise<{ progressUpdates: boolean; response: AnthropicResponse }> {
+}): Promise<{
+  managedRounds: Array<ManagedWebRound>
+  progressUpdates: boolean
+  response: AnthropicResponse
+}> {
   const retryBudget = options.nativeOptions.retryBudget ?? createRetryBudget()
   const nativeOptions = { ...options.nativeOptions, retryBudget }
+  const managedRounds: Array<ManagedWebRound> = []
+  const dispatchOptions = {
+    ...options.dispatchOptions,
+    // Copied before the loop's next send, as the model received it.
+    onManagedWebRound: (round: ManagedWebRound) => {
+      managedRounds.push(structuredClone(round))
+    },
+  }
   const updates = requestProgressUpdates({
     compaction: options.compaction,
     nativeOptions,
@@ -920,11 +970,12 @@ async function dispatchResponsesMessages(options: {
       const response = (await createNativeMessages(
         updates.payload,
         updates.nativeOptions,
-        options.dispatchOptions,
+        dispatchOptions,
       )) as AnthropicResponse
-      return { progressUpdates: true, response }
+      return { managedRounds, progressUpdates: true, response }
     } catch (error) {
       if (!(await isProgressUpdatesRejection(error))) throw error
+      managedRounds.length = 0
       rememberProgressUpdatesRejection(options.payload.model)
       consola.warn(
         "Copilot rejected Claude progress updates; resending without them",
@@ -936,9 +987,9 @@ async function dispatchResponsesMessages(options: {
   const response = (await createNativeMessages(
     options.payload,
     nativeOptions,
-    options.dispatchOptions,
+    dispatchOptions,
   )) as AnthropicResponse
-  return { progressUpdates: false, response }
+  return { managedRounds, progressUpdates: false, response }
 }
 
 /** Answer a Codex compaction trigger with the validated summary item. */
@@ -1388,9 +1439,14 @@ export function anthropicResponseToResponsesResult(
   response: AnthropicResponse,
   requestedModel: string,
   request?: ResponsesPayload,
-  options?: { readonly progressUpdates?: boolean },
+  options?: {
+    /** Rounds the gateway answered with managed web search, in order. */
+    readonly managedRounds?: ReadonlyArray<ManagedWebRound>
+    readonly progressUpdates?: boolean
+  },
 ): ResponsesResult {
   const { output, text } = convertAnthropicOutput(response, {
+    managedRounds: options?.managedRounds,
     progressUpdates: options?.progressUpdates ?? false,
     reasoningModel: request?.model ?? response.model,
     toolMap: request ? createResponsesMessagesToolMap(request) : undefined,
@@ -1462,12 +1518,18 @@ interface AnthropicOutputState {
   readonly visibleText: VisibleTextBuilder
 }
 
+interface AnthropicOutputOptions {
+  /** Text of a round that ended in a managed search: narration. */
+  readonly narration?: boolean
+  readonly progressUpdates: boolean
+  readonly reasoningModel: string
+  readonly toolMap?: ResponsesMessagesToolMap
+}
+
 function convertAnthropicOutput(
   response: AnthropicResponse,
-  options: {
-    readonly progressUpdates: boolean
-    readonly reasoningModel: string
-    readonly toolMap?: ResponsesMessagesToolMap
+  options: AnthropicOutputOptions & {
+    readonly managedRounds?: ReadonlyArray<ManagedWebRound>
   },
 ): {
   output: Array<ResponseOutputItem>
@@ -1481,82 +1543,123 @@ function convertAnthropicOutput(
     responseId: response.id,
     visibleText: new VisibleTextBuilder(),
   }
-  for (const rawBlock of response.content) {
-    const block = rawBlock as unknown as Record<string, unknown>
-    const type = typeof block.type === "string" ? block.type : undefined
-    if (type === "thinking") {
-      if (typeof block.thinking !== "string") {
-        appendAssistantBlockFallback(state, block)
-        continue
-      }
-      const thinking = block as unknown as Extract<
-        AnthropicResponse["content"][number],
-        { type: "thinking" }
-      >
-      state.output.push(
-        createReasoningOutput(state, thinking, {
-          model: options.reasoningModel,
-          progressUpdates: options.progressUpdates,
-        }),
-      )
-      if (
-        options.progressUpdates
-        && isVisibleProgressUpdate(thinking.thinking)
-      ) {
-        pushAssistantText(state, thinking.thinking, true)
-      }
-      continue
-    }
-    if (type === "redacted_thinking" && typeof block.data === "string") {
-      state.output.push({
-        id: nextReasoningId(state),
-        type: "reasoning",
-        summary: [],
-        encrypted_content: encodeAnthropicReasoningEnvelope(
-          options.reasoningModel,
-          [{ type: "redacted_thinking", data: block.data }],
-          { progressUpdates: options.progressUpdates },
-        ),
-        status: "completed",
-      })
-      continue
-    }
-    if (type === "text") {
-      if (typeof block.text !== "string") {
-        appendAssistantBlockFallback(state, block)
-        continue
-      }
-      pushAssistantText(state, block.text, false)
-      continue
-    }
-    if (type === "tool_use") {
-      if (
-        typeof block.id !== "string"
-        || typeof block.name !== "string"
-        || !isRecordValue(block.input)
-      ) {
-        appendAssistantBlockFallback(state, block)
-        continue
-      }
-      const toolBlock = block as unknown as Extract<
-        AnthropicResponse["content"][number],
-        { type: "tool_use" }
-      >
-      const converted =
-        options.toolMap ?
-          options.toolMap.restoreToolCall(toolBlock)
-        : createFunctionCallOutput(toolBlock)
-      if (converted) state.output.push(converted)
-      else appendAssistantBlockFallback(state, block)
-      continue
-    }
-    if (!type) {
-      throwResponseContentError()
-    }
-    appendAssistantBlockFallback(state, block)
+  for (const round of options.managedRounds ?? []) {
+    convertManagedWebRound(state, round, options)
   }
-  assignAssistantPhases(state, response.stop_reason)
+  const finalRound = state.output.length
+  for (const rawBlock of response.content) {
+    convertAssistantBlock(
+      state,
+      rawBlock as unknown as Record<string, unknown>,
+      options,
+    )
+  }
+  assignAssistantPhases(state, response.stop_reason, finalRound)
   return { output: state.output, text: state.visibleText.toString() }
+}
+
+/**
+ * A round the gateway answered with managed web search reaches the client as
+ * native hosted search does: its reasoning and narration, then a
+ * `web_search_call` per search whose state replays the private tool history.
+ * The round's text came before a tool call, so it is commentary.
+ */
+function convertManagedWebRound(
+  state: AnthropicOutputState,
+  round: ManagedWebRound,
+  options: AnthropicOutputOptions,
+): void {
+  const calls = managedWebSearchCalls(round)
+  const firstMessage = state.assistantMessages.length
+  const content: Array<unknown> =
+    Array.isArray(round.response.content) ? round.response.content : []
+  for (const rawBlock of content) {
+    if (!isRecordValue(rawBlock)) throwResponseContentError()
+    const call =
+      rawBlock.type === "tool_use" && typeof rawBlock.id === "string" ?
+        calls.get(rawBlock.id)
+      : undefined
+    if (call) state.output.push(call)
+    else convertAssistantBlock(state, rawBlock, { ...options, narration: true })
+  }
+  for (const message of state.assistantMessages.splice(firstMessage)) {
+    message.item.phase = "commentary"
+  }
+}
+
+function convertAssistantBlock(
+  state: AnthropicOutputState,
+  block: Record<string, unknown>,
+  options: AnthropicOutputOptions,
+): void {
+  const type = typeof block.type === "string" ? block.type : undefined
+  if (type === "thinking") {
+    if (typeof block.thinking !== "string") {
+      appendAssistantBlockFallback(state, block)
+      return
+    }
+    const thinking = block as unknown as Extract<
+      AnthropicResponse["content"][number],
+      { type: "thinking" }
+    >
+    state.output.push(
+      createReasoningOutput(state, thinking, {
+        model: options.reasoningModel,
+        progressUpdates: options.progressUpdates,
+      }),
+    )
+    if (options.progressUpdates && isVisibleProgressUpdate(thinking.thinking)) {
+      pushAssistantText(state, thinking.thinking, true)
+    }
+    return
+  }
+  if (type === "redacted_thinking" && typeof block.data === "string") {
+    state.output.push({
+      id: nextReasoningId(state),
+      type: "reasoning",
+      summary: [],
+      encrypted_content: encodeAnthropicReasoningEnvelope(
+        options.reasoningModel,
+        [{ type: "redacted_thinking", data: block.data }],
+        { progressUpdates: options.progressUpdates },
+      ),
+      status: "completed",
+    })
+    return
+  }
+  if (type === "text") {
+    if (typeof block.text !== "string") {
+      appendAssistantBlockFallback(state, block)
+      return
+    }
+    pushAssistantText(state, block.text, options.narration === true)
+    return
+  }
+  if (type === "tool_use") {
+    if (
+      typeof block.id !== "string"
+      || typeof block.name !== "string"
+      || !isRecordValue(block.input)
+    ) {
+      appendAssistantBlockFallback(state, block)
+      return
+    }
+    const toolBlock = block as unknown as Extract<
+      AnthropicResponse["content"][number],
+      { type: "tool_use" }
+    >
+    const converted =
+      options.toolMap ?
+        options.toolMap.restoreToolCall(toolBlock)
+      : createFunctionCallOutput(toolBlock)
+    if (converted) state.output.push(converted)
+    else appendAssistantBlockFallback(state, block)
+    return
+  }
+  if (!type) {
+    throwResponseContentError()
+  }
+  appendAssistantBlockFallback(state, block)
 }
 
 /**
@@ -1565,17 +1668,19 @@ function convertAnthropicOutput(
  * and text that ends the turn is the final answer. A turn that ends on
  * narration alone presents its last update as the answer, so it stays in view.
  * A truncated or refused turn has no settled answer, so its messages stay
- * unphased.
+ * unphased. Only the final round's items decide: earlier managed rounds are
+ * already commentary.
  */
 function assignAssistantPhases(
   state: AnthropicOutputState,
   stopReason: AnthropicResponse["stop_reason"],
+  finalRound: number,
 ): void {
   const messages = state.assistantMessages
   if (messages.length === 0) return
-  const callsTools = state.output.some(
-    (item) => item.type !== "message" && item.type !== "reasoning",
-  )
+  const callsTools = state.output
+    .slice(finalRound)
+    .some((item) => item.type !== "message" && item.type !== "reasoning")
   if (callsTools) {
     for (const message of messages) message.item.phase = "commentary"
     return
