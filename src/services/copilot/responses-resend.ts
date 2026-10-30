@@ -10,11 +10,6 @@ import {
   trimCodexMemoryRollout,
 } from "./codex-memory-rollout"
 import { readContextOverflowResponse } from "./context-overflow"
-import {
-  isItemIdOwnershipRejection,
-  rememberRefusedItemIds,
-  stripItemIds,
-} from "./responses-item-ids"
 
 export interface ResponsesAttempt {
   /** The account that answered, as the router reports it. */
@@ -26,38 +21,6 @@ export interface ResponsesAttempt {
 export type ResponsesResend = (
   payload: Record<string, unknown>,
 ) => Promise<Omit<ResponsesAttempt, "payload">>
-
-/**
- * Copilot binds item IDs to the account that issued them, and expires them.
- * An ID only names an item whose content is replayed with it, so when Copilot
- * refuses one, resend without any of them. Copilot names no item, so the IDs
- * stay off that account's later requests only once a resend without them
- * succeeds on it.
- */
-export async function resendWithoutRefusedItemIds(options: {
-  attempt: ResponsesAttempt
-  /** Ownership scope of the account that answered. */
-  accountScope: (accountId: number | undefined) => string
-  retryBudget: RetryBudget
-  send: ResponsesResend
-}): Promise<ResponsesAttempt> {
-  const { attempt } = options
-  if (!(await isItemIdOwnershipRejection(attempt.response))) return attempt
-  const payload = structuredClone(attempt.payload)
-  const removed = stripItemIds(payload)
-  if (removed.length === 0 || !consumeExtraSend(options.retryBudget)) {
-    return attempt
-  }
-  consola.warn("Copilot refused replayed item IDs; resending without them", {
-    items: removed.length,
-  })
-  const resent: ResponsesAttempt = { payload, ...(await options.send(payload)) }
-  // Success on the refusing account shows that account refuses the IDs.
-  if (resent.response.ok && resent.accountId === attempt.accountId) {
-    rememberRefusedItemIds(options.accountScope(attempt.accountId), removed)
-  }
-  return resent
-}
 
 // Each memory resend is sized from Copilot's latest count, so two suffice.
 const MAX_MEMORY_ROLLOUT_TRIMS = 2

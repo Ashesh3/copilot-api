@@ -12,7 +12,6 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
-import { omitRefusedItemIds } from "~/services/copilot/responses-item-ids"
 import { stripUnsupportedResponsesInputMetadata } from "~/services/copilot/responses-metadata"
 import { omitOutputTokenReplay } from "~/services/copilot/responses-output-replay"
 import {
@@ -56,7 +55,6 @@ import {
   type ResponsesPayloadRecoveryResult,
 } from "./responses-payload-recovery"
 import {
-  resendWithoutRefusedItemIds,
   resendWithShorterMemoryRollout,
   type ResponsesAttempt,
   type ResponsesResend,
@@ -626,12 +624,6 @@ const createResponsesCore = async (
       reasoningItems: omittedRejectedState,
     })
   }
-  const omittedRefusedIds = omitRefusedItemIds(body, destinationAccount)
-  if (omittedRefusedIds > 0) {
-    consola.debug("Omitted item IDs Copilot already refused", {
-      items: omittedRefusedIds,
-    })
-  }
   omitConfiguredReasoningEffort("responses", body)
 
   // Zero-data retention enforcement
@@ -754,10 +746,10 @@ async function sendResponsesWithRecovery(options: {
   retryBudget: RetryBudget
   send: ResponsesSend
 }): Promise<ResponsesAttempt> {
-  // The gateway replays reasoning state and item IDs, so it owns this
-  // recovery whether or not the caller allows compatibility retries. Copilot
-  // checks each item's ID before its state, and reports only the first
-  // refusal, so a resend can reveal the other kind.
+  // The gateway replays reasoning state, so it owns this recovery whether or
+  // not the caller allows compatibility retries. Copilot checks a reasoning
+  // item's ID before its state, so a resend without refused IDs can reveal
+  // refused state.
   const resend = async (payload: Record<string, unknown>) =>
     await options.send(payload, true)
   const recover = async (attempt: ResponsesAttempt) => {
@@ -769,20 +761,11 @@ async function sendResponsesWithRecovery(options: {
     if (payload && consumeExtraSend(options.retryBudget)) {
       activeAttempt = { payload, ...(await options.send(payload, true)) }
     }
-    const recoverIds = async (current: ResponsesAttempt) =>
-      await resendWithoutRefusedItemIds({
-        attempt: current,
-        accountScope: reasoningStateAccount,
-        retryBudget: options.retryBudget,
-        send: resend,
-      })
-    return await recoverIds(
-      await resendWithoutRejectedReasoningState({
-        attempt: await recoverIds(activeAttempt),
-        retryBudget: options.retryBudget,
-        send: resend,
-      }),
-    )
+    return await resendWithoutRejectedReasoningState({
+      attempt: activeAttempt,
+      retryBudget: options.retryBudget,
+      send: resend,
+    })
   }
   const attempt = await recover({
     payload: options.payload,

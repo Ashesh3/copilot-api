@@ -36,7 +36,6 @@ import {
   sanitizeResponsesStreamEvent,
   type ResponsesPayload,
 } from "../src/services/copilot/create-responses"
-import { resetRefusedItemIdsForTest } from "../src/services/copilot/responses-item-ids"
 import { resetRejectedReasoningStateForTest } from "../src/services/copilot/responses-reasoning-state"
 import { clientToolsPayload } from "./helpers/client-tools-payload"
 import {
@@ -1833,38 +1832,6 @@ const ISSUED_REASONING = {
   encrypted_content: "reasoning-state-issued-with-the-id",
 }
 
-test("resends without item IDs when Copilot refuses one, keeping the item state", async () => {
-  state.models = responsesCapableModels
-  queuedResponses.push(itemIdRejection(), createSuccessResponse())
-
-  try {
-    const first = await postReasoningTurn(
-      "gpt-4o",
-      "item-id-session",
-      ISSUED_REASONING,
-    )
-    const second = await postReasoningTurn(
-      "gpt-4o",
-      "item-id-session",
-      ISSUED_REASONING,
-    )
-
-    expect(first.status).toBe(200)
-    expect(second.status).toBe(200)
-    // The refused turn, its resend, then the next turn sent once.
-    expect(requestBodies).toHaveLength(3)
-    expect(requestBodies[0].input).toContainEqual(ISSUED_REASONING)
-    const { id: _id, ...withoutId } = ISSUED_REASONING
-    for (const body of requestBodies.slice(1)) {
-      expect(body.input).toContainEqual(withoutId)
-      expect(JSON.stringify(body.input)).not.toContain(ISSUED_REASONING.id)
-    }
-  } finally {
-    resetRefusedItemIdsForTest()
-    resetRejectedReasoningStateForTest()
-  }
-})
-
 test("recovers refused reasoning state that an item ID refusal hid", async () => {
   state.models = responsesCapableModels
   queuedResponses.push(
@@ -1892,7 +1859,6 @@ test("recovers refused reasoning state that an item ID refusal hid", async () =>
       summary: ISSUED_REASONING.summary,
     })
   } finally {
-    resetRefusedItemIdsForTest()
     resetRejectedReasoningStateForTest()
   }
 })
@@ -1932,44 +1898,6 @@ test("keeps item IDs when Copilot refuses other connection state", async () => {
       expect(body.input).toContainEqual(ISSUED_REASONING)
     }
   } finally {
-    resetRefusedItemIdsForTest()
-    resetRejectedReasoningStateForTest()
-  }
-})
-
-test("remembers refused item IDs only after a resend without them succeeds", async () => {
-  state.models = responsesCapableModels
-  queuedResponses.push(
-    itemIdRejection(),
-    Response.json(
-      { error: { message: "The request could not be processed." } },
-      { status: 400 },
-    ),
-    createSuccessResponse(),
-  )
-
-  try {
-    const failed = await postReasoningTurn(
-      "gpt-4o",
-      "item-id-failed-resend-session",
-      ISSUED_REASONING,
-    )
-    const next = await postReasoningTurn(
-      "gpt-4o",
-      "item-id-failed-resend-session",
-      ISSUED_REASONING,
-    )
-
-    expect(failed.status).toBe(400)
-    expect(next.status).toBe(200)
-    expect(requestBodies).toHaveLength(3)
-    expect(JSON.stringify(requestBodies[1].input)).not.toContain(
-      ISSUED_REASONING.id,
-    )
-    // A failed resend shows nothing about the IDs, so the next turn sends them.
-    expect(requestBodies[2].input).toContainEqual(ISSUED_REASONING)
-  } finally {
-    resetRefusedItemIdsForTest()
     resetRejectedReasoningStateForTest()
   }
 })
