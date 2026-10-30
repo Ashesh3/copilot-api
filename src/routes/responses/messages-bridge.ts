@@ -73,6 +73,7 @@ import {
   toCompactionSummaryRequest,
   toRemoteCompactionResult,
 } from "./compaction-trigger"
+import { MidThreadInstructions } from "./messages-instructions"
 import {
   isProgressUpdatesRejection,
   isVisibleProgressUpdate,
@@ -354,6 +355,7 @@ async function convertTolerantResponsesInput(
   const system: Array<string> = []
   const webSearches = new ManagedWebSearchHistory(messages)
   const webSearchTools = webSearches.toolNames
+  const instructions = new MidThreadInstructions(messages)
   const resolveAttachment: ResponsesAttachmentCache["resolve"] =
     sharedAttachmentCache?.resolve
     ?? (async ({ expectPdf, signal, value }) =>
@@ -380,6 +382,7 @@ async function convertTolerantResponsesInput(
     pendingProgressUpdate = undefined
     if (!isRecord(item)) {
       webSearches.flush()
+      instructions.flush()
       if (stringifyTolerantValue(item)) {
         addTranslationFinding(state.findings, {
           class: "unknown_item",
@@ -401,6 +404,7 @@ async function convertTolerantResponsesInput(
         readManagedWebSearchReplay(raw.encrypted_content)
       : undefined
     webSearches.settleBefore(raw, webSearch)
+    instructions.settleBefore(type)
     if (webSearch) {
       webSearches.add(webSearch)
       continue
@@ -543,7 +547,9 @@ async function convertTolerantResponsesInput(
     if (type === undefined || type === "message") {
       if (raw.role === "system" || raw.role === "developer") {
         const text = responsesContentToPlainText(raw.content)
-        if (text) system.push(text)
+        if (!text) continue
+        if (instructions.answered()) instructions.add(text)
+        else system.push(text)
         continue
       }
       const assistant = raw.role === "assistant"
@@ -587,6 +593,7 @@ async function convertTolerantResponsesInput(
     appendTolerantTextMessage(messages, "user", FUTURE_RESPONSES_ITEM_CONTEXT)
   }
   webSearches.flush()
+  instructions.flush()
   return { messages, system, webSearchTools }
 }
 

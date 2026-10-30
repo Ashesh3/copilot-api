@@ -258,6 +258,13 @@ request that declares no tools.
 A `web_search_call` without this state keeps its previous text handling, and
 native Responses drops the state with other output ciphertext.
 
+Developer and system input messages that precede the model's first answer
+form the Messages `system` prompt. Codex adds developer messages later in a
+thread when permissions, the sandbox, the model or the collaboration mode
+change. Once the model has answered, such a message stays at its position as
+user-turn text in a `<system-reminder>` block, after any tool results of that
+turn, so the system prompt and the cached prefix do not change mid-thread.
+
 For Messages-to-Responses/Chat routing, system and developer instructions retain
 their roles and position. Request effort and structured output are translated.
 Claude's `DeferredToolPlaceholder` sentinel is omitted while discovered real
