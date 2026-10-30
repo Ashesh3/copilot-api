@@ -79,8 +79,8 @@ import {
   VisibleTextBuilder,
 } from "./messages-progress-updates"
 import {
-  decodeAnthropicReasoningEnvelope,
   encodeAnthropicReasoningEnvelope,
+  readAnthropicReasoningEnvelope,
 } from "./messages-reasoning-provenance"
 import {
   createResponsesMessagesToolMap,
@@ -415,13 +415,15 @@ async function convertTolerantResponsesInput(
     }
     if (type === "reasoning") {
       const summary = Array.isArray(raw.summary) ? raw.summary : []
-      const thinking = decodeAnthropicReasoningEnvelope(
+      const envelope = readAnthropicReasoningEnvelope(
         raw.encrypted_content,
         source.model,
       )
-      if (thinking) {
-        for (const block of thinking) appendAssistantBlock(messages, block)
-        pendingProgressUpdate = replayedProgressUpdate(source.model, thinking)
+      if (envelope) {
+        for (const block of envelope.blocks) {
+          appendAssistantBlock(messages, block)
+        }
+        pendingProgressUpdate = replayedProgressUpdate(envelope)
         continue
       }
       for (const entry of summary) {
@@ -1425,8 +1427,7 @@ function convertAnthropicOutput(
       state.output.push(
         createReasoningOutput(state, thinking, {
           model: options.reasoningModel,
-          // Under display updates thinking text is narration, not reasoning.
-          summarize: !options.progressUpdates,
+          progressUpdates: options.progressUpdates,
         }),
       )
       if (
@@ -1445,6 +1446,7 @@ function convertAnthropicOutput(
         encrypted_content: encodeAnthropicReasoningEnvelope(
           options.reasoningModel,
           [{ type: "redacted_thinking", data: block.data }],
+          { progressUpdates: options.progressUpdates },
         ),
         status: "completed",
       })
@@ -1493,7 +1495,8 @@ function convertAnthropicOutput(
  * native Responses models report it. Text before a tool call is commentary
  * and text that ends the turn is the final answer. A turn that ends on
  * narration alone presents its last update as the answer, so it stays in view.
- * Incomplete and refused turns keep unphased text.
+ * A truncated or refused turn has no settled answer, so its messages stay
+ * unphased.
  */
 function assignAssistantPhases(
   state: AnthropicOutputState,
@@ -1504,14 +1507,11 @@ function assignAssistantPhases(
   const callsTools = state.output.some(
     (item) => item.type !== "message" && item.type !== "reasoning",
   )
-  const endsTurn =
-    !callsTools && (stopReason === "end_turn" || stopReason === "stop_sequence")
-  if (!endsTurn) {
-    for (const message of messages) {
-      if (callsTools || message.update) message.item.phase = "commentary"
-    }
+  if (callsTools) {
+    for (const message of messages) message.item.phase = "commentary"
     return
   }
+  if (stopReason !== "end_turn" && stopReason !== "stop_sequence") return
   const visible = messages.filter((message) => message.text.trim())
   const answers = visible.filter((message) => !message.update)
   const finals = new Set(answers.length > 0 ? answers : visible.slice(-1))
@@ -1576,20 +1576,23 @@ function nextReasoningId(state: AnthropicOutputState): string {
 function createReasoningOutput(
   state: AnthropicOutputState,
   block: Extract<AnthropicResponse["content"][number], { type: "thinking" }>,
-  options: { readonly model: string; readonly summarize: boolean },
+  options: { readonly model: string; readonly progressUpdates: boolean },
 ): ResponseOutputItem {
   return {
     id: nextReasoningId(state),
     type: "reasoning",
+    // Under display updates thinking text is narration shown as a message.
     summary:
-      options.summarize && block.thinking ?
+      !options.progressUpdates && block.thinking ?
         [{ type: "summary_text", text: block.thinking }]
       : [],
     ...(block.signature ?
       {
-        encrypted_content: encodeAnthropicReasoningEnvelope(options.model, [
-          block,
-        ]),
+        encrypted_content: encodeAnthropicReasoningEnvelope(
+          options.model,
+          [block],
+          { progressUpdates: options.progressUpdates },
+        ),
       }
     : {}),
     status: "completed",

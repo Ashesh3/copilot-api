@@ -413,6 +413,34 @@ test("keeps the interruption notice in signed state without showing it", () => {
   expect(result.output_text).toBe("")
 })
 
+test.each(["max_tokens", "refusal"] as const)(
+  "leaves a %s turn's progress update unphased",
+  (stopReason) => {
+    const result = anthropicResponseToResponsesResult(
+      anthropicMessage(
+        [
+          { type: "thinking", thinking: "", signature: "sig-a" },
+          {
+            type: "thinking",
+            thinking: "Reading the failing test.",
+            signature: "sig-b",
+          },
+        ],
+        stopReason,
+      ),
+      "claude-opus-5.5",
+      responseContext(),
+      { progressUpdates: true },
+    )
+
+    const message = result.output.find((item) => item.type === "message")
+    expect(message).toMatchObject({
+      content: [{ text: "Reading the failing test." }],
+    })
+    expect(message).not.toHaveProperty("phase")
+  },
+)
+
 test("replays a progress-update turn exactly as Claude produced it", async () => {
   const result = anthropicResponseToResponsesResult(
     anthropicMessage(TOOL_TURN, "tool_use"),
@@ -476,4 +504,35 @@ test("replays assistant text that differs from the preceding update", async () =
   expect(JSON.stringify(candidate.payload.messages)).toContain(
     '{"type":"text","text":"Edited."}',
   )
+})
+
+test("replays text that repeats thinking produced without progress updates", async () => {
+  // Summarized thinking, as after Copilot rejects display updates.
+  const content: Array<AnthropicAssistantContentBlock> = [
+    { type: "thinking", thinking: "Done.", signature: "sig-summary" },
+    { type: "text", text: "Done." },
+  ]
+  const result = anthropicResponseToResponsesResult(
+    anthropicMessage(content, "end_turn"),
+    "claude-opus-5.5",
+    responseContext(),
+    { progressUpdates: false },
+  )
+
+  const candidate = await adaptResponsesToMessagesCandidate({
+    source: {
+      model: "claude-opus-5.5",
+      input: [
+        { type: "message", role: "user", content: "Fix the failing test" },
+        ...(result.output as Array<ResponseInputItem>),
+        { type: "message", role: "user", content: "Thanks" },
+      ],
+      tools: [EXEC_TOOL],
+    },
+  })
+
+  expect(candidate.payload.messages.slice(1, 3)).toEqual([
+    { role: "assistant", content: [content[0]] },
+    { role: "assistant", content: [content[1]] },
+  ])
 })

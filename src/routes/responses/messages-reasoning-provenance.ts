@@ -8,6 +8,12 @@ const MAX_ENVELOPE_LENGTH = 1024 * 1024
 
 type ReasoningBlock = AnthropicThinkingBlock | AnthropicRedactedThinkingBlock
 
+export interface AnthropicReasoningEnvelope {
+  readonly blocks: Array<ReasoningBlock>
+  /** The thinking text is progress-update narration the client was shown. */
+  readonly progressUpdates: boolean
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
@@ -40,12 +46,16 @@ function readBlock(value: unknown): ReasoningBlock | undefined {
 export function encodeAnthropicReasoningEnvelope(
   model: string,
   blocks: ReadonlyArray<ReasoningBlock>,
+  options?: { readonly progressUpdates?: boolean },
 ): string {
+  const envelope = {
+    model,
+    blocks,
+    ...(options?.progressUpdates ? { display: "updates" } : {}),
+  }
   return (
     ANTHROPIC_REASONING_ENVELOPE_PREFIX
-    + Buffer.from(JSON.stringify({ model, blocks }), "utf8").toString(
-      "base64url",
-    )
+    + Buffer.from(JSON.stringify(envelope), "utf8").toString("base64url")
   )
 }
 
@@ -53,6 +63,13 @@ export function decodeAnthropicReasoningEnvelope(
   value: unknown,
   model?: string,
 ): Array<ReasoningBlock> | undefined {
+  return readAnthropicReasoningEnvelope(value, model)?.blocks
+}
+
+export function readAnthropicReasoningEnvelope(
+  value: unknown,
+  model?: string,
+): AnthropicReasoningEnvelope | undefined {
   if (
     typeof value !== "string"
     || value.length > MAX_ENVELOPE_LENGTH
@@ -86,5 +103,5 @@ export function decodeAnthropicReasoningEnvelope(
     if (!block) return undefined
     blocks.push(block)
   }
-  return blocks
+  return { blocks, progressUpdates: parsed.display === "updates" }
 }
