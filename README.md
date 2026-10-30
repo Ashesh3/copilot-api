@@ -163,6 +163,9 @@ parse, or cache them, and has no local-fetch fallback.**
   reasoning and narration (as `commentary`), then a `web_search_call` per
   search. Its opaque `encrypted_content` carries the private tool call and
   result, so the next turn replays the exact history Claude answered after.
+  Codex keeps that state only with its built-in OpenAI provider, which
+  `openai_base_url` configures; a custom `[model_providers]` entry clears it,
+  so later turns lose the search results and the reasoning that followed them.
   Hosted `web_search` offered without client tools runs through the gateway
   there, instead of reaching the client as a function call it cannot run.
 - Observed model usage is retained across managed rounds, including cancelled
