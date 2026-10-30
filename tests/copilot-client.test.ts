@@ -223,11 +223,16 @@ test.each([
   "context-management-2025-06-27",
   "fallback-credit-2026-07-01",
   "fine-grained-tool-streaming-2025-05-14",
+  "inline-tools-2026-09-15",
   "interleaved-thinking-2025-05-14",
   "mid-conv-tool-change-2026-07-01",
+  "mid-conversation-output-config-2026-07-01",
   "mid-conversation-system-2026-04-07",
+  "mid-conversation-tool-changes-2026-07-01",
+  "per-turn-control-2026-07-01",
   "task-budgets-2026-03-13",
   "thinking-binding-controls-2026-08-01",
+  "thinking-display-updates-2026-08-18",
   "token-efficient-tools-2025-02-19",
 ])("retains supported beta %s while dropping unknown siblings", (beta) => {
   const headers = copilotHeaders({

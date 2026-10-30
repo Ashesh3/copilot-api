@@ -1170,6 +1170,7 @@ test("converts Anthropic text thinking tools usage stop and model alias", () => 
         type: "message",
         role: "assistant",
         status: "completed",
+        phase: "commentary",
         content: [{ type: "output_text", text: "answer", annotations: [] }],
       },
       {
@@ -1376,6 +1377,7 @@ test.each([
         type: "message",
         role: "assistant",
         status: "completed",
+        phase: "final_answer",
         content: [{ type: "output_text", text: expectedText, annotations: [] }],
       },
     ])
