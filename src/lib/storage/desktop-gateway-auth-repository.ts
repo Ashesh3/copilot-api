@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto"
+import { randomBytes, randomInt, randomUUID } from "node:crypto"
 
 import type { DesktopAuthMutationResult } from "~/lib/storage/desktop-gateway-auth-mutation"
 import type { SqlSession, Storage } from "~/lib/storage/types"
@@ -350,9 +350,10 @@ export class DesktopGatewayAuthRepository {
     const now = timestamp(input.now ?? Date.now())
     const selectedClient = clientId(input.clientId)
     const deviceCode = secret("gw_device_")
-    const normalizedCode = [...randomBytes(8)]
-      .map((value) => USER_CODE_ALPHABET[value % USER_CODE_ALPHABET.length])
-      .join("")
+    const normalizedCode = Array.from(
+      { length: 8 },
+      () => USER_CODE_ALPHABET[randomInt(USER_CODE_ALPHABET.length)],
+    ).join("")
     const digest = credentialDigest(deviceCode)
     return mutateDesktopAuth(
       this.storage,

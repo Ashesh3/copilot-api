@@ -61,6 +61,8 @@ async function mutate<T>(
         expectedRevision: await getStoreRevision(storage),
         actorId: actor,
         kind,
+        // Deterministic mutation-input fingerprint for commit reconciliation,
+        // not a password verifier. Administrator passwords use Argon2id.
         inputDigest: createHash("sha256")
           .update(JSON.stringify(input))
           .digest("hex"),
