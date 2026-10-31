@@ -19,6 +19,7 @@ const SENSITIVE_HEADERS = [
   "X-Interaction-Id",
   "X-Agent-Task-Id",
   "X-Parent-Agent-Id",
+  "Sec-WebSocket-Protocol",
 ] as const
 
 type SendHook = (
@@ -43,6 +44,8 @@ test("credential-control telemetry drops raw request and response context in eve
       "https://gateway.example/dashboard/api/credentials/gateway/fixture/reveal",
       "https://gateway.example/dashboard/api/custom-providers/fixture/reveal",
       "https://gateway.example/dashboard/auth/login",
+      "https://gateway.example/gateway/oauth/verify",
+      "https://gateway.example/v1/gateway/oauth/token",
     ])
       expectFailClosed(name, hook, {
         request: {

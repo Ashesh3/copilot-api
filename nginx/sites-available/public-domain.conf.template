@@ -61,12 +61,64 @@ server {
   if ($host != "{{PUBLIC_SERVER_NAME}}") { return 444; }
 
   proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-Host $host;
   proxy_set_header X-Real-IP $remote_addr;
   proxy_set_header X-Forwarded-For $remote_addr;
   proxy_set_header X-Forwarded-Proto $scheme;
 
   # This template intentionally has no catch-all proxy. Add only routes that
   # the public hostname is expected to serve.
+  # Claude Desktop's gateway device flow authenticates inside the form body.
+  # It sends no client ID or Authorization header to these exact OAuth routes.
+  location ~ ^/(?:v1/)?\.well-known/oauth-authorization-server$ {
+    if ($request_method != GET) { return 404; }
+    proxy_pass {{UPSTREAM_URL}};
+  }
+
+  location ~ ^/(?:v1/)?gateway/oauth/(?:device|token|revoke)$ {
+    if ($request_method != POST) { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location ~ ^/(?:v1/)?gateway/oauth/verify$ {
+    if ($request_method !~ ^(?:GET|POST)$) { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  location ~ ^/(?:v1/)?user/dictation/ticket$ {
+    if ($request_method != POST) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+
+  # The single-use ticket travels in Sec-WebSocket-Protocol. Preserve both
+  # offered protocols and the audio-format query without recording credentials.
+  location ~ ^/(?:v1/)?user/dictation/stream$ {
+    if ($request_method != GET) { return 404; }
+    if ($http_upgrade !~* ^websocket$) { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    # Local proxy_set_header directives replace all inherited header settings.
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection upgrade;
+    proxy_set_header Sec-WebSocket-Protocol $http_sec_websocket_protocol;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_cache off;
+  }
+
   location = /health/health {
     limit_except GET { deny all; }
     proxy_pass {{UPSTREAM_URL}};

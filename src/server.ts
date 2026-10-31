@@ -49,9 +49,11 @@ import { computerUsePolicyRoutes } from "./routes/computer-use-policy/route"
 import { copilotControlPlaneRoutes } from "./routes/copilot-control-plane/route"
 import { dashboardRoutes } from "./routes/dashboard/route"
 import { decisionRoutes } from "./routes/decisions/route"
+import { desktopDictationRoutes } from "./routes/desktop-dictation/route"
 import { directConnectRoutes } from "./routes/direct-connect/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
 import { environmentsRoutes } from "./routes/environments/route"
+import { gatewayAuthRoutes } from "./routes/gateway-auth/route"
 import { googleAIRoutes } from "./routes/google-ai/route"
 import { growthbookRoutes } from "./routes/growthbook/route"
 import { healthRoutes } from "./routes/health/route"
@@ -214,6 +216,9 @@ server.get("/code", async (c) => {
 // guards. These exact routes authenticate enabled managed identities internally.
 server.route("", codexAccountRoutes)
 server.route("", codexSettingsRoutes)
+// Desktop gateway sign-in has its own device-code and scoped-token protocol.
+server.route("", gatewayAuthRoutes)
+server.route("", desktopDictationRoutes)
 // OAuth fake layer — authorize, token exchange, profile
 server.route("/oauth", oauthBrowserRoutes)
 server.route("/v1/oauth", oauthTokenRoutes)

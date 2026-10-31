@@ -35,6 +35,11 @@ import {
   codexReasoningPreferencesMigration,
   codexReasoningPreferenceTables,
 } from "~/lib/storage/migrations/011-codex-reasoning-preferences"
+import {
+  desktopGatewayAuthIndexes,
+  desktopGatewayAuthMigration,
+  desktopGatewayAuthTables,
+} from "~/lib/storage/migrations/012-desktop-gateway-auth"
 
 export const storageMigrations = [
   initialMigration,
@@ -48,9 +53,10 @@ export const storageMigrations = [
   conversationAccountModelMigration,
   usageTokenCountersMigration,
   codexReasoningPreferencesMigration,
+  desktopGatewayAuthMigration,
 ] as const
 
-export const currentSchemaVersion = codexReasoningPreferencesMigration.version
+export const currentSchemaVersion = desktopGatewayAuthMigration.version
 const versionTwoTables = { ...initialTables, ...gatewaySecretTables }
 const versionThreeTables = Object.fromEntries(
   Object.entries(versionTwoTables).filter(([name]) => name !== "capi_debug"),
@@ -74,9 +80,13 @@ const versionTenTables = {
   ...versionEightTables,
   ...conversationAccountModelTables,
 }
-export const currentTables = {
+const versionElevenTables = {
   ...versionTenTables,
   ...codexReasoningPreferenceTables,
+}
+export const currentTables = {
+  ...versionElevenTables,
+  ...desktopGatewayAuthTables,
 }
 const versionThreeIndexes = Object.fromEntries(
   Object.entries(initialIndexes).filter(
@@ -88,9 +98,13 @@ const versionFiveIndexes = Object.fromEntries(
     ([, target]) => !target.startsWith("capi_activity("),
   ),
 )
-export const currentIndexes = {
+const versionElevenIndexes = {
   ...versionFiveIndexes,
   ...historyRetentionIndexes,
+}
+export const currentIndexes = {
+  ...versionElevenIndexes,
+  ...desktopGatewayAuthIndexes,
 }
 export const currentCounterKeys = ["config_revision"] as const
 
@@ -127,21 +141,21 @@ export function storageSchema(version: number) {
     case 6: {
       return {
         tables: versionFiveTables,
-        indexes: currentIndexes,
+        indexes: versionElevenIndexes,
         counterKeys: currentCounterKeys,
       }
     }
     case 7: {
       return {
         tables: versionSevenTables,
-        indexes: currentIndexes,
+        indexes: versionElevenIndexes,
         counterKeys: currentCounterKeys,
       }
     }
     case 8: {
       return {
         tables: versionEightTables,
-        indexes: currentIndexes,
+        indexes: versionElevenIndexes,
         counterKeys: currentCounterKeys,
       }
     }
@@ -149,7 +163,14 @@ export function storageSchema(version: number) {
     case 10: {
       return {
         tables: versionTenTables,
-        indexes: currentIndexes,
+        indexes: versionElevenIndexes,
+        counterKeys: currentCounterKeys,
+      }
+    }
+    case 11: {
+      return {
+        tables: versionElevenTables,
+        indexes: versionElevenIndexes,
         counterKeys: currentCounterKeys,
       }
     }

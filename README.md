@@ -461,7 +461,8 @@ compact and continue.
 ### Claude desktop
 
 Claude desktop's third-party inference mode can use Copilot API as its gateway.
-Set these managed configuration values, as string values under
+For a personal installation, use Desktop's editable third-party configuration.
+Organizations can set the same managed configuration values, as string values under
 `HKCU\SOFTWARE\Policies\Claude` or `HKLM\SOFTWARE\Policies\Claude` on Windows,
 in a configuration profile on macOS, or in
 `/etc/claude-desktop/managed-settings.json` on Linux. Anthropic's
@@ -482,6 +483,14 @@ newest model of each family is marked `is_family_default`. Claude desktop
 starts Claude Code with those models as its default for each family, such as
 Opus, Sonnet, Haiku, Fable, and Mythos. Its connection test sends a one-token
 Messages request to a Haiku model.
+
+For the native dictation microphone, use the gateway's interactive sign-in and
+enable `dictationEnabled`. A static key alone does not expose that microphone in
+Desktop 4.4212.0. The sign-in page accepts an existing gateway or inference key;
+no Claude account is needed for this gateway flow. Speech transcription requires
+the existing Groq configuration. See
+[Claude Desktop dictation setup](docs/claude-desktop-dictation.md) for deployment,
+editable Windows configuration, sign-in, verification, and rollback.
 
 ### Google-compatible clients
 
@@ -1045,8 +1054,9 @@ prerequisite. The canonical setup, gateway rollout, verification, rollback, and
 troubleshooting procedure is in
 [docs/codex-desktop-managed-auth.md](docs/codex-desktop-managed-auth.md).
 
-Set `GROQ_API_KEY` or the equivalent `groqApiKey` config field to enable speech
-transcription. Set `groqModel` in the database-backed application settings to
+Configure the stored Groq credential in the dashboard's credential settings to
+enable speech transcription. `GROQ_API_KEY` is consumed only by explicit legacy
+import, not by normal startup. Set `groqModel` in the database-backed application settings to
 change the model used for
 `whisper-1` and the Codex/voice paths. The voice WebSocket endpoint is
 `/api/ws/speech_to_text/voice_stream`. It authenticates the upgrade with an

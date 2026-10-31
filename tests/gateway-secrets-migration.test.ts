@@ -6,6 +6,7 @@ import type { Storage } from "~/lib/storage/types"
 
 import { migrateStorage } from "~/lib/storage/migrations"
 import { initialMigration } from "~/lib/storage/migrations/001-initial"
+import { currentSchemaVersion } from "~/lib/storage/schema"
 
 import { createSchemaFixture, faultStorage } from "./helpers/storage-schema"
 
@@ -82,25 +83,17 @@ test("version two removes old digest-only keys without replacing unrelated state
       args: [],
     }),
   }))
-  expect(state.migrations).toEqual([
-    { version: 1 },
-    { version: 2 },
-    { version: 3 },
-    { version: 4 },
-    { version: 5 },
-    { version: 6 },
-    { version: 7 },
-    { version: 8 },
-    { version: 9 },
-    { version: 10 },
-    { version: 11 },
-  ])
+  expect(state.migrations).toEqual(
+    Array.from({ length: currentSchemaVersion }, (_, index) => ({
+      version: index + 1,
+    })),
+  )
   expect(state.gateways).toEqual([])
   expect(state.settings).toEqual([
     { namespace: "app", value_json: "{}", revision: 7 },
   ])
   expect(state.identity).toEqual([{ value: storeId }])
-  expect(state.version).toEqual([{ value: "11" }])
+  expect(state.version).toEqual([{ value: String(currentSchemaVersion) }])
   expect(
     await storage.read((session) =>
       session.query({ sql: "SELECT * FROM capi_gateway_secrets", args: [] }),

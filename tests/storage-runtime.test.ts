@@ -21,6 +21,7 @@ import {
   initializeStorageRuntime,
   peekStorageRuntime,
 } from "~/lib/storage/runtime"
+import { currentSchemaVersion } from "~/lib/storage/schema"
 
 import { createRuntimeStorage } from "./helpers/runtime-storage"
 
@@ -47,7 +48,7 @@ test("initialization migrates the selected SQLite store and creates no JSON", as
       args: ["schema_version"],
     }),
   )
-  expect(rows).toEqual([{ value: "11" }])
+  expect(rows).toEqual([{ value: String(currentSchemaVersion) }])
   expect(
     (await readdir(db.directory)).every((name) =>
       /^copilot-api\.sqlite(?:-(?:wal|shm))?$/.test(name),

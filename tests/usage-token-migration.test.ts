@@ -11,9 +11,12 @@ import {
 } from "~/lib/storage/legacy-import"
 import { migrateStorage } from "~/lib/storage/migrations"
 import { repairUsageTokenCounters } from "~/lib/storage/migrations/010-usage-token-counters"
-import { codexReasoningPreferencesMigration } from "~/lib/storage/migrations/011-codex-reasoning-preferences"
 import { restoreBackup } from "~/lib/storage/restore"
-import { storageMigrations, storageSchema } from "~/lib/storage/schema"
+import {
+  currentTables,
+  storageMigrations,
+  storageSchema,
+} from "~/lib/storage/schema"
 
 import { createSchemaFixture, faultStorage } from "./helpers/storage-schema"
 import {
@@ -183,14 +186,17 @@ test("fresh schema needs no counter recovery and remains idempotent", async () =
 
 test("schema nine backup restores repair sentinels before retaining current detail", async () => {
   const source = await legacySchema()
-  // The current exporter reads current tables. An empty preference table emits
-  // no frames, preserving the schema-nine backup payload under test without
-  // running the counter repair that this restore test is meant to exercise.
+  // The current exporter reads current tables. Add only empty later tables,
+  // which emit no frames, without running migrations that would repair the
+  // schema-nine counters this restore test is meant to exercise.
+  const historicalTables = storageSchema(9).tables
   await source.atomicBatch(
-    codexReasoningPreferencesMigration.statements.map((sql) => ({
-      sql,
-      args: [],
-    })),
+    Object.entries(currentTables)
+      .filter(([name]) => !Object.hasOwn(historicalTables, name))
+      .map(([name, definition]) => ({
+        sql: "CREATE TABLE " + name + " (" + definition + ")",
+        args: [],
+      })),
   )
   const now = Math.floor(Date.now() / 60_000) * 60_000
   await source.atomicBatch([

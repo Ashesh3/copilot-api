@@ -6,7 +6,7 @@ import type { Storage } from "~/lib/storage/types"
 
 import { migrateStorage } from "~/lib/storage/migrations"
 import { restoreBackup } from "~/lib/storage/restore"
-import { storageMigrations } from "~/lib/storage/schema"
+import { currentSchemaVersion, storageMigrations } from "~/lib/storage/schema"
 
 import { createVersionFiveBackup } from "./helpers/history-backup"
 import { createSchemaFixture, faultStorage } from "./helpers/storage-schema"
@@ -154,7 +154,7 @@ test("failed index upgrade leaves schema five usable for an atomic retry", async
         args: [],
       }),
     ),
-  ).toEqual([{ value: "11" }])
+  ).toEqual([{ value: String(currentSchemaVersion) }])
 })
 
 test("schema five archive retains lifetime usage and drops old model detail", async () => {

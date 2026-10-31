@@ -5,6 +5,7 @@ import { createCodexReasoningPreferencesRepository } from "~/lib/storage/codex-r
 import { StorageSchemaError } from "~/lib/storage/errors"
 import { migrateStorage } from "~/lib/storage/migrations"
 import { restoreBackup } from "~/lib/storage/restore"
+import { currentTables, storageSchema } from "~/lib/storage/schema"
 import { completeTransferRecord } from "~/lib/storage/transfer-records"
 
 import {
@@ -63,9 +64,16 @@ test("preference repositories use independent supplied databases without a globa
 
 test("version ten databases gain reasoning preferences without changing existing settings", async () => {
   await withTransferStorage(async (storage) => {
+    const historicalTables = storageSchema(10).tables
+    const laterTables = Object.keys(currentTables)
+      .filter(
+        (name) => name !== table && !Object.hasOwn(historicalTables, name),
+      )
+      .reverse()
     await storage.atomicBatch([
+      ...laterTables.map((name) => ({ sql: "DROP TABLE " + name, args: [] })),
       { sql: `DROP TABLE ${table}`, args: [] },
-      { sql: "DELETE FROM capi_schema_migrations WHERE version=11", args: [] },
+      { sql: "DELETE FROM capi_schema_migrations WHERE version>10", args: [] },
       {
         sql: "UPDATE capi_metadata SET value='10' WHERE key='schema_version'",
         args: [],

@@ -20,6 +20,7 @@ import {
 import { initialTables } from "~/lib/storage/migrations/001-initial"
 import { gatewaySecretTables } from "~/lib/storage/migrations/002-gateway-secrets"
 import { discardIncompleteTransfer, restoreBackup } from "~/lib/storage/restore"
+import { currentSchemaVersion } from "~/lib/storage/schema"
 import { transferRecords } from "~/lib/storage/transfer-records"
 
 import {
@@ -255,7 +256,7 @@ test("new encrypted backups exclude retired debug data and metadata even if stal
     expect(plain).not.toContain("capi_debug")
     expect(plain).not.toContain("history_debug_generation")
     expect(plain).not.toContain(privatePayload)
-    expect(plain).toContain('"schemaVersion":11')
+    expect(plain).toContain('"schemaVersion":' + String(currentSchemaVersion))
   })
 })
 
@@ -306,7 +307,7 @@ test.each([false, true])(
         }))
         expect(state.metadata).toEqual([
           { key: "config_revision", value: "2" },
-          { key: "schema_version", value: "11" },
+          { key: "schema_version", value: String(currentSchemaVersion) },
         ])
         expect(state.settings).toEqual([{ namespace: "app", revision: 2 }])
         expect(state.activity).toEqual([])

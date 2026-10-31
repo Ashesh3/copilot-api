@@ -1,4 +1,5 @@
 import { createCredentialsRepository } from "~/lib/storage/credentials-repository"
+import { getDesktopGatewayAuthRepository } from "~/lib/storage/desktop-gateway-auth-repository"
 import { getStorageRuntime } from "~/lib/storage/runtime"
 
 import { getOAuthStore } from "./oauth-store"
@@ -165,6 +166,20 @@ export async function resolveCredential(
     requiredScopes,
   )
   if (gatewayCredential) return gatewayCredential
+
+  if (normalizedCredential.startsWith("gw_at_")) {
+    const desktop =
+      await getDesktopGatewayAuthRepository().resolveAccessToken(
+        normalizedCredential,
+      )
+    if (!desktop) return null
+    const credential: ResolvedCredential = {
+      kind: "inference-client",
+      principalId: desktop.principalId,
+      scopes: new Set(desktop.scopes),
+    }
+    return credentialHasScopes(credential, requiredScopes) ? credential : null
+  }
 
   const store = getOAuthStore()
   const oauthCredential = await store.resolveAccessToken(rawCredential)

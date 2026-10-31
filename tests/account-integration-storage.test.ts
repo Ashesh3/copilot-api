@@ -22,6 +22,7 @@ import { initialMigration } from "~/lib/storage/migrations/001-initial"
 import { gatewaySecretsMigration } from "~/lib/storage/migrations/002-gateway-secrets"
 import { getStoreRevision } from "~/lib/storage/operations"
 import { restoreBackup } from "~/lib/storage/restore"
+import { currentSchemaVersion } from "~/lib/storage/schema"
 import { validateTransferDomains } from "~/lib/storage/transfer-validation"
 
 import { createSchemaFixture } from "./helpers/storage-schema"
@@ -266,7 +267,7 @@ test("version two encrypted backups restore with the default override under the 
             args: [],
           }),
         ),
-      ).toEqual([{ value: "11" }])
+      ).toEqual([{ value: String(currentSchemaVersion) }])
     })
   })
 })
