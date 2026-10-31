@@ -1,5 +1,7 @@
+import consola from "consola"
+
 import { withRequestSnapshot } from "~/lib/storage/request-snapshot"
-import { transcribe } from "~/routes/voice/groq-stt"
+import { GroqTranscriptionError, transcribe } from "~/routes/voice/groq-stt"
 import { pcmToWav } from "~/routes/voice/pcm-to-wav"
 
 import type { DictationTicketBinding } from "./tickets"
@@ -131,8 +133,17 @@ async function finalize(ws: DictationSocket): Promise<void> {
     }
     ws.send(JSON.stringify({ type: "TranscriptEndpoint" }))
     closeSession(ws, 1000, "Dictation complete")
-  } catch {
-    if (!isReleased(session)) rejectSession(ws, 1011, "Transcription failed")
+  } catch (error) {
+    if (isReleased(session)) return
+    const diagnostic =
+      error instanceof GroqTranscriptionError ?
+        {
+          category: error.category,
+          ...(error.status === undefined ? {} : { status: error.status }),
+        }
+      : { category: "request_or_response" }
+    consola.error("[desktop-dictation] Transcription failed", diagnostic)
+    rejectSession(ws, 1011, "Transcription failed")
   }
 }
 

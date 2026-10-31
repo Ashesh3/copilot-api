@@ -11,6 +11,22 @@ export interface TranscribeOptions {
   signal?: AbortSignal
 }
 
+export class GroqTranscriptionError extends Error {
+  readonly category: "configuration" | "upstream"
+  readonly status?: number
+
+  constructor(
+    message: string,
+    category: "configuration" | "upstream",
+    status?: number,
+  ) {
+    super(message)
+    this.name = "GroqTranscriptionError"
+    this.category = category
+    this.status = status
+  }
+}
+
 /**
  * Sends an audio buffer to Groq's Whisper API for transcription.
  * Defaults to a WAV envelope (used by the streaming voice WebSocket).
@@ -25,7 +41,10 @@ export async function transcribe(
   const apiKey = getGroqApiKey()
 
   if (!apiKey) {
-    throw new Error("Groq API key is not configured")
+    throw new GroqTranscriptionError(
+      "Groq API key is not configured",
+      "configuration",
+    )
   }
 
   const model = config.groqModel ?? "whisper-large-v3-turbo"
@@ -53,7 +72,11 @@ export async function transcribe(
 
   if (!response.ok) {
     const body = await response.text().catch(() => "")
-    throw new Error(`Groq API error ${response.status}: ${body}`)
+    throw new GroqTranscriptionError(
+      `Groq API error ${response.status}: ${body}`,
+      "upstream",
+      response.status,
+    )
   }
 
   const data = (await response.json()) as { text?: string }

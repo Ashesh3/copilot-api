@@ -35,6 +35,27 @@ const states = new WeakMap<
 const pendingOperations = new Set<string>()
 const RECEIPT_RETENTION_MS = 86_400_000
 
+/** Remove expired authority without shortening access or replay-token lifetimes. */
+export async function pruneDesktopAuthState(
+  session: SqlSession,
+  now: number,
+): Promise<void> {
+  for (const table of [
+    "capi_desktop_device_grants",
+    "capi_desktop_access_tokens",
+    "capi_desktop_consumed_refresh_tokens",
+  ]) {
+    await session.execute({
+      sql: "DELETE FROM " + table + " WHERE expires_at<=?",
+      args: [now],
+    })
+  }
+  await session.execute({
+    sql: "DELETE FROM capi_desktop_auth_sessions WHERE (revoked_at IS NOT NULL OR refresh_expires_at<=?) AND NOT EXISTS (SELECT 1 FROM capi_desktop_access_tokens a WHERE a.session_id=capi_desktop_auth_sessions.id AND a.expires_at>?) AND NOT EXISTS (SELECT 1 FROM capi_desktop_consumed_refresh_tokens r WHERE r.session_id=capi_desktop_auth_sessions.id AND r.expires_at>?)",
+    args: [now, now, now],
+  })
+}
+
 function setPending(
   state: { pending?: Operation },
   operation: Operation | undefined,

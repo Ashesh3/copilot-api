@@ -35,12 +35,21 @@ export const desktopGatewayAuthTables = {
     "created_at INTEGER NOT NULL,",
     "expires_at INTEGER NOT NULL",
   ].join("\n"),
+  capi_desktop_consumed_refresh_tokens: [
+    "digest TEXT PRIMARY KEY NOT NULL,",
+    "session_id TEXT NOT NULL REFERENCES capi_desktop_auth_sessions(id) ON DELETE CASCADE,",
+    "expires_at INTEGER NOT NULL",
+  ].join("\n"),
 } as const
 
 export const desktopGatewayAuthIndexes = {
   capi_desktop_device_expiry: "capi_desktop_device_grants(expires_at)",
   capi_desktop_access_session: "capi_desktop_access_tokens(session_id)",
   capi_desktop_access_expiry: "capi_desktop_access_tokens(expires_at)",
+  capi_desktop_consumed_refresh_session:
+    "capi_desktop_consumed_refresh_tokens(session_id)",
+  capi_desktop_consumed_refresh_expiry:
+    "capi_desktop_consumed_refresh_tokens(expires_at)",
 } as const
 
 export const desktopGatewayAuthMigration = {

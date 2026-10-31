@@ -389,13 +389,6 @@ test("refresh rotates once and preserves earlier access until its own expiry", a
   expect(refreshed.tokens.refreshToken).not.toBe(tokens.refreshToken)
   expect(refreshed.tokens.accessToken).not.toBe(tokens.accessToken)
   expect(
-    await repository.refresh({
-      issuer,
-      refreshToken: tokens.refreshToken,
-      now: issuedAt + 1001,
-    }),
-  ).toEqual({ status: "invalid_grant" })
-  expect(
     await repository.resolveAccessToken(
       tokens.accessToken,
       issuedAt + 3_599_999,
@@ -515,6 +508,7 @@ test("tokens survive restart without durable plaintext issued secrets", async ()
       "capi_desktop_device_grants",
       "capi_desktop_auth_sessions",
       "capi_desktop_access_tokens",
+      "capi_desktop_consumed_refresh_tokens",
       "capi_applied_operations",
     ])
       rows.push(
@@ -573,6 +567,14 @@ test("independent connections exchange a device and refresh a session once", asy
       "invalid_grant",
       "ok",
     ])
+    const winner = refreshed.find((result) => result.status === "ok")
+    if (winner?.status !== "ok") throw new Error("No successful refresh")
+    expect(
+      await repository.resolveAccessToken(
+        winner.tokens.accessToken,
+        now + 6001,
+      ),
+    ).toBeNull()
   } finally {
     await connection.close()
   }
@@ -777,6 +779,7 @@ test("Desktop receipt retention protects pending reconciliation across connectio
 
 test("migration from schema eleven preserves credentials and enables device auth", async () => {
   await fixture.storage.atomicBatch([
+    { sql: "DROP TABLE capi_desktop_consumed_refresh_tokens", args: [] },
     { sql: "DROP TABLE capi_desktop_access_tokens", args: [] },
     { sql: "DROP TABLE capi_desktop_auth_sessions", args: [] },
     { sql: "DROP TABLE capi_desktop_device_grants", args: [] },

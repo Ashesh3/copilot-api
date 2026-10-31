@@ -8,7 +8,10 @@ import {
   credentialDigest,
   findGatewayCredential,
 } from "~/lib/storage/credentials-repository"
-import { mutateDesktopAuth } from "~/lib/storage/desktop-gateway-auth-mutation"
+import {
+  mutateDesktopAuth,
+  pruneDesktopAuthState,
+} from "~/lib/storage/desktop-gateway-auth-mutation"
 import { StorageSchemaError } from "~/lib/storage/errors"
 import { getStorageRuntime } from "~/lib/storage/runtime"
 
@@ -166,6 +169,40 @@ function authSession(row: Record<string, unknown>): AuthSession {
     refreshExpiresAt,
     revokedAt: row.revoked_at === null ? null : timestamp(row.revoked_at),
   }
+}
+
+async function revokeSession(
+  session: SqlSession,
+  sessionId: string,
+  now: number,
+): Promise<boolean> {
+  const updated = await session.execute({
+    sql: "UPDATE capi_desktop_auth_sessions SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at IS NULL",
+    args: [now, now, sessionId],
+  })
+  return updated.rowsAffected > 0
+}
+
+async function rejectConsumedRefresh(
+  session: SqlSession,
+  input: {
+    issuer: string
+    clientId: string | null
+    digest: string
+    now: number
+  },
+): Promise<DesktopAuthMutationResult<DesktopGatewayTokenResult>> {
+  const rows = await session.query({
+    sql: "SELECT s.* FROM capi_desktop_consumed_refresh_tokens r JOIN capi_desktop_auth_sessions s ON s.id=r.session_id WHERE r.digest=? AND r.expires_at>? AND s.issuer=?",
+    args: [input.digest, input.now, input.issuer],
+  })
+  if (!rows[0]) return outcome({ status: "invalid_grant" })
+  const bound = authSession(rows[0])
+  if (bound.clientId !== null && bound.clientId !== input.clientId)
+    return outcome({ status: "invalid_grant" })
+  const changed = await revokeSession(session, bound.id, input.now)
+  if (changed) await pruneDesktopAuthState(session, input.now)
+  return outcome({ status: "invalid_grant" }, changed)
 }
 
 function normalizeIssuer(value: string): string {
@@ -363,10 +400,7 @@ export class DesktopGatewayAuthRepository {
         binding: { issuer, selectedClient, digest, now },
       },
       async (session) => {
-        await session.execute({
-          sql: "DELETE FROM capi_desktop_device_grants WHERE expires_at<=?",
-          args: [now],
-        })
+        await pruneDesktopAuthState(session, now)
         await session.execute({
           sql: "INSERT INTO capi_desktop_device_grants (device_digest,user_code_digest,issuer,client_id,created_at,expires_at,interval_seconds,next_poll_at) VALUES (?,?,?,?,?,?,?,?)",
           args: [
@@ -552,7 +586,13 @@ export class DesktopGatewayAuthRepository {
           sql: "SELECT * FROM capi_desktop_auth_sessions WHERE refresh_digest=? AND issuer=?",
           args: [digest, issuer],
         })
-        if (!rows[0]) return outcome({ status: "invalid_grant" })
+        if (!rows[0])
+          return rejectConsumedRefresh(session, {
+            issuer,
+            clientId: selectedClient,
+            digest,
+            now,
+          })
         const bound = authSession(rows[0])
         if (
           bound.clientId !== selectedClient
@@ -575,11 +615,16 @@ export class DesktopGatewayAuthRepository {
         })
         if (rotated.rowsAffected !== 1)
           return outcome({ status: "invalid_grant" })
+        await session.execute({
+          sql: "INSERT INTO capi_desktop_consumed_refresh_tokens (digest,session_id,expires_at) VALUES (?,?,?)",
+          args: [digest, bound.id, bound.refreshExpiresAt],
+        })
         await insertAccess(session, {
           sessionId: bound.id,
           token: tokens.accessToken,
           now,
         })
+        await pruneDesktopAuthState(session, now)
         return outcome({ status: "ok", tokens }, true)
       },
     )
@@ -611,25 +656,32 @@ export class DesktopGatewayAuthRepository {
   async revoke(input: {
     issuer: string
     token: string
+    clientId?: string
     now?: number
   }): Promise<void> {
     const issuer = normalizeIssuer(input.issuer)
     const now = timestamp(input.now ?? Date.now())
+    const selectedClient = clientId(input.clientId)
     const digest = credentialDigest(input.token)
     return mutateDesktopAuth(
       this.storage,
-      { kind: "revoke", actor: issuer, binding: { issuer, digest, now } },
+      {
+        kind: "revoke",
+        actor: issuer,
+        binding: { issuer, selectedClient, digest, now },
+      },
       async (session) => {
         const rows = await session.query({
-          sql: "SELECT id FROM capi_desktop_auth_sessions WHERE issuer=? AND refresh_digest=? UNION ALL SELECT s.id FROM capi_desktop_auth_sessions s JOIN capi_desktop_access_tokens a ON a.session_id=s.id WHERE s.issuer=? AND a.digest=? LIMIT 1",
-          args: [issuer, digest, issuer, digest],
+          sql: "SELECT id,client_id FROM capi_desktop_auth_sessions WHERE issuer=? AND refresh_digest=? UNION ALL SELECT s.id,s.client_id FROM capi_desktop_auth_sessions s JOIN capi_desktop_access_tokens a ON a.session_id=s.id WHERE s.issuer=? AND a.digest=? UNION ALL SELECT s.id,s.client_id FROM capi_desktop_auth_sessions s JOIN capi_desktop_consumed_refresh_tokens r ON r.session_id=s.id WHERE s.issuer=? AND r.digest=? AND r.expires_at>? LIMIT 1",
+          args: [issuer, digest, issuer, digest, issuer, digest, now],
         })
         if (!rows[0]) return outcome(undefined)
-        const updated = await session.execute({
-          sql: "UPDATE capi_desktop_auth_sessions SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at IS NULL",
-          args: [now, now, text(rows[0].id)],
-        })
-        return outcome(undefined, updated.rowsAffected > 0)
+        const registeredClient = nullableText(rows[0].client_id)
+        if (registeredClient !== null && registeredClient !== selectedClient)
+          return outcome(undefined)
+        const changed = await revokeSession(session, text(rows[0].id), now)
+        if (changed) await pruneDesktopAuthState(session, now)
+        return outcome(undefined, changed)
       },
     )
   }

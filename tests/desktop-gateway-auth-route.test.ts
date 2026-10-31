@@ -166,6 +166,8 @@ for (const prefix of ["", "/v1"]) {
     })
     expect(replay.status).toBe(400)
     expect(await replay.json()).toEqual({ error: "invalid_grant" })
+    expect(await resolveCredential(refreshed.access_token)).toBeNull()
+    expect(await resolveCredential(tokens.access_token)).toBeNull()
     const revoked = await postForm(`${prefix}/gateway/oauth/revoke`, {
       token: refreshed.refresh_token,
       token_type_hint: "refresh_token",
@@ -336,6 +338,47 @@ test("Desktop verification denial leaves no inference grant", async () => {
   })
   expect(exchange.status).toBe(400)
   expect(await exchange.json()).toEqual({ error: "access_denied" })
+})
+
+test("Desktop consumed-token revocation preserves an explicitly registered client binding", async () => {
+  const started = await postForm("/gateway/oauth/device", {
+    client_id: "registered-desktop",
+  })
+  expect(started.status).toBe(200)
+  const device = (await started.json()) as DeviceAuthorization
+  expect((await approve(device)).status).toBe(200)
+  const exchanged = await postForm("/gateway/oauth/token", {
+    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+    device_code: device.device_code,
+    client_id: "registered-desktop",
+  })
+  expect(exchanged.status).toBe(200)
+  const original = (await exchanged.json()) as TokenResponse
+  const refreshed = await postForm("/gateway/oauth/token", {
+    grant_type: "refresh_token",
+    refresh_token: original.refresh_token,
+    client_id: "registered-desktop",
+  })
+  expect(refreshed.status).toBe(200)
+  const current = (await refreshed.json()) as TokenResponse
+  expect(
+    (
+      await postForm("/gateway/oauth/revoke", {
+        token: original.refresh_token,
+        client_id: "different-client",
+      })
+    ).status,
+  ).toBe(200)
+  expect(await resolveCredential(current.access_token)).not.toBeNull()
+  expect(
+    (
+      await postForm("/gateway/oauth/revoke", {
+        token: original.refresh_token,
+        client_id: "registered-desktop",
+      })
+    ).status,
+  ).toBe(200)
+  expect(await resolveCredential(current.access_token)).toBeNull()
 })
 
 test("Desktop debug diagnostics do not clone credential forms or expose socket tickets", async () => {

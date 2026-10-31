@@ -28,7 +28,10 @@ export async function authorizeDictation(
     const result = await resolveProtectedCredential(
       request,
       () => resolveRequestCredential(request, ["user:inference"]),
-      { recordFailures: expected === undefined },
+      {
+        recordFailures: expected === undefined,
+        trustClientIp: expected === undefined,
+      },
     )
     if (result.status !== "authorized") {
       return {

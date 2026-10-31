@@ -18,7 +18,7 @@ const issuer = "https://gateway.example/v1"
 const password = "desktop-auth-backup-fixture"
 
 test.each(["gateway", "inference"] as const)(
-  "encrypted backup preserves Desktop access, refresh, and pending devices approved by %s",
+  "encrypted backup preserves Desktop access, consumed refresh evidence, and pending devices approved by %s",
   async (kind) => {
     await withTransferStorage(async (source) => {
       const now = Date.now() - 10_000
@@ -52,9 +52,15 @@ test.each(["gateway", "inference"] as const)(
         now: now + 5000,
       })
       if (issued.status !== "ok") throw new Error("Device token fixture failed")
+      const rotated = await original.refresh({
+        issuer,
+        refreshToken: issued.tokens.refreshToken,
+        now: now + 6000,
+      })
+      if (rotated.status !== "ok") throw new Error("Refresh fixture failed")
       const pending = await original.issueDeviceAuthorization({
         issuer,
-        now: now + 6000,
+        now: now + 6500,
       })
       const expected = await original.resolveAccessToken(
         issued.tokens.accessToken,
@@ -67,6 +73,7 @@ test.each(["gateway", "inference"] as const)(
       const encrypted = Buffer.from(backup).toString("utf8")
       expect(encrypted).not.toContain(issued.tokens.accessToken)
       expect(encrypted).not.toContain(issued.tokens.refreshToken)
+      expect(encrypted).not.toContain(rotated.tokens.refreshToken)
       await withTransferStorage(async (target) => {
         expect(
           (await restoreBackup(bytesStream(backup), password, target)).phase,
@@ -78,13 +85,13 @@ test.each(["gateway", "inference"] as const)(
             now + 7000,
           ),
         ).toEqual(expected)
-        expect(
-          await restored.refresh({
-            issuer,
-            refreshToken: issued.tokens.refreshToken,
-            now: now + 8000,
-          }),
-        ).toMatchObject({ status: "ok" })
+        const refreshed = await restored.refresh({
+          issuer,
+          refreshToken: rotated.tokens.refreshToken,
+          now: now + 8000,
+        })
+        if (refreshed.status !== "ok")
+          throw new Error("Restored refresh fixture failed")
         expect(
           await restored.resolveAccessToken(
             issued.tokens.accessToken,
@@ -114,10 +121,23 @@ test.each(["gateway", "inference"] as const)(
           }),
         ).toMatchObject({ status: "ok" })
         expect(
-          await original.refresh({
+          await restored.refresh({
             issuer,
             refreshToken: issued.tokens.refreshToken,
-            now: now + 9000,
+            now: now + 12_000,
+          }),
+        ).toEqual({ status: "invalid_grant" })
+        expect(
+          await restored.resolveAccessToken(
+            refreshed.tokens.accessToken,
+            now + 12_001,
+          ),
+        ).toBeNull()
+        expect(
+          await original.refresh({
+            issuer,
+            refreshToken: rotated.tokens.refreshToken,
+            now: now + 12_000,
           }),
         ).toMatchObject({ status: "ok" })
       })

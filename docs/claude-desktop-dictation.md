@@ -12,7 +12,8 @@ Code CLI voice socket and Codex Desktop transcription routes remain separate.
 
 Deploy the updated application and the corresponding public-domain Nginx
 configuration. The application adds storage migration 012 for Desktop device
-grants, authentication sessions, and access-token digests. Follow the normal
+grants, authentication sessions, access-token digests, and consumed refresh-token
+digests. Follow the normal
 database-backup procedure before upgrading. Existing CLI OAuth clients retain
 their existing token and refresh behavior.
 
@@ -95,6 +96,10 @@ Tickets expire after 60 seconds and cannot be reused or moved to another base.
 Desktop access is inference-only and expires after one hour; refresh tokens
 rotate and last thirty days. Disabling, replacing, or revoking the approving key
 also invalidates its Desktop sessions.
+Reusing a consumed refresh token revokes its associated session after validating
+its issuer and client binding. Expired token records are pruned on authentication
+writes; inactive sessions are retired only after their unexpired token and replay
+records are gone.
 
 Desktop waits approximately two seconds for final text after Stop. The gateway
 currently sends the recording to Groq when recording stops, so provider and
@@ -122,7 +127,8 @@ provider's base language code, such as `en`.
 - **Recording opens but text is absent:** check ticket/Upgrade forwarding, the
   Groq configuration, and response latency against the native Stop drain window.
   Verification codes, credentials, tickets, audio, and transcript content are
-  excluded from the new integration's ordinary diagnostics.
+  excluded from the new integration's ordinary diagnostics. Failures log only a
+  safe category and, for provider HTTP errors, the status code.
 - **Return to static inference:** sign out, restore the selected profile backup,
   or switch `inferenceCredentialKind` back to `static`. Restoring Desktop's
   profile does not require reverting the server's database migration.

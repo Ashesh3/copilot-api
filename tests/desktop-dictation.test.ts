@@ -2,6 +2,16 @@ import { afterEach, beforeEach, expect, setSystemTime, test } from "bun:test"
 import { randomUUID } from "node:crypto"
 
 import { setConfigForTest } from "~/lib/config"
+import {
+  listIpAllowlist,
+  resetIpAllowlistForTest,
+  upsertIpAllowlistEntry,
+} from "~/lib/ip-allowlist"
+import {
+  isIpBlocked,
+  removeIpSecurityPolicy,
+  resetIpSecurityForTest,
+} from "~/lib/ip-blocker"
 import { state } from "~/lib/state"
 import {
   credentialDigest,
@@ -20,6 +30,7 @@ let gatewayKey: string
 const originalFetch = globalThis.fetch
 const originalPublicBase = process.env.COPILOT_PUBLIC_BASE_URL
 const originalApiKeyAuth = state.apiKeyAuth
+const originalTrustedProxies = process.env.COPILOT_TRUSTED_PROXY_CIDRS
 const protocol = "claude.dictation.v1"
 const pcm = Uint8Array.of(0, 128, 255, 127, 0, 0, 1, 0)
 const query = "encoding=linear16&sample_rate=16000&channels=1&language=en"
@@ -55,7 +66,10 @@ beforeEach(async () => {
   gatewayKey = `native-dictation-fixture-${randomUUID()}`
   fixture = await createAuthStorageFixture()
   setConfigForTest({ groqApiKey: "fixture-groq-key" })
+  resetIpAllowlistForTest()
+  resetIpSecurityForTest()
   delete process.env.COPILOT_PUBLIC_BASE_URL
+  delete process.env.COPILOT_TRUSTED_PROXY_CIDRS
   providerCalls = []
   clients = []
   provider = () => Response.json({ text: "A native microphone transcript." })
@@ -101,11 +115,16 @@ afterEach(async () => {
     clients.map((client) => Promise.race([client.closed, Bun.sleep(500)])),
   )
   globalThis.fetch = originalFetch
+  resetIpAllowlistForTest()
+  resetIpSecurityForTest()
   setSystemTime()
   state.apiKeyAuth = originalApiKeyAuth
   if (originalPublicBase === undefined)
     delete process.env.COPILOT_PUBLIC_BASE_URL
   else process.env.COPILOT_PUBLIC_BASE_URL = originalPublicBase
+  if (originalTrustedProxies === undefined)
+    delete process.env.COPILOT_TRUSTED_PROXY_CIDRS
+  else process.env.COPILOT_TRUSTED_PROXY_CIDRS = originalTrustedProxies
   setConfigForTest(null)
   await fixture.close()
 })
@@ -195,6 +214,35 @@ async function revokeGateway(): Promise<void> {
   )
 }
 
+async function seedInferenceCredential(key: string): Promise<void> {
+  await fixture.storage.transaction((session) =>
+    session.execute({
+      sql: "INSERT INTO capi_inference_credentials (digest,id,kind,principal_id,enabled,scopes_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+      args: [
+        credentialDigest(key),
+        randomUUID(),
+        "managed",
+        `inference-managed:${randomUUID()}`,
+        1,
+        '["user:inference"]',
+        Date.now(),
+        Date.now(),
+      ],
+    }),
+  )
+}
+
+async function banFromInvalidTickets(ip: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await ticketRequest("", {
+      authorization: "Bearer invalid-dictation-key",
+      "x-copilot-peer-ip": ip,
+    })
+    expect(response.status).toBe(401)
+  }
+  expect(isIpBlocked(ip)).toBe(true)
+}
+
 for (const [locale, language] of [
   ["en-US", "en"],
   ["en-IN", "en"],
@@ -259,21 +307,7 @@ test("ticket issuance requires a current inference credential even with gateway 
 })
 
 test("inference-only credentials can dictate without the CLI-only voice scope", async () => {
-  await fixture.storage.transaction((session) =>
-    session.execute({
-      sql: "INSERT INTO capi_inference_credentials (digest,id,kind,principal_id,enabled,scopes_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-      args: [
-        credentialDigest("fixture-inference-only"),
-        randomUUID(),
-        "managed",
-        `inference-managed:${randomUUID()}`,
-        1,
-        '["user:inference"]',
-        Date.now(),
-        Date.now(),
-      ],
-    }),
-  )
+  await seedInferenceCredential("fixture-inference-only")
   const response = await ticketRequest("", {
     authorization: "Bearer fixture-inference-only",
   })
@@ -284,6 +318,100 @@ test("inference-only credentials can dictate without the CLI-only voice scope", 
   client.socket.send('{"type":"CloseStream"}')
   expect((await client.closed).code).toBe(1000)
   expect(client.frames[0].data).toBe("A native microphone transcript.")
+})
+
+for (const kind of ["gateway", "inference"] as const) {
+  test(`initial ticket admission with a valid ${kind} key recovers an automatically banned IP`, async () => {
+    const ip = "198.51.100.191"
+    const credential =
+      kind === "gateway" ? gatewayKey : "fixture-inference-recovery"
+    if (kind === "inference") await seedInferenceCredential(credential)
+    await banFromInvalidTickets(ip)
+    expect(
+      (
+        await ticketRequest("", {
+          authorization: "Bearer still-invalid",
+          "x-copilot-peer-ip": ip,
+        })
+      ).status,
+    ).toBe(403)
+    expect(isIpBlocked(ip)).toBe(true)
+
+    const recovered = await ticketRequest("", {
+      authorization: `Bearer ${credential}`,
+      "x-copilot-peer-ip": ip,
+    })
+    expect(recovered.status).toBe(200)
+    expect(isIpBlocked(ip)).toBe(false)
+    expect(await listIpAllowlist()).toMatchObject([
+      { ip, enabled: true, source: "authenticated" },
+    ])
+
+    const invalidAfterRecovery = await ticketRequest("", {
+      authorization: "Bearer still-invalid",
+      "x-copilot-peer-ip": ip,
+    })
+    expect(invalidAfterRecovery.status).toBe(401)
+  })
+}
+
+test("successful ticket authentication retains established operator IP promotion semantics", async () => {
+  const ip = "198.51.100.192"
+  await upsertIpAllowlistEntry(ip, { enabled: false, source: "manual" })
+  await banFromInvalidTickets(ip)
+  expect((await ticketRequest("", { "x-copilot-peer-ip": ip })).status).toBe(
+    200,
+  )
+  expect(isIpBlocked(ip)).toBe(false)
+  expect(await listIpAllowlist()).toMatchObject([
+    { ip, enabled: true, source: "manual" },
+  ])
+})
+
+test("invalid ticket credentials cannot promote an operator IP or clear its automatic ban", async () => {
+  const ip = "198.51.100.193"
+  await upsertIpAllowlistEntry(ip, { enabled: false, source: "manual" })
+  await banFromInvalidTickets(ip)
+  const response = await ticketRequest("", {
+    authorization: "Bearer another-invalid-key",
+    "x-copilot-peer-ip": ip,
+  })
+  expect(response.status).toBe(403)
+  expect(isIpBlocked(ip)).toBe(true)
+  expect(await listIpAllowlist()).toMatchObject([
+    { ip, enabled: false, source: "manual" },
+  ])
+})
+
+test("ticket redemption rechecks the expected authority without restoring IP trust", async () => {
+  const ip = "198.51.100.194"
+  const issued = await ticketRequest("", { "x-copilot-peer-ip": ip })
+  expect(issued.status).toBe(200)
+  const ticket = (await issued.json()) as Ticket
+  await removeIpSecurityPolicy(ip)
+  await banFromInvalidTickets(ip)
+
+  expect((await upgradeRequest(ticket.ticket)).status).toBe(403)
+  expect(isIpBlocked(ip)).toBe(true)
+  expect(await listIpAllowlist()).toEqual([])
+})
+
+test("provider admission rechecks the expected authority without restoring IP trust", async () => {
+  const ip = "198.51.100.195"
+  const issued = await ticketRequest("", { "x-copilot-peer-ip": ip })
+  expect(issued.status).toBe(200)
+  const ticket = (await issued.json()) as Ticket
+  const client = await openNative(ticket.ticket)
+  await removeIpSecurityPolicy(ip)
+  await banFromInvalidTickets(ip)
+
+  client.socket.send(pcm)
+  client.socket.send('{"type":"CloseStream"}')
+  expect((await client.closed).code).toBe(1008)
+  expect(client.frames[0].type).toBe("TranscriptError")
+  expect(providerCalls).toHaveLength(0)
+  expect(isIpBlocked(ip)).toBe(true)
+  expect(await listIpAllowlist()).toEqual([])
 })
 
 test("ticket issuance and redemption fail closed during a storage outage", async () => {

@@ -279,6 +279,7 @@ for (const prefix of ["", "/v1"]) {
     await getDesktopGatewayAuthRepository().revoke({
       issuer: desktopGatewayIssuer(c.req.raw, prefix),
       token: form.fields.token,
+      clientId: form.fields.client_id || undefined,
     })
     noStore(c)
     return c.json({})
