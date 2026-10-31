@@ -8,6 +8,7 @@ import { StorageSchemaError } from "~/lib/storage/errors"
 import { migrateStorage } from "~/lib/storage/migrations"
 import { initialMigration } from "~/lib/storage/migrations/001-initial"
 import { gatewaySecretsMigration } from "~/lib/storage/migrations/002-gateway-secrets"
+import { currentSchemaVersion } from "~/lib/storage/schema"
 
 import { createSchemaFixture, faultStorage } from "./helpers/storage-schema"
 
@@ -103,7 +104,7 @@ test.each([1, 2] as const)(
     expect(state.retired).toEqual([])
     expect(state.metadata).toEqual([
       { key: "config_revision", value: "7" },
-      { key: "schema_version", value: "11" },
+      { key: "schema_version", value: String(currentSchemaVersion) },
       { key: "store_id", value: storeId },
     ])
     expect(state.activity).toEqual([])

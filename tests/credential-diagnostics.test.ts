@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test"
 
-import { shouldOmitRequestBodyFromDiagnostics } from "~/lib/request-diagnostics"
+import {
+  sanitizeRequestDiagnosticReference,
+  shouldOmitRequestBodyFromDiagnostics,
+} from "~/lib/request-diagnostics"
 import { sanitizeRequestBodyForLog } from "~/lib/request-logger"
 
 test("credential-control request bodies are never read for diagnostics", () => {
@@ -32,4 +35,26 @@ test("generic diagnostic scrubbing conceals custom keys and all submitted header
     "fixture-header-value",
   ])
     expect(JSON.stringify(sanitized)).not.toContain(raw)
+})
+
+test("Desktop sign-in forms are excluded before debug logging reads their bodies", () => {
+  for (const prefix of ["", "/v1"])
+    for (const endpoint of ["device", "verify", "token", "revoke"])
+      expect(
+        shouldOmitRequestBodyFromDiagnostics(
+          `${prefix}/gateway/oauth/${endpoint}`,
+        ),
+      ).toBe(true)
+})
+
+test("Desktop verification and device codes are redacted from diagnostic URLs", () => {
+  for (const prefix of ["", "/v1"]) {
+    const sanitized = sanitizeRequestDiagnosticReference(
+      "GET",
+      `https://gateway.test${prefix}/gateway/oauth/verify?user_code=ABCD-EFGH&device_code=private-device-code&visible=1`,
+    )
+    expect(sanitized).not.toContain("ABCD-EFGH")
+    expect(sanitized).not.toContain("private-device-code")
+    expect(sanitized).toContain("visible=1")
+  }
 })

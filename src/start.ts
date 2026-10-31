@@ -34,6 +34,10 @@ import {
 } from "./lib/storage/runtime"
 import { createHistoryRuntime } from "./lib/telemetry-writer"
 import { tokenPool } from "./lib/token-pool"
+import {
+  desktopDictationWebSocket,
+  tryUpgradeDesktopDictationWebSocket,
+} from "./routes/desktop-dictation/route"
 import { isDirectConnectEnabled } from "./routes/direct-connect/route"
 import {
   DIRECT_CONNECT_WS_PATH,
@@ -171,7 +175,7 @@ interface StartFetchServer {
   upgrade(req: Request, options?: object): boolean
 }
 
-// Upgrade dispatch covers four independently secured WebSocket protocols.
+// Upgrade dispatch covers independently authenticated WebSocket protocols.
 
 export async function handleStartFetch(
   req: Request,
@@ -204,6 +208,23 @@ export async function handleStartFetch(
   }
 }
 
+async function tryUpgradeInferenceWebSocket(
+  request: Request,
+  bunServer: StartFetchServer,
+): Promise<"upgraded" | "no_match" | Response> {
+  for (const upgrade of [
+    tryUpgradeDesktopDictationWebSocket,
+    tryUpgradeVoiceWebSocket,
+    tryUpgradeResponsesWebSocket,
+  ]) {
+    const result = await upgrade(request, bunServer)
+    if (result === "upgraded" || result instanceof Response) return result
+    if (result === "auth_failed")
+      return new Response("Unauthorized", { status: 401 })
+  }
+  return "no_match"
+}
+
 async function dispatchStartFetch(
   req: Request,
   bunServer: StartFetchServer,
@@ -213,20 +234,9 @@ async function dispatchStartFetch(
   setTrustedPeerIp(req, bunServer)
   // WebSocket upgrade must happen before Hono routing
   if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-    const voiceResult = await tryUpgradeVoiceWebSocket(req, bunServer)
-    if (voiceResult === "upgraded") {
-      return undefined as unknown as Response
-    }
-    if (voiceResult === "auth_failed") {
-      return new Response("Unauthorized", { status: 401 })
-    }
-    const wsResult = await tryUpgradeResponsesWebSocket(req, bunServer)
-    if (wsResult === "upgraded") {
-      return undefined as unknown as Response
-    }
-    if (wsResult === "auth_failed") {
-      return new Response("Unauthorized", { status: 401 })
-    }
+    const inferenceResult = await tryUpgradeInferenceWebSocket(req, bunServer)
+    if (inferenceResult === "upgraded") return undefined as unknown as Response
+    if (inferenceResult instanceof Response) return inferenceResult
     // Direct Connect WebSocket upgrade
     const url = new URL(req.url)
     if (url.pathname.startsWith(DIRECT_CONNECT_WS_PATH + "/")) {
@@ -272,6 +282,13 @@ export const combinedWebSocket = {
   maxPayloadLength: 0xff_ff_ff_ff,
   open(ws: { data: { type: string; sessionId?: string } }) {
     switch (ws.data.type) {
+      case "desktop-dictation": {
+        desktopDictationWebSocket.open(
+          ws as unknown as Parameters<typeof desktopDictationWebSocket.open>[0],
+        )
+
+        break
+      }
       case "voice": {
         voiceWebSocket.open(
           ws as unknown as Parameters<typeof voiceWebSocket.open>[0],
@@ -323,6 +340,16 @@ export const combinedWebSocket = {
     message: string | Buffer | Uint8Array,
   ) {
     switch (ws.data.type) {
+      case "desktop-dictation": {
+        desktopDictationWebSocket.message(
+          ws as unknown as Parameters<
+            typeof desktopDictationWebSocket.message
+          >[0],
+          message,
+        )
+
+        break
+      }
       case "voice": {
         voiceWebSocket.message(
           ws as unknown as Parameters<typeof voiceWebSocket.message>[0],
@@ -366,6 +393,15 @@ export const combinedWebSocket = {
   },
   close(ws: { data: { type: string; sessionId?: string } }) {
     switch (ws.data.type) {
+      case "desktop-dictation": {
+        desktopDictationWebSocket.close(
+          ws as unknown as Parameters<
+            typeof desktopDictationWebSocket.close
+          >[0],
+        )
+
+        break
+      }
       case "voice": {
         voiceWebSocket.close(
           ws as unknown as Parameters<typeof voiceWebSocket.close>[0],

@@ -25,9 +25,56 @@ server {
   ssl_certificate_key {{SPOOF_SSL_CERTIFICATE_KEY_PATH}};
 
   proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-Host $host;
   proxy_set_header X-Real-IP $remote_addr;
   proxy_set_header X-Forwarded-For $remote_addr;
   proxy_set_header X-Forwarded-Proto $scheme;
+
+  # A gateway base may use this Claude API hostname. Keep native device login
+  # and dictation on the API vhost; the platform login vhost stays separate.
+  location ~ ^/(?:v1/)?\.well-known/oauth-authorization-server$ {
+    if ($request_method != GET) { return 404; }
+    proxy_pass {{UPSTREAM_URL}};
+  }
+  location ~ ^/(?:v1/)?gateway/oauth/(?:device|token|revoke)$ {
+    if ($request_method != POST) { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+  location ~ ^/(?:v1/)?gateway/oauth/verify$ {
+    if ($request_method !~ ^(?:GET|POST)$) { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+  location ~ ^/(?:v1/)?user/dictation/ticket$ {
+    if ($request_method != POST) { return 404; }
+    if ($http_authorization = "") { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+  }
+  # The ticket is a WebSocket subprotocol; query parameters describe the audio.
+  location ~ ^/(?:v1/)?user/dictation/stream$ {
+    if ($request_method != GET) { return 404; }
+    if ($http_upgrade !~* ^websocket$) { return 404; }
+    access_log off;
+    proxy_pass {{UPSTREAM_URL}};
+    proxy_http_version 1.1;
+    # Local proxy_set_header directives replace all inherited header settings.
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection upgrade;
+    proxy_set_header Sec-WebSocket-Protocol $http_sec_websocket_protocol;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_cache off;
+  }
 
   # Keep request and response buffering disabled for generation streams.
   location ~ ^/v1/messages/?$ {

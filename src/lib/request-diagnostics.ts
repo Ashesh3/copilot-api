@@ -6,7 +6,7 @@ const SUPPORTED_GOOGLE_MODEL_ACTION_PATH =
   /^\/(?:v1beta\/models|v1\/models|models)\/[^/?#]+:(?:generateContent|streamGenerateContent)$/
 const REDACTED_QUERY_VALUE = "[REDACTED]"
 const SENSITIVE_QUERY_PARAMETER =
-  /(?:^|[_-])(?:access[_-]?token|api[_-]?key|authorization|code[_-]?verifier|credential|key|password|refresh[_-]?token|secret|token)(?:$|[_-])/i
+  /(?:^|[_-])(?:access[_-]?token|api[_-]?key|authorization|code[_-]?verifier|credential|device[_-]?code|key|password|refresh[_-]?token|secret|token|user[_-]?code)(?:$|[_-])/i
 const CODEX_PLUGIN_SEARCH_REFERENCE =
   /\/ps\/plugins\/search\/?(?:[?#\s"'<>]|$)/i
 const CODEX_PLUGIN_CATEGORY_REFERENCE =
@@ -152,8 +152,10 @@ export function isCredentialControlRequest(reference: string): boolean {
   const path = reference
     .replace(/^[A-Z]+\s+/, "")
     .replace(/^https?:\/\/[^/]+/, "")
-  return /^\/dashboard\/(?:auth(?:[/?#]|$)|api\/(?:credentials|custom-providers)(?:[/?#]|$))/.test(
-    path,
+  return (
+    /^\/dashboard\/(?:auth(?:[/?#]|$)|api\/(?:credentials|custom-providers)(?:[/?#]|$))/.test(
+      path,
+    ) || /^\/(?:v1\/)?gateway\/oauth(?:[/?#]|$)/.test(path)
   )
 }
 

@@ -38,6 +38,7 @@ const SENSITIVE_HEADER_PATTERNS = [
   "x-api-key",
 ]
 const SENSITIVE_HEADER_NAMES = new Set([
+  "sec-websocket-protocol",
   "anthropic-beta",
   "anthropic-version",
   "copilot-session-token",

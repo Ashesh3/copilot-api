@@ -113,6 +113,7 @@ export const colors = {
 }
 
 const REDACTED_DEBUG_HEADERS = new Set([
+  "sec-websocket-protocol",
   "session-id",
   "thread-id",
   "x-claude-code-session-id",

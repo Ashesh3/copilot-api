@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
+import { type IncomingHttpHeaders, request } from "node:http"
 import os from "node:os"
 import path from "node:path"
 
@@ -10,7 +11,10 @@ const containerName = `copilot-api-routes-${randomUUID()}`
 let temporaryDirectory: string | undefined
 let origin = ""
 
-async function docker(args: Array<string>): Promise<string> {
+async function docker(
+  args: Array<string>,
+  includeStderr = false,
+): Promise<string> {
   const child = Bun.spawn(["docker", ...args], {
     stdout: "pipe",
     stderr: "pipe",
@@ -21,7 +25,29 @@ async function docker(args: Array<string>): Promise<string> {
     new Response(child.stderr).text(),
   ])
   if (exitCode !== 0) throw new Error(`Docker failed: ${stderr}`)
-  return stdout.trim()
+  return includeStderr ? stdout + stderr : stdout.trim()
+}
+
+async function requestUpgrade(
+  route: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; headers: IncomingHttpHeaders }> {
+  return await new Promise((resolve, reject) => {
+    const outgoing = request(origin + route, { headers })
+    outgoing.on("response", (response) => {
+      response.resume()
+      resolve({ status: response.statusCode ?? 0, headers: response.headers })
+    })
+    outgoing.on("upgrade", (response, socket) => {
+      socket.destroy()
+      resolve({ status: response.statusCode ?? 0, headers: response.headers })
+    })
+    outgoing.on("error", reject)
+    outgoing.setTimeout(5_000, () => {
+      outgoing.destroy(new Error("Nginx upgrade request timed out"))
+    })
+    outgoing.end()
+  })
 }
 
 async function readTemplate(name: string): Promise<string> {
@@ -39,10 +65,27 @@ beforeAll(async () => {
   temporaryDirectory = await fs.mkdtemp(
     path.join(os.tmpdir(), "copilot-nginx-routes-"),
   )
-  const [publicTemplate, codexTemplate] = await Promise.all([
+  const [publicTemplate, codexTemplate, claudeTemplate] = await Promise.all([
     readTemplate("public-domain"),
     readTemplate("codex-desktop-spoof"),
+    readTemplate("spoof-domains"),
   ])
+  const captureHeaders = `
+    add_header X-Test-Upstream reached always;
+    add_header X-Test-Authorization $http_authorization always;
+    add_header X-Test-Account-Id $http_chatgpt_account_id always;
+    add_header X-Test-Host $http_host always;
+    add_header X-Test-Forwarded-Host $http_x_forwarded_host always;
+    add_header X-Test-Forwarded-Proto $http_x_forwarded_proto always;
+    add_header X-Test-Real-IP $http_x_real_ip always;
+    add_header X-Test-Forwarded-For $http_x_forwarded_for always;
+    add_header X-Test-Upgrade $http_upgrade always;
+    add_header X-Test-Connection $http_connection always;
+    add_header X-Test-WebSocket-Protocol $http_sec_websocket_protocol always;
+    add_header X-Test-URI $request_uri always;
+    add_header X-Test-Content-Type $http_content_type always;
+    add_header X-Test-HTTP-Version $server_protocol always;
+  `
   const config =
     publicTemplate
       .replaceAll("{{PUBLIC_SERVER_NAME}}", "localhost")
@@ -57,7 +100,30 @@ beforeAll(async () => {
       .replaceAll("{{UPSTREAM_URL}}", "http://127.0.0.1:8081")
       .replace("listen 443 ssl;", "listen 8080;")
       .replaceAll(/^[ \t]*ssl_certificate[^;]+;\r?\n/gm, "")
-    + "\nserver { listen 8081; add_header X-Test-Upstream reached always; add_header X-Test-Authorization $http_authorization always; add_header X-Test-Account-Id $http_chatgpt_account_id always; return 204; }\n"
+    + "\n"
+    + claudeTemplate
+      .replaceAll("{{CLAUDE_API_SERVER_NAME}}", "claude-api.test")
+      .replaceAll("{{CLAUDE_PLATFORM_SERVER_NAMES}}", "claude-platform.test")
+      .replaceAll("{{UPSTREAM_URL}}", "http://127.0.0.1:8081")
+      .replaceAll("listen 443 ssl;", "listen 8080;")
+      .replaceAll(/^[ \t]*ssl_certificate[^;]+;\r?\n/gm, "")
+    + `
+server {
+  listen 8081;
+  location ~ ^/(?:v1/)?user/dictation/stream$ {
+    ${captureHeaders}
+    add_header Upgrade websocket always;
+    add_header Connection upgrade always;
+    add_header Sec-WebSocket-Protocol claude.dictation.v1 always;
+    add_header Sec-WebSocket-Accept s3pPLMBiTxaQ9kYGzzhZRbK+xOo= always;
+    return 101;
+  }
+  location / {
+    ${captureHeaders}
+    return 204;
+  }
+}
+`
   const configPath = path.join(temporaryDirectory, "default.conf")
   await fs.writeFile(configPath, config)
   await docker([
@@ -294,4 +360,244 @@ for (const host of ["localhost", "codex.test"]) {
     expect(response.status).toBe(404)
     expect(response.headers.get("x-test-upstream")).toBeNull()
   })
+}
+
+const desktopGatewayAuthRoutes = [
+  ["GET", "/.well-known/oauth-authorization-server"],
+  ["POST", "/gateway/oauth/device"],
+  ["POST", "/gateway/oauth/token"],
+  ["POST", "/gateway/oauth/revoke"],
+  ["GET", "/gateway/oauth/verify"],
+  ["POST", "/gateway/oauth/verify"],
+] as const
+
+for (const host of ["localhost", "claude-api.test"]) {
+  for (const prefix of ["", "/v1"]) {
+    nginxTest.each(desktopGatewayAuthRoutes)(
+      `${host}${prefix} forwards native gateway %s %s without header authentication`,
+      async (method, route) => {
+        const response = await fetch(origin + prefix + route, {
+          method,
+          headers: {
+            host,
+            "content-type": "application/x-www-form-urlencoded",
+            "x-forwarded-host": "forged.example",
+            "x-forwarded-proto": "https",
+          },
+          ...(method === "POST" ? { body: "" } : {}),
+        })
+        expect(response.status).toBe(204)
+        expect(response.headers.get("x-test-upstream")).toBe("reached")
+        expect(response.headers.get("x-test-authorization")).toBeNull()
+        expect(response.headers.get("x-test-uri")).toBe(prefix + route)
+        expect(response.headers.get("x-test-host")).toBe(host)
+        expect(response.headers.get("x-test-forwarded-host")).toBe(host)
+        expect(response.headers.get("x-test-forwarded-proto")).toBe("http")
+        expect(response.headers.get("x-test-content-type")).toBe(
+          "application/x-www-form-urlencoded",
+        )
+      },
+    )
+
+    nginxTest(
+      `${host}${prefix} forwards native dictation tickets with the original bearer`,
+      async () => {
+        const response = await fetch(
+          origin + prefix + "/user/dictation/ticket",
+          {
+            method: "POST",
+            headers: { host, authorization: "Bearer desktop-routing-test" },
+          },
+        )
+        expect(response.status).toBe(204)
+        expect(response.headers.get("x-test-authorization")).toBe(
+          "Bearer desktop-routing-test",
+        )
+        expect(response.headers.get("x-test-host")).toBe(host)
+        expect(response.headers.get("x-test-uri")).toBe(
+          prefix + "/user/dictation/ticket",
+        )
+      },
+    )
+
+    nginxTest(
+      `${host}${prefix} denies native dictation tickets without a bearer`,
+      async () => {
+        const response = await fetch(
+          origin + prefix + "/user/dictation/ticket",
+          { method: "POST", headers: { host, "x-api-key": "routing-test" } },
+        )
+        expect(response.status).toBe(404)
+        expect(response.headers.get("x-test-upstream")).toBeNull()
+      },
+    )
+
+    nginxTest(
+      `${host}${prefix} forwards the native dictation WebSocket protocol and trusted origin`,
+      async () => {
+        const ticket = `ticket.nginx_${randomUUID().replaceAll("-", "")}`
+        const protocols = `claude.dictation.v1, ${ticket}`
+        const route =
+          prefix
+          + "/user/dictation/stream?encoding=linear16&sample_rate=16000&channels=1&language=en-US"
+        const response = await requestUpgrade(route, {
+          host,
+          upgrade: "websocket",
+          connection: "Upgrade",
+          "sec-websocket-version": "13",
+          "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+          "sec-websocket-protocol": protocols,
+          "x-real-ip": "198.51.100.99",
+          "x-forwarded-for": "198.51.100.99",
+          "x-forwarded-host": "forged.example",
+          "x-forwarded-proto": "https",
+        })
+        expect(response.status).toBe(101)
+        expect(response.headers["sec-websocket-protocol"]).toBe(
+          "claude.dictation.v1",
+        )
+        expect(response.headers["sec-websocket-accept"]).toBe(
+          "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+        )
+        expect(response.headers["x-test-websocket-protocol"]).toBe(protocols)
+        expect(response.headers["x-test-upgrade"]).toBe("websocket")
+        expect(response.headers["x-test-connection"]).toBe("upgrade")
+        expect(response.headers["x-test-http-version"]).toBe("HTTP/1.1")
+        expect(response.headers["x-test-authorization"]).toBeUndefined()
+        expect(response.headers["x-test-host"]).toBe(host)
+        expect(response.headers["x-test-forwarded-host"]).toBe(host)
+        expect(response.headers["x-test-forwarded-proto"]).toBe("http")
+        expect(response.headers["x-test-real-ip"]).toBeDefined()
+        expect(response.headers["x-test-real-ip"]).not.toBe("198.51.100.99")
+        expect(response.headers["x-test-forwarded-for"]).toBe(
+          response.headers["x-test-real-ip"],
+        )
+        expect(response.headers["x-test-uri"]).toBe(route)
+        expect(await docker(["logs", containerName], true)).not.toContain(
+          ticket,
+        )
+      },
+    )
+
+    nginxTest.each([
+      ["HEAD", "/.well-known/oauth-authorization-server"],
+      ["POST", "/.well-known/oauth-authorization-server"],
+      ["OPTIONS", "/.well-known/oauth-authorization-server"],
+      ["GET", "/gateway/oauth/device"],
+      ["GET", "/gateway/oauth/token"],
+      ["GET", "/gateway/oauth/revoke"],
+      ["HEAD", "/gateway/oauth/verify"],
+      ["PUT", "/gateway/oauth/verify"],
+      ["OPTIONS", "/gateway/oauth/verify"],
+      ["GET", "/user/dictation/ticket"],
+      ["HEAD", "/user/dictation/ticket"],
+      ["OPTIONS", "/user/dictation/ticket"],
+      ["POST", "/user/dictation/stream"],
+      ["HEAD", "/user/dictation/stream"],
+      ["GET", "/user/dictation/stream"],
+    ] as const)(
+      `${host}${prefix} denies unsupported native gateway %s %s`,
+      async (method, route) => {
+        const response = await fetch(origin + prefix + route, {
+          method,
+          headers: { host, authorization: "Bearer routing-test" },
+        })
+        expect(response.status).toBe(404)
+        expect(response.headers.get("x-test-upstream")).toBeNull()
+      },
+    )
+
+    nginxTest.each(
+      [
+        "/.well-known/oauth-authorization-server/",
+        "/.well-known/oauth-authorization-server/extra",
+        "/xwell-known/oauth-authorization-server",
+        "/.well-known/openid-configuration",
+        "/gateway/oauth",
+        "/gateway/oauth/device/",
+        "/gateway/oauth/token/extra",
+        "/gateway/oauth/unknown",
+        "/user/dictation",
+        "/user/dictation/ticket/",
+        "/user/dictation/stream/extra",
+        "/user/dictation/unknown",
+        "/user/other",
+        "/api/user/dictation/ticket",
+        "/v2/gateway/oauth/device",
+        "/v2/user/dictation/ticket",
+      ].flatMap((route) =>
+        ["GET", "POST"].map((method) => [method, route] as const),
+      ),
+    )(
+      `${host}${prefix} retains default denial around native gateway routes at %s %s`,
+      async (method, route) => {
+        const response = await fetch(origin + prefix + route, {
+          method,
+          headers: { host, authorization: "Bearer routing-test" },
+        })
+        expect(response.status).toBe(404)
+        expect(response.headers.get("x-test-upstream")).toBeNull()
+      },
+    )
+
+    nginxTest.each([
+      ["/user/dictation/stream", "h2c"],
+      ["/user/dictation/stream/extra", "websocket"],
+      ["/user/other", "websocket"],
+      ["/v2/user/dictation/stream", "websocket"],
+    ])(
+      `${host}${prefix} denies unsupported upgrade %s %s`,
+      async (route, upgrade) => {
+        const response = await requestUpgrade(prefix + route, {
+          host,
+          upgrade,
+          connection: "Upgrade",
+          "sec-websocket-version": "13",
+          "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+          "sec-websocket-protocol": "claude.dictation.v1, ticket.routing_test",
+        })
+        expect(response.status).toBe(404)
+        expect(response.headers["x-test-upstream"]).toBeUndefined()
+      },
+    )
+  }
+}
+
+for (const host of ["codex.test", "claude-platform.test"]) {
+  for (const prefix of ["", "/v1"]) {
+    nginxTest.each([
+      ...desktopGatewayAuthRoutes,
+      ["POST", "/user/dictation/ticket"],
+    ] as const)(
+      `${host}${prefix} does not expose Claude gateway %s %s`,
+      async (method, route) => {
+        const response = await fetch(origin + prefix + route, {
+          method,
+          headers: { host, authorization: "Bearer routing-test" },
+        })
+        expect(response.status).toBe(404)
+        expect(response.headers.get("x-test-upstream")).toBeNull()
+      },
+    )
+
+    nginxTest(
+      `${host}${prefix} does not expose Claude gateway WebSockets`,
+      async () => {
+        const response = await requestUpgrade(
+          prefix + "/user/dictation/stream",
+          {
+            host,
+            upgrade: "websocket",
+            connection: "Upgrade",
+            "sec-websocket-version": "13",
+            "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+            "sec-websocket-protocol":
+              "claude.dictation.v1, ticket.routing_test",
+          },
+        )
+        expect(response.status).toBe(404)
+        expect(response.headers["x-test-upstream"]).toBeUndefined()
+      },
+    )
+  }
 }
