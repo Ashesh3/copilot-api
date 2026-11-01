@@ -343,6 +343,7 @@ test("maps client tool search and makes discovered namespaces executable on cont
     source,
   )
   expect(result.output[0]).toMatchObject({
+    id: "tsc_search_next",
     type: "tool_search_call",
     call_id: "search_next",
     execution: "client",

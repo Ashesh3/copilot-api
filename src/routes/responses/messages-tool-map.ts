@@ -432,7 +432,7 @@ function restoreToolCall(
   if (tool?.kind === "tool_search") {
     return {
       ...common,
-      id: `ts_${block.id}`,
+      id: `tsc_${block.id}`,
       type: "tool_search_call",
       execution: "client",
       arguments: structuredClone(block.input),
@@ -524,7 +524,7 @@ function restoreChatToolSearchCall(
 ): ResponseOutputToolSearchCall {
   const parsed = parseToolArguments(call.argumentsText)
   return {
-    id: `ts_${call.callId}`,
+    id: `tsc_${call.callId}`,
     type: "tool_search_call",
     call_id: call.callId,
     status: "completed",
