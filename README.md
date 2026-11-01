@@ -489,8 +489,10 @@ enable `dictationEnabled`. A static key alone does not expose that microphone in
 Desktop 4.4212.0. The sign-in page accepts an existing gateway or inference key;
 no Claude account is needed for this gateway flow. Speech transcription requires
 the existing Groq configuration. See
-[Claude Desktop dictation setup](docs/claude-desktop-dictation.md) for deployment,
-editable Windows configuration, sign-in, verification, and rollback.
+[Claude Desktop local setup](docs/claude-desktop-setup.md) for Windows profile
+selection, editable configuration, sign-in, microphone verification, and Nginx
+troubleshooting. The [dictation reference](docs/claude-desktop-dictation.md)
+contains deployment and protocol details.
 
 ### Google-compatible clients
 
