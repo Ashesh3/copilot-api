@@ -8,6 +8,11 @@ conversational voice or change computer-use feature availability.
 The protocol was verified against Claude Desktop 4.4212.0. The existing Claude
 Code CLI voice socket and Codex Desktop transcription routes remain separate.
 
+For the local Windows setup, including MSIX profile discovery, safe client
+updates, gateway sign-in, and the microphone check, start with the
+[Claude Desktop local gateway setup](claude-desktop-setup.md) guide. This page
+contains the deployment and protocol reference.
+
 ## Deploy the gateway first
 
 Deploy the updated application and the corresponding public-domain Nginx
