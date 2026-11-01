@@ -266,3 +266,115 @@ test("does not recover malformed or server error responses", async () => {
     expect(await recoverReasoningItemIds(history(), response)).toBeUndefined()
   }
 })
+
+for (const prepared of [false, true]) {
+  test(`repairs saved bridge tool-search IDs before native replay (prepared=${prepared})`, async () => {
+    await seedProtocolDatabase()
+    const source: ResponsesPayload = {
+      model: "gpt-6-astra",
+      input: [
+        {
+          type: "tool_search_call",
+          id: "ts_toolu_legacy_search",
+          call_id: "toolu_legacy_search",
+          status: "completed",
+          execution: "client",
+          arguments: { query: "find a file", limit: 1 },
+        },
+        {
+          type: "tool_search_output",
+          call_id: "toolu_legacy_search",
+          execution: "client",
+          tools: [{ type: "function", name: "find_file", parameters: {} }],
+        },
+        {
+          type: "tool_search_call",
+          id: "ts_call_legacy_search",
+          call_id: "call_legacy_search",
+          status: "completed",
+          execution: "client",
+          arguments: { query: "read a file" },
+        },
+        {
+          type: "tool_search_output",
+          call_id: "call_legacy_search",
+          execution: "client",
+          tools: [{ type: "function", name: "read_file", parameters: {} }],
+        },
+        { role: "user", content: "Continue with Astra." },
+      ],
+    }
+    const before = structuredClone(source)
+    responses.push(success())
+
+    await createResponses(source, {
+      initiator: "user",
+      vision: false,
+      nativeResponses: true,
+      prepared,
+      allowCompatibilityRetry: false,
+    })
+
+    expect(requests).toHaveLength(1)
+    const expected = structuredClone(before.input) as Array<
+      Record<string, unknown>
+    >
+    expected[0].id = "tsc_toolu_legacy_search"
+    expected[2].id = "tsc_call_legacy_search"
+    expect(requests[0].input).toEqual(expected)
+    expect(source).toEqual(before)
+  })
+}
+
+test("preserves native search IDs and items without a matching legacy bridge identity", async () => {
+  await seedProtocolDatabase()
+  const search = {
+    type: "tool_search_call",
+    call_id: "call_search",
+    status: "completed",
+    execution: "client",
+    arguments: { query: "find tools" },
+  }
+  const input = [
+    { ...search, id: "tsc_native_search" },
+    { ...search, id: "ts_unrelated" },
+    { ...search, id: "ts_call_search", execution: "server" },
+    { ...search, id: "ts_", call_id: "" },
+    {
+      type: "tool_search_call",
+      id: "ts_missing_call_id",
+      execution: "client",
+      arguments: {},
+    },
+    { ...search },
+    { type: "item_reference", id: "ts_call_search" },
+    {
+      type: "function_call",
+      id: "ts_call_search",
+      call_id: "call_search",
+      name: "find_file",
+      arguments: "{}",
+    },
+    {
+      type: "tool_search_output",
+      id: "ts_call_search",
+      call_id: "call_search",
+      execution: "client",
+      tools: [],
+    },
+  ]
+  const source: ResponsesPayload = { model: "gpt-6-astra", input }
+  const before = structuredClone(source)
+  responses.push(success())
+
+  await createResponses(source, {
+    initiator: "user",
+    vision: false,
+    nativeResponses: true,
+    prepared: true,
+  })
+
+  expect(requests).toHaveLength(1)
+  expect(requests[0].input).toEqual(before.input)
+  expect(source).toEqual(before)
+})

@@ -325,6 +325,7 @@ test.each([
     },
     returnedInput: { input: 'text("audit");' },
     expectedCall: {
+      id: "ctc_call_restored",
       type: "custom_tool_call",
       call_id: "call_restored",
       namespace: "functions",
@@ -359,6 +360,7 @@ test.each([
     },
     returnedInput: { query: "audit" },
     expectedCall: {
+      id: "tsc_call_restored",
       type: "tool_search_call",
       call_id: "call_restored",
       execution: "client",
@@ -419,6 +421,10 @@ test.each([
     expect(socket.frames.map((frame) => frame.type)).toEqual([
       ...expectedEvents,
     ])
+    expect(
+      socket.frames.find((frame) => frame.type === "response.output_item.added")
+        ?.item?.id,
+    ).toBe(expectedCall.id)
     expect(
       socket.frames.find((frame) => frame.type === "response.output_item.done")
         ?.item,

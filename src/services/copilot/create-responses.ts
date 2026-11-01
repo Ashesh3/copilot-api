@@ -12,6 +12,7 @@ import {
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
+import { normalizeLegacyToolSearchCallIds } from "~/services/copilot/responses-item-ids"
 import { stripUnsupportedResponsesInputMetadata } from "~/services/copilot/responses-metadata"
 import { omitOutputTokenReplay } from "~/services/copilot/responses-output-replay"
 import {
@@ -614,6 +615,7 @@ const createResponsesCore = async (
         implicitDefault: usesImplicitReasoningDefault(payload.model),
       })
   const body = prepared.body
+  if (Array.isArray(body.input)) normalizeLegacyToolSearchCallIds(body.input)
   stripUnsupportedResponsesInputMetadata(body)
   omitOutputTokenReplay(body)
   const destinationAccount = reasoningStateAccount(

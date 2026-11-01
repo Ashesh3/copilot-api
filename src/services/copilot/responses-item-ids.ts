@@ -10,6 +10,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Older Messages and Chat bridges emitted `ts_${call_id}` for client tool
+ * search. Copilot requires `tsc_` when that saved history is replayed to a
+ * native Responses model. Repair only the known bridge shape on the owned
+ * wire copy; call_id still links the call to its tool_search_output.
+ */
+export function normalizeLegacyToolSearchCallIds(items: Array<unknown>): void {
+  for (const item of items) {
+    if (
+      !isRecord(item)
+      || item.type !== "tool_search_call"
+      || item.execution !== "client"
+      || typeof item.call_id !== "string"
+      || item.call_id.length === 0
+      || item.id !== `ts_${item.call_id}`
+    ) {
+      continue
+    }
+    item.id = `tsc_${item.call_id}`
+  }
+}
+
+/**
  * Codex replays only IDs of the form `prefix_suffix` and drops the others
  * before sending history. Copilot's opaque IDs have no such prefix.
  */
