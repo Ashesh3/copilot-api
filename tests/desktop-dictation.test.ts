@@ -600,7 +600,9 @@ test("large legitimate PCM is transcribed intact without a gateway audio cap", a
   client.socket.send('{"type":"CloseStream"}')
   expect((await client.closed).code).toBe(1000)
   expect(client.frames[0].data).toBe("A native microphone transcript.")
-  const form = providerCalls[0].body as FormData
+  // Progress may already have transcribed a 30-second prefix. Without segment
+  // metadata that prefix remains provisional and the final call retains it.
+  const form = providerCalls.at(-1)?.body as FormData
   expect((form.get("file") as File).size).toBe(20_000_044)
 })
 

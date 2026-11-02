@@ -128,10 +128,14 @@ model. Then:
 4. Confirm the transcript appears in the editable input without automatically
    submitting it.
 
-The adapter transcribes after Stop. The verified Desktop build waits roughly two
-seconds for final text, so provider/network latency affects whether text arrives
-in time. Ordinary click-to-record mode can also stop after about a minute without
-partial text; start with a short recording.
+Starting with 7.0.1, the adapter returns transcript progress every 30 seconds of
+captured audio and flushes the remaining audio on Stop. After the short test,
+dictate continuously for more than a minute and verify that it stays recording
+and preserves the final words. The verified Desktop build still waits roughly
+two seconds for final text, so provider/network latency matters. Genuine silence
+or a provider that stops returning words can still trigger the one-minute stop.
+Existing working installations need only the application update: no Nginx,
+transcription-engine, credential, or Desktop-profile changes are required.
 
 A healthy server or successful discovery request does not establish microphone
 success. Verify the actual editable transcript. If Windows requests microphone
