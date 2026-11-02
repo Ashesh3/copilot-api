@@ -106,19 +106,38 @@ its issuer and client binding. Expired token records are pruned on authenticatio
 writes; inactive sessions are retired only after their unexpired token and replay
 records are gone.
 
-Desktop waits approximately two seconds for final text after Stop. The gateway
-currently sends the recording to Groq when recording stops, so provider and
-network latency must fit that native drain window. Validate this with the actual
-deployment; protocol tests alone cannot establish production transcription
-latency. Closing the socket aborts provider work and releases the audio buffer.
+Starting with 7.0.1, the gateway transcribes every **30 seconds of captured
+audio**, plus any uncommitted phrase retained from the previous batch. It sends
+real transcript updates while the microphone remains active. Completed phrases
+are committed with `TranscriptEndpoint`; the trailing phrase remains replaceable
+with `TranscriptInterim`. This prevents ordinary continuous speech from reaching
+Desktop's one-minute timer without transcript progress.
+
+Periodic requests use Groq's segment timestamps to retain the unresolved phrase
+rather than guess which repeated words to delete. If segment metadata cannot be
+used safely, the gateway retains the whole uncommitted audio window. That
+fallback can increase provider work. There are more transcription requests than
+the previous single-request implementation, including retained context; existing
+Groq pricing and upstream limits still apply. Silence produces no placeholder
+words, and retained-context-only repeats are not replayed to simulate activity.
+Matching words with timestamps in fresh audio still count as speech. An empty
+recognition keeps the client's last provisional words; Desktop's protocol does
+not retract an earlier interim transcript with an empty frame.
+
+Stop flushes the remaining audio. Desktop still waits approximately two seconds
+for final text, so provider/network latency must fit that native drain window;
+slow or failed transcription can still interrupt recording or lose its final
+tail. Validate a recording longer than one minute and its final editable text
+with the actual deployment. Closing the socket aborts provider work and releases
+the audio buffer. This update changes no routes, database schema, Nginx
+configuration, provider model, credentials, or Desktop profile settings.
 
 The server does not add recording-duration, frame, connection, or timeout caps.
 The optional `max_seconds` ticket field is omitted; the inspected client applies
 its own ten-minute maximum by default. In ordinary click-to-record mode, the
-client can also stop after about one minute without receiving transcript text.
-This batch adapter returns text after Stop, so shorter recordings are appropriate;
-push-to-talk has different native silence behavior. Upstream transcription limits
-still apply. Regional Desktop locales such as `en-US` are normalized to the
+client can still stop after about one minute without recognized words; genuine
+silence and provider delays are not bypassed. Push-to-talk has different native
+silence behavior. Regional Desktop locales such as `en-US` are normalized to the
 provider's base language code, such as `en`.
 
 ## Troubleshooting and rollback

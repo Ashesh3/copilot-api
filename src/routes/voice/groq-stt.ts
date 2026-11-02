@@ -3,12 +3,35 @@ import { getGroqApiKey } from "~/lib/custom-providers"
 
 export interface TranscriptionResult {
   text: string
+  segments?: Array<TranscriptionSegment>
+}
+
+export interface TranscriptionSegment {
+  start: number
+  end: number
+  text: string
 }
 
 export interface TranscribeOptions {
   contentType?: string
   filename?: string
   signal?: AbortSignal
+  segmentTimestamps?: boolean
+}
+
+function isSegment(value: unknown): value is TranscriptionSegment {
+  return (
+    typeof value === "object"
+    && value !== null
+    && "start" in value
+    && typeof value.start === "number"
+    && Number.isFinite(value.start)
+    && "end" in value
+    && typeof value.end === "number"
+    && Number.isFinite(value.end)
+    && "text" in value
+    && typeof value.text === "string"
+  )
 }
 
 export class GroqTranscriptionError extends Error {
@@ -55,7 +78,12 @@ export async function transcribe(
   const formData = new FormData()
   formData.append("file", new Blob([audio], { type: contentType }), filename)
   formData.append("model", model)
-  formData.append("response_format", "json")
+  formData.append(
+    "response_format",
+    options.segmentTimestamps ? "verbose_json" : "json",
+  )
+  if (options.segmentTimestamps)
+    formData.append("timestamp_granularities[]", "segment")
 
   if (language && language !== "auto") {
     formData.append("language", language)
@@ -79,6 +107,13 @@ export async function transcribe(
     )
   }
 
-  const data = (await response.json()) as { text?: string }
-  return { text: data.text?.trim() ?? "" }
+  const data = (await response.json()) as { text?: string; segments?: unknown }
+  return {
+    text: data.text?.trim() ?? "",
+    ...(options.segmentTimestamps
+      && Array.isArray(data.segments)
+      && data.segments.every((segment) => isSegment(segment)) && {
+        segments: data.segments,
+      }),
+  }
 }
