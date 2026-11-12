@@ -125,7 +125,94 @@ describe("Gemini array item enums", () => {
 
     expect(payload).toEqual(before)
   })
+})
 
+describe("Gemini schema references", () => {
+  test.each(["$ref", "$dynamicRef", "$recursiveRef"])(
+    "preserves parameters containing %s links before repairing any nodes",
+    (referenceField) => {
+      const payload = payloadFor({
+        type: "object",
+        properties: {
+          level: { [referenceField]: "#/properties/levels/items" },
+          levels: {
+            type: ["array", "null"],
+            enum: [1, 2],
+            items: { type: "integer" },
+          },
+        },
+      })
+      const before = structuredClone(payload)
+
+      normalizeGeminiToolSchemas(payload)
+
+      expect(payload).toEqual(before)
+    },
+  )
+
+  test("repairs a reference-free tool without changing another tool's nested references", () => {
+    const referenced = payloadFor({
+      type: "object",
+      properties: {
+        levels: { type: "array", enum: [1, 2], items: { type: "integer" } },
+        group: {
+          type: "object",
+          properties: { level: { $ref: "#/properties/levels/items" } },
+        },
+      },
+    })
+    const referenceFree = payloadFor({
+      type: "object",
+      properties: {
+        levels: { type: "array", enum: [1, 2], items: { type: "integer" } },
+      },
+    })
+    const before = structuredClone(referenced.tools[0])
+    const payload = {
+      ...referenced,
+      tools: [...referenced.tools, ...referenceFree.tools],
+    }
+
+    normalizeGeminiToolSchemas(payload)
+
+    expect(payload.tools[0]).toEqual(before)
+    expect(payload.tools[1].function.parameters).toEqual({
+      type: "object",
+      properties: {
+        levels: { type: "array", items: { type: "integer", enum: [1, 2] } },
+      },
+    })
+  })
+
+  test.each(["default", "const", "enum", "examples"])(
+    "ignores reference-shaped %s data when deciding whether to repair",
+    (field) => {
+      const literal = { $ref: "#/properties/levels/items" }
+      const data =
+        field === "enum" || field === "examples" ? [literal] : literal
+      const schema: Record<string, unknown> = {
+        type: "array",
+        enum: [1, 2],
+        items: { type: "integer" },
+      }
+      const payload = payloadFor({
+        type: "object",
+        properties: { levels: schema },
+        [field]: structuredClone(data),
+      })
+
+      normalizeGeminiToolSchemas(payload)
+
+      expect(schema).toEqual({
+        type: "array",
+        items: { type: "integer", enum: [1, 2] },
+      })
+      expect(payload.tools[0].function.parameters[field]).toEqual(data)
+    },
+  )
+})
+
+describe("Gemini schema boundaries", () => {
   test("walks schema positions without modifying embedded JSON values", () => {
     const literal: Record<string, unknown> = {
       type: "array",

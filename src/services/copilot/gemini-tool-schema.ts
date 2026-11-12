@@ -106,6 +106,22 @@ function childSchemas(
   return children
 }
 
+function collectSchemas(
+  root: Record<string, unknown>,
+): Array<Record<string, unknown>> {
+  const schemas: Array<Record<string, unknown>> = []
+  const pending = [root]
+  const visited = new WeakSet<Record<string, unknown>>()
+  while (pending.length > 0) {
+    const schema = pending.pop()
+    if (!schema || visited.has(schema)) continue
+    visited.add(schema)
+    schemas.push(schema)
+    pending.push(...childSchemas(schema))
+  }
+  return schemas
+}
+
 /** Repairs generated item enums only on the owned Gemini Chat wire clone. */
 export function normalizeGeminiToolSchemas(
   body: Record<string, unknown>,
@@ -125,14 +141,9 @@ export function normalizeGeminiToolSchemas(
       || !isRecord(tool.function.parameters)
     )
       continue
-    const pending = [tool.function.parameters]
-    const visited = new WeakSet<Record<string, unknown>>()
-    while (pending.length > 0) {
-      const schema = pending.pop()
-      if (!schema || visited.has(schema)) continue
-      visited.add(schema)
-      repairArrayItemEnum(schema)
-      pending.push(...childSchemas(schema))
-    }
+    const schemas = collectSchemas(tool.function.parameters)
+    // Preserve reference-bearing parameters so shared targets keep their constraints.
+    if (schemas.some((schema) => hasReference(schema))) continue
+    for (const schema of schemas) repairArrayItemEnum(schema)
   }
 }
