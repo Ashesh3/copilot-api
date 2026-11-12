@@ -929,6 +929,132 @@ test("exposes the processed clone without changing the direct response API", asy
   })
 })
 
+test.each([false, true])(
+  "moves misplaced Gemini array enums to items before dispatch (candidatePrepared=%s)",
+  async (candidatePrepared) => {
+    const payload: ChatCompletionsPayload = {
+      model: "gemini-4-carbon",
+      messages: [{ role: "user", content: "Find matching records." }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "search_records",
+            description: "Find records by filter.",
+            strict: false,
+            parameters: {
+              type: "object",
+              properties: {
+                filter: {
+                  type: "object",
+                  properties: {
+                    severity: {
+                      type: ["array", "null"],
+                      description: "Selected severity levels.",
+                      enum: [0, 1, 2, 3, 4, 25],
+                      items: { type: "integer" },
+                    },
+                    category: { type: "string" },
+                  },
+                  required: ["severity"],
+                },
+                query: { type: "string" },
+              },
+              required: ["filter"],
+              additionalProperties: false,
+            },
+          },
+        },
+      ],
+    }
+    const original = structuredClone(payload)
+
+    const { processedPayload } = await seedProtocolDatabase().then(() =>
+      createChatCompletionsWithProcessedPayload(payload, { candidatePrepared }),
+    )
+
+    const expectedTools = [
+      {
+        type: "function" as const,
+        function: {
+          name: "search_records",
+          description: "Find records by filter.",
+          strict: false,
+          parameters: {
+            type: "object",
+            properties: {
+              filter: {
+                type: "object",
+                properties: {
+                  severity: {
+                    type: ["array", "null"],
+                    description: "Selected severity levels.",
+                    items: { type: "integer", enum: [0, 1, 2, 3, 4, 25] },
+                  },
+                  category: { type: "string" },
+                },
+                required: ["severity"],
+              },
+              query: { type: "string" },
+            },
+            required: ["filter"],
+            additionalProperties: false,
+          },
+        },
+        ...(!candidatePrepared ?
+          { copilot_cache_control: { type: "ephemeral" } }
+        : {}),
+      },
+    ]
+    expect(lastRequestBody?.tools).toEqual(expectedTools)
+    expect(processedPayload.tools).toEqual(expectedTools)
+    expect(processedPayload).toEqual({
+      ...original,
+      tools: expectedTools,
+    })
+    expect(lastRequestBody?.messages).toEqual(original.messages)
+    expect(payload).toEqual(original)
+  },
+)
+
+test("preserves misplaced array enums for non-Gemini Chat models", async () => {
+  const payload: ChatCompletionsPayload = {
+    model: "gpt-test",
+    messages: [{ role: "user", content: "Find matching records." }],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "search_records",
+          parameters: {
+            type: "object",
+            properties: {
+              severity: {
+                type: ["array", "null"],
+                enum: [0, 1, 2, 3, 4, 25],
+                items: { type: "integer" },
+              },
+            },
+          },
+        },
+      },
+    ],
+  }
+  const original = structuredClone(payload)
+
+  const { processedPayload } = await seedProtocolDatabase().then(() =>
+    createChatCompletionsWithProcessedPayload(payload, {
+      candidatePrepared: true,
+    }),
+  )
+
+  expect(lastRequestBody).toEqual(
+    original as unknown as Record<string, unknown>,
+  )
+  expect(processedPayload).toEqual(original)
+  expect(payload).toEqual(original)
+})
+
 test("dispatches a prepared native candidate without semantic reprocessing", async () => {
   const payload = {
     model: "gpt-test",

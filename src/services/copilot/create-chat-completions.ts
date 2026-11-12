@@ -32,6 +32,7 @@ import { runManagedWebRequest } from "~/services/web/tool-loop"
 
 import { fitChatCompletionsCompactionPayload } from "./compaction-payload"
 import { classifyCompatibilityRetry } from "./compatibility-retry"
+import { normalizeGeminiToolSchemas } from "./gemini-tool-schema"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -642,6 +643,9 @@ async function dispatchChatCompletionsCore(
   }
   omitConfiguredReasoningEffort(
     "chat",
+    normalizedPayload as unknown as Record<string, unknown>,
+  )
+  normalizeGeminiToolSchemas(
     normalizedPayload as unknown as Record<string, unknown>,
   )
 
