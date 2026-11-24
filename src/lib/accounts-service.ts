@@ -492,9 +492,17 @@ export class AccountsService {
     while (this.background.size > 0) await Promise.all(this.background)
   }
 
-  /** Account model lists stay incomplete until registry loads and validations finish. */
+  /**
+   * Account model lists stay incomplete until registry loads, validations,
+   * explicit model refreshes, and pool reinitializations finish.
+   */
   isModelDiscoveryPending(): boolean {
-    return this.refreshing !== undefined || this.validating.size > 0
+    return (
+      this.refreshing !== undefined
+      || this.validating.size > 0
+      || this.modelRefreshes.size > 0
+      || this.pool.isModelDiscoveryPending()
+    )
   }
 
   async publishValidated(
@@ -720,8 +728,9 @@ export function getAccountsService(): AccountsService {
   return service
 }
 
-/** Without a storage runtime no account model discovery can be in flight. */
+/** Without a storage runtime only pool reinitialization can discover models. */
 export function isAccountModelDiscoveryPending(): boolean {
+  if (tokenPool.isModelDiscoveryPending()) return true
   const runtime = peekStorageRuntime()
   if (!runtime) return false
   return services.get(runtime.storage)?.isModelDiscoveryPending() ?? false

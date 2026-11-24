@@ -1525,10 +1525,12 @@ test("revalidates native Messages authority after asynchronous attachment prepar
 
 const unknownModelRoutes: Array<{
   body: (model: string) => unknown
+  catalogUnavailableType: string
   path: string
 }> = [
   {
     path: "/v1/chat/completions",
+    catalogUnavailableType: "server_error",
     body: (model: string) => ({
       model,
       messages: [{ role: "user", content: "hello" }],
@@ -1536,10 +1538,12 @@ const unknownModelRoutes: Array<{
   },
   {
     path: "/v1/responses",
+    catalogUnavailableType: "server_error",
     body: (model: string) => ({ model, input: "hello" }),
   },
   {
     path: "/v1/messages",
+    catalogUnavailableType: "api_error",
     body: (model: string) => ({
       model,
       max_tokens: 16,
@@ -1599,7 +1603,7 @@ test.each(unknownModelRoutes)(
 
 test.each(unknownModelRoutes)(
   "$path reports an unknown model as retryable while account models are still loading",
-  async ({ body, path }) => {
+  async ({ body, catalogUnavailableType, path }) => {
     const endpoints = ["/chat/completions", "/responses", "/v1/messages"]
     installConflictingCatalogs({
       first: endpoints,
@@ -1620,11 +1624,48 @@ test.each(unknownModelRoutes)(
       expect(response.status).toBe(503)
       expect(response.headers.get("retry-after")).toBe("1")
       expect(await response.json()).toMatchObject({
-        error: { code: "model_catalog_unavailable" },
+        error: {
+          code: "model_catalog_unavailable",
+          message: "The model catalog is still loading. Retry the request.",
+          type: catalogUnavailableType,
+        },
       })
       expect(upstreamRequests).toEqual([])
     } finally {
       pending.mockRestore()
     }
+  },
+)
+
+test.each(unknownModelRoutes)(
+  "$path leaves a model listed only by a disabled account to account selection",
+  async ({ body, path }) => {
+    const endpoints = ["/chat/completions", "/responses", "/v1/messages"]
+    const disabled = registerAccount({
+      accountId: 52_401,
+      endpoints,
+      modelId: "disabled-account-model",
+      token: "disabled-account-token",
+    })
+    registerAccount({
+      accountId: 52_402,
+      endpoints,
+      modelId: "enabled-account-model",
+      token: "enabled-account-token",
+    })
+    disabled.enabled = false
+    tokenPool.rebuildModelIndex()
+    state.models = tokenPool.getAllModels()
+
+    const response = await postUnknownModelRoute(
+      path,
+      body("disabled-account-model"),
+    )
+
+    expect(response.status).not.toBe(404)
+    expect(JSON.stringify(await response.json())).not.toContain(
+      "model_not_found",
+    )
+    expect(upstreamRequests).toEqual([])
   },
 )

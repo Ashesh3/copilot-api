@@ -125,32 +125,39 @@ export interface RoutedModelSelectionOptions {
   createAssignment?: boolean
 }
 
-export interface CatalogModelSelectionOptions
-  extends RoutedModelSelectionOptions {
-  /** Builds the dialect-specific 404 for a model the full catalog lacks. */
+/** Dialect-specific errors for catalog misses; defaults use the OpenAI shape. */
+export interface CatalogModelErrors {
+  /** A model no account lists once discovery is complete. */
   notFound?: () => LocalHTTPError
+  /** Discovery is still running, so the model may yet appear. */
+  unavailable?: () => LocalHTTPError
 }
 
+export interface CatalogModelSelectionOptions
+  extends RoutedModelSelectionOptions,
+    CatalogModelErrors {}
+
 /**
- * Reject a model that neither the published catalog nor any pooled account
- * lists. While account model discovery is incomplete, or before any account
- * has listed models, a missing model may still appear, so report a retryable
- * 503 instead of a false 404.
+ * Reject a model that neither the published catalog nor any account lists,
+ * including disabled or unhealthy accounts; account selection reports their
+ * availability. While account model discovery is incomplete, or before any
+ * account has listed models, a missing model may still appear, so report a
+ * retryable 503 instead of a false 404.
  */
 export function assertCatalogModel(
   modelId: string,
-  notFound: () => LocalHTTPError = createModelNotFoundError,
+  errors: CatalogModelErrors = {},
 ): void {
   const models = state.models
   if (
     !models
     || models.data.some((model) => model.id === modelId)
-    || tokenPool.getEligibleAccountsForModel(modelId).length > 0
+    || tokenPool.hasKnownModel(modelId)
   )
     return
   if (models.data.length === 0 || isAccountModelDiscoveryPending())
-    throw createModelCatalogUnavailableError()
-  throw notFound()
+    throw (errors.unavailable ?? createModelCatalogUnavailableError)()
+  throw (errors.notFound ?? createModelNotFoundError)()
 }
 
 /**
@@ -162,10 +169,11 @@ export async function selectCatalogRoutedModel(
   modelId: string,
   options: CatalogModelSelectionOptions = {},
 ): Promise<RoutedModelSelection> {
-  const { notFound, ...selectionOptions } = options
-  assertCatalogModel(modelId, notFound)
+  const { notFound, unavailable, ...selectionOptions } = options
+  const errors = { notFound, unavailable }
+  assertCatalogModel(modelId, errors)
   const selection = await selectRoutedModel(modelId, selectionOptions)
-  if (!selection.model) assertCatalogModel(modelId, notFound)
+  if (!selection.model) assertCatalogModel(modelId, errors)
   return selection
 }
 

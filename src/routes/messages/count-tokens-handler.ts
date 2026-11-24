@@ -40,6 +40,7 @@ import {
 } from "~/services/copilot/messages-contract"
 
 import { type AnthropicMessagesPayload } from "./anthropic-types"
+import { createMessagesModelCatalogUnavailableError } from "./error"
 import { translateToOpenAI } from "./non-stream-translation"
 
 /**
@@ -115,7 +116,10 @@ export async function handleCountTokens(c: Context) {
     })
   }
 
-  assertCatalogModel(targetModel, createCountTokensModelNotFoundError)
+  assertCatalogModel(targetModel, {
+    notFound: createCountTokensModelNotFoundError,
+    unavailable: createMessagesModelCatalogUnavailableError,
+  })
 
   const result = await countAnthropicTokens(anthropicPayload.body, {
     ...nativeHeaders,

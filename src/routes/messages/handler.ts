@@ -139,6 +139,7 @@ import {
   type AnthropicStreamState,
   isAnthropicTextBlock,
 } from "./anthropic-types"
+import { createMessagesModelCatalogUnavailableError } from "./error"
 import {
   prepareMessagesChatCandidate,
   prepareMessagesCandidates,
@@ -504,6 +505,7 @@ async function handleCompletionInner(
   const routedModel = await selectCatalogRoutedModel(anthropicPayload.model, {
     copilotSessionToken,
     notFound: createMessagesModelNotFoundError,
+    unavailable: createMessagesModelCatalogUnavailableError,
   })
   const selectedModel = routedModel.model
   const routingModel =

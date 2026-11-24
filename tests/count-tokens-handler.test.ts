@@ -256,6 +256,25 @@ test("count_tokens rejects an all-invalid message list after sanitization", asyn
   expect(capturedRequests).toHaveLength(0)
 })
 
+test("count_tokens returns an Anthropic retryable error while the catalog is empty", async () => {
+  state.models = { object: "list", data: [] }
+
+  const response = await requestCountTokens({ model: "missing-model" })
+
+  expect(response.status).toBe(503)
+  expect(response.headers.get("retry-after")).toBe("1")
+  expect(await response.json()).toEqual({
+    type: "error",
+    error: {
+      type: "api_error",
+      code: "model_catalog_unavailable",
+      message: "The model catalog is still loading. Retry the request.",
+      param: "model",
+    },
+  })
+  expect(capturedRequests).toHaveLength(0)
+})
+
 test("count_tokens drops malformed optional controls and invalid optional headers", async () => {
   const response = await requestCountTokens({
     headers: {

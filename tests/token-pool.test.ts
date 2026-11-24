@@ -633,3 +633,20 @@ test("removes test accounts from model eligibility", () => {
   expect(pool.getAllAccounts().map((account) => account.id)).toEqual([92])
   expect(pool.getEligibleAccountIdsForModel(MODEL_A)).toEqual([92])
 })
+
+test("reports model discovery as pending while an account reinitializes", async () => {
+  const pool = new tokenPoolModule.TokenPool()
+  pools.add(pool)
+  const account = createInitializedAccount(pool)
+  const deferredModels = createDeferredFetchResponse()
+  queuedResults.push(copilotUserResponse(), deferredModels)
+  expect(pool.isModelDiscoveryPending()).toBe(false)
+
+  const reinitialized = pool.reinitializeAccount(account)
+  await deferredModels.requestStarted
+
+  expect(pool.isModelDiscoveryPending()).toBe(true)
+  deferredModels.resolveResponse(modelsResponse([createModel(MODEL_B)]))
+  await reinitialized
+  expect(pool.isModelDiscoveryPending()).toBe(false)
+})
