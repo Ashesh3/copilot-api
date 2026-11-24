@@ -212,6 +212,220 @@ describe("Gemini schema references", () => {
   )
 })
 
+describe("Gemini anyOf sibling constraints", () => {
+  test("moves nullable object constraints into discriminated anyOf branches", () => {
+    const capabilities: Record<string, unknown> = {
+      type: ["array", "null"],
+      default: null,
+      description: "Optional capability allow-list.",
+      items: {
+        type: ["object", "null"],
+        required: ["name"],
+        anyOf: [
+          {
+            properties: {
+              name: { const: "People" },
+              include_related_content: { type: ["boolean", "null"] },
+            },
+          },
+          {
+            properties: {
+              name: { const: "Email" },
+              folders: {
+                type: ["array", "null"],
+                items: {
+                  type: ["object", "null"],
+                  properties: { folder_id: { type: ["string", "null"] } },
+                  required: ["folder_id"],
+                },
+              },
+            },
+          },
+        ],
+      },
+    }
+    const payload = payloadFor({
+      type: "object",
+      properties: { query: { type: "string" }, capabilities },
+      required: ["query"],
+    })
+
+    normalizeGeminiToolSchemas(payload)
+
+    expect(capabilities.items).toEqual({
+      anyOf: [
+        {
+          type: ["object", "null"],
+          properties: {
+            name: { const: "People" },
+            include_related_content: { type: ["boolean", "null"] },
+          },
+          required: ["name"],
+        },
+        {
+          type: ["object", "null"],
+          properties: {
+            name: { const: "Email" },
+            folders: {
+              type: ["array", "null"],
+              items: {
+                type: ["object", "null"],
+                properties: { folder_id: { type: ["string", "null"] } },
+                required: ["folder_id"],
+              },
+            },
+          },
+          required: ["name"],
+        },
+      ],
+    })
+    expect(payload.tools[0].function.parameters.required).toEqual(["query"])
+    const normalized = structuredClone(payload)
+    normalizeGeminiToolSchemas(payload)
+    expect(payload).toEqual(normalized)
+  })
+
+  test("intersects branch types, treating integers as numbers", () => {
+    const limit: Record<string, unknown> = {
+      type: ["number", "null"],
+      description: "A limit.",
+      anyOf: [
+        { type: ["integer", "null"], minimum: 1 },
+        { type: "number", maximum: 10 },
+        { description: "Any limit." },
+      ],
+    }
+    const count: Record<string, unknown> = {
+      type: "integer",
+      anyOf: [{ type: "number", minimum: 0 }],
+    }
+
+    normalizeGeminiToolSchemas(
+      payloadFor({ type: "object", properties: { limit, count } }),
+    )
+
+    expect(limit).toEqual({
+      description: "A limit.",
+      anyOf: [
+        { type: ["integer", "null"], minimum: 1 },
+        { type: "number", maximum: 10 },
+        { type: ["number", "null"], description: "Any limit." },
+      ],
+    })
+    expect(count).toEqual({ anyOf: [{ type: "integer", minimum: 0 }] })
+  })
+
+  test("repairs items that the array enum repair replaced", () => {
+    const levels: Record<string, unknown> = {
+      type: "array",
+      enum: [1, 2],
+      items: { type: "integer", anyOf: [{ minimum: 0 }, { maximum: -5 }] },
+    }
+    const payload = payloadFor({ type: "object", properties: { levels } })
+
+    normalizeGeminiToolSchemas(payload)
+
+    expect(levels).toEqual({
+      type: "array",
+      items: {
+        enum: [1, 2],
+        anyOf: [
+          { type: "integer", minimum: 0 },
+          { type: "integer", maximum: -5 },
+        ],
+      },
+    })
+  })
+})
+
+describe("Gemini anyOf unions left unchanged", () => {
+  test.each([
+    {
+      name: "annotation-only siblings",
+      schema: {
+        description: "Optional path.",
+        default: null,
+        title: "Path",
+        anyOf: [{ type: "string" }, { type: "null" }],
+      },
+    },
+    {
+      name: "a branch outside the parent type",
+      schema: { type: "object", anyOf: [{ type: "string" }] },
+    },
+    {
+      name: "a non-object branch",
+      schema: { type: "object", anyOf: [true] },
+    },
+    {
+      name: "malformed parent required",
+      schema: { required: "name", anyOf: [{ type: "object" }] },
+    },
+    {
+      name: "parent properties beside anyOf",
+      schema: {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+        anyOf: [{ properties: { name: { const: "People" } } }],
+      },
+    },
+    {
+      name: "a required name that one branch does not declare",
+      schema: {
+        type: "object",
+        required: ["id"],
+        anyOf: [
+          { properties: { id: { type: "string" } } },
+          { properties: { name: { type: "string" } } },
+        ],
+      },
+    },
+    {
+      name: "a branch with its own union",
+      schema: { type: "object", anyOf: [{ anyOf: [{ type: "object" }] }] },
+    },
+    {
+      name: "malformed branch properties",
+      schema: {
+        type: "object",
+        required: ["name"],
+        anyOf: [{ properties: [] }],
+      },
+    },
+    {
+      name: "an empty anyOf",
+      schema: { type: "object", anyOf: [] },
+    },
+  ])("preserves $name", ({ schema }) => {
+    const payload = payloadFor({
+      type: "object",
+      properties: { value: structuredClone(schema) },
+    })
+    const before = structuredClone(payload)
+
+    normalizeGeminiToolSchemas(payload)
+
+    expect(payload).toEqual(before)
+  })
+
+  test("leaves non-Gemini anyOf constraints unchanged", () => {
+    const payload = payloadFor(
+      {
+        type: "object",
+        required: ["name"],
+        anyOf: [{ properties: { name: { const: "People" } } }],
+      },
+      "claude-current",
+    )
+    const before = structuredClone(payload)
+
+    normalizeGeminiToolSchemas(payload)
+
+    expect(payload).toEqual(before)
+  })
+})
+
 describe("Gemini schema boundaries", () => {
   test("walks schema positions without modifying embedded JSON values", () => {
     const literal: Record<string, unknown> = {
@@ -221,9 +435,13 @@ describe("Gemini schema boundaries", () => {
     }
     const schema = {
       type: "object",
-      properties: { default: structuredClone(literal) },
+      properties: {
+        default: structuredClone(literal),
+        union: {
+          anyOf: [{ properties: { values: structuredClone(literal) } }],
+        },
+      },
       $defs: { values: structuredClone(literal) },
-      anyOf: [{ properties: { values: structuredClone(literal) } }],
       additionalProperties: structuredClone(literal),
       default: structuredClone(literal),
       const: structuredClone(literal),
@@ -237,7 +455,7 @@ describe("Gemini schema boundaries", () => {
     const repaired = { type: "array", items: { type: "integer", enum: [1, 2] } }
     expect(schema.properties.default).toEqual(repaired)
     expect(schema.$defs.values).toEqual(repaired)
-    expect(schema.anyOf[0].properties.values).toEqual(repaired)
+    expect(schema.properties.union.anyOf[0].properties.values).toEqual(repaired)
     expect(schema.additionalProperties).toEqual(repaired)
     expect(schema.default).toEqual(literal)
     expect(schema.const).toEqual(literal)
