@@ -18,6 +18,8 @@ import type { Model } from "~/services/copilot/get-models"
 import {
   getLastUsedAccountId,
   runWithRoutedModelSelection,
+  assertCatalogModel,
+  selectCatalogRoutedModel,
   selectRoutedModel,
 } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
@@ -37,7 +39,6 @@ import {
 } from "~/lib/endpoint-routing"
 import {
   createEndpointTranslationError,
-  createModelNotFoundError,
   inspectHttpError,
   isAbortError,
   isHTTPError,
@@ -537,12 +538,14 @@ async function handleGoogleAIInner(c: Context) {
       reference: customReference,
     })
   }
-  // Only token counting needs an early catalog probe. Generation may still
-  // change models through replacements/fallback and binds below afterward.
+  // Only token counting needs an early catalog probe, and it estimates unknown
+  // models instead of rejecting them. Generation may still change models
+  // through replacements/fallback and binds below afterward.
   let routedModel =
     isCount ? await selectRoutedModel(model, { createAssignment: false }) : {}
   let selectedModel = routedModel.model
   if (!isCount) {
+    assertCatalogModel(model)
     const advertised = tokenPool
       .getEligibleAccountsForModel(model)
       .map((account) => tokenPool.getModelForAccount(model, account.id))
@@ -550,8 +553,6 @@ async function handleGoogleAIInner(c: Context) {
       advertised.push(
         state.models?.data.find((candidate) => candidate.id === model),
       )
-    if (state.models && !advertised.some(Boolean))
-      throw createModelNotFoundError()
     if (
       !advertised.some((candidate) => {
         const endpoints = getModelEndpointSupport(candidate)
@@ -633,9 +634,8 @@ async function handleGoogleAIInner(c: Context) {
   applyModelFallbackToPayload(finalPayload)
   // Replacements may change the model. Reserve ownership only after the final
   // model is known, including when the earlier capability probe chose an account.
-  routedModel = await selectRoutedModel(finalPayload.model)
+  routedModel = await selectCatalogRoutedModel(finalPayload.model)
   selectedModel = routedModel.model
-  if (state.models && !selectedModel) throw createModelNotFoundError()
   const support = getModelEndpointSupport(selectedModel)
   if (!support.chat && !support.responses && !support.messages)
     throw createEndpointTranslationError({

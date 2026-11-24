@@ -397,3 +397,26 @@ test("OAuth validation uses immutable GitHub user ID separately from Copilot ana
     globalThis.fetch = originalFetch
   }
 })
+
+test("reports model discovery as pending until reloaded accounts finish validation", async () => {
+  await add("a")
+  await service.whenIdle()
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  service = new AccountsService(storage, {
+    validate: async (input) => {
+      await gate
+      return validator(input)
+    },
+  })
+  expect(service.isModelDiscoveryPending()).toBe(false)
+
+  await service.refreshRuntime()
+
+  expect(service.isModelDiscoveryPending()).toBe(true)
+  release?.()
+  await service.whenIdle()
+  expect(service.isModelDiscoveryPending()).toBe(false)
+})

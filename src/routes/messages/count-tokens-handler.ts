@@ -2,6 +2,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import { assertCatalogModel } from "~/lib/account-router"
 import {
   recordCopilotMessagesBeta,
   recordCopilotRequestNormalization,
@@ -114,11 +115,7 @@ export async function handleCountTokens(c: Context) {
     })
   }
 
-  const selectedModel = state.models?.data.find(
-    (model) => model.id === targetModel,
-  )
-  if (state.models && !selectedModel)
-    throw createCountTokensModelNotFoundError()
+  assertCatalogModel(targetModel, createCountTokensModelNotFoundError)
 
   const result = await countAnthropicTokens(anthropicPayload.body, {
     ...nativeHeaders,

@@ -14,7 +14,7 @@ import type { Model } from "~/services/copilot/get-models"
 import {
   getLastUsedAccountId,
   runWithRoutedModelSelection,
-  selectRoutedModel,
+  selectCatalogRoutedModel,
 } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
@@ -37,7 +37,6 @@ import {
 import {
   createEndpointTranslationError,
   createInvalidJsonBodyError,
-  createModelNotFoundError,
   inspectHttpError,
   isAbortError,
   isHTTPError,
@@ -337,11 +336,10 @@ async function handleCompletionInner(
     reasoningEffort,
   })
 
-  const routedModel = await selectRoutedModel(routableSource.model, {
+  const routedModel = await selectCatalogRoutedModel(routableSource.model, {
     copilotSessionToken,
   })
   const selectedModel = routedModel.model
-  if (state.models && !selectedModel) throw createModelNotFoundError()
 
   const candidates = await prepareChatCandidates({
     nativeMessagesOptions: { ...nativeOptions },

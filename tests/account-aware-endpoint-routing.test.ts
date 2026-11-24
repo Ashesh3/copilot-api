@@ -5,6 +5,7 @@ import {
   beforeEach,
   expect,
   mock,
+  spyOn,
   test,
 } from "bun:test"
 
@@ -18,6 +19,7 @@ import {
   selectRoutedModel,
   type RoutedAccountPin,
 } from "~/lib/account-router"
+import { getAccountsService } from "~/lib/accounts-service"
 import { LocalHTTPError } from "~/lib/error"
 import {
   clearLlmDebugLogs,
@@ -1520,3 +1522,109 @@ test("revalidates native Messages authority after asynchronous attachment prepar
     ),
   ).toEqual([])
 })
+
+const unknownModelRoutes: Array<{
+  body: (model: string) => unknown
+  path: string
+}> = [
+  {
+    path: "/v1/chat/completions",
+    body: (model: string) => ({
+      model,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  },
+  {
+    path: "/v1/responses",
+    body: (model: string) => ({ model, input: "hello" }),
+  },
+  {
+    path: "/v1/messages",
+    body: (model: string) => ({
+      model,
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+    }),
+  },
+]
+
+function postUnknownModelRoute(
+  path: string,
+  body: unknown,
+  affinityKey?: string,
+): Promise<Response> {
+  return seedProtocolDatabase().then(() =>
+    server.request(path, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${state.apiKeyAuth ?? PROTOCOL_GATEWAY_KEY}`,
+        "content-type": "application/json",
+        ...(affinityKey ? { "x-client-session-id": affinityKey } : {}),
+      },
+      body: JSON.stringify(body),
+    }),
+  )
+}
+
+test.each(unknownModelRoutes)(
+  "$path reports an unknown model on an assigned conversation as not found",
+  async ({ body, path }) => {
+    const endpoints = ["/chat/completions", "/responses", "/v1/messages"]
+    const affinityKey = installConflictingCatalogs({
+      first: endpoints,
+      modelId: "assigned-conversation-model",
+      second: endpoints,
+    })
+    const admitted = await postUnknownModelRoute(
+      path,
+      body("assigned-conversation-model"),
+      affinityKey,
+    )
+    expect(admitted.status).toBe(200)
+    upstreamRequests.length = 0
+
+    const response = await postUnknownModelRoute(
+      path,
+      body("assigned-conversation-missing-model"),
+      affinityKey,
+    )
+
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({
+      error: { code: "model_not_found", param: "model" },
+    })
+    expect(upstreamRequests).toEqual([])
+  },
+)
+
+test.each(unknownModelRoutes)(
+  "$path reports an unknown model as retryable while account models are still loading",
+  async ({ body, path }) => {
+    const endpoints = ["/chat/completions", "/responses", "/v1/messages"]
+    installConflictingCatalogs({
+      first: endpoints,
+      modelId: "loading-catalog-model",
+      second: endpoints,
+    })
+    const pending = spyOn(
+      getAccountsService(),
+      "isModelDiscoveryPending",
+    ).mockReturnValue(true)
+
+    try {
+      const response = await postUnknownModelRoute(
+        path,
+        body("loading-catalog-missing-model"),
+      )
+
+      expect(response.status).toBe(503)
+      expect(response.headers.get("retry-after")).toBe("1")
+      expect(await response.json()).toMatchObject({
+        error: { code: "model_catalog_unavailable" },
+      })
+      expect(upstreamRequests).toEqual([])
+    } finally {
+      pending.mockRestore()
+    }
+  },
+)

@@ -29,9 +29,16 @@ import {
   selectPersistentCandidateAccount,
   selectModelAccount,
 } from "~/lib/account-routing-selection"
-import { getAccountsService } from "~/lib/accounts-service"
+import {
+  getAccountsService,
+  isAccountModelDiscoveryPending,
+} from "~/lib/accounts-service"
 import { sessionTokenMatchesAccount } from "~/lib/copilot-session-token"
-import { LocalHTTPError } from "~/lib/error"
+import {
+  createModelCatalogUnavailableError,
+  createModelNotFoundError,
+  LocalHTTPError,
+} from "~/lib/error"
 import { recordModelFallbackResponse } from "~/lib/model-fallback"
 import {
   getClientSessionId,
@@ -116,6 +123,50 @@ export interface RoutedModelSelection {
 export interface RoutedModelSelectionOptions {
   copilotSessionToken?: string
   createAssignment?: boolean
+}
+
+export interface CatalogModelSelectionOptions
+  extends RoutedModelSelectionOptions {
+  /** Builds the dialect-specific 404 for a model the full catalog lacks. */
+  notFound?: () => LocalHTTPError
+}
+
+/**
+ * Reject a model that neither the published catalog nor any pooled account
+ * lists. While account model discovery is incomplete, or before any account
+ * has listed models, a missing model may still appear, so report a retryable
+ * 503 instead of a false 404.
+ */
+export function assertCatalogModel(
+  modelId: string,
+  notFound: () => LocalHTTPError = createModelNotFoundError,
+): void {
+  const models = state.models
+  if (
+    !models
+    || models.data.some((model) => model.id === modelId)
+    || tokenPool.getEligibleAccountsForModel(modelId).length > 0
+  )
+    return
+  if (models.data.length === 0 || isAccountModelDiscoveryPending())
+    throw createModelCatalogUnavailableError()
+  throw notFound()
+}
+
+/**
+ * Check the catalog before account selection so conversation assignment and
+ * distribution errors cannot mask an unknown model, and again afterward
+ * because selection can refresh the account registry.
+ */
+export async function selectCatalogRoutedModel(
+  modelId: string,
+  options: CatalogModelSelectionOptions = {},
+): Promise<RoutedModelSelection> {
+  const { notFound, ...selectionOptions } = options
+  assertCatalogModel(modelId, notFound)
+  const selection = await selectRoutedModel(modelId, selectionOptions)
+  if (!selection.model) assertCatalogModel(modelId, notFound)
+  return selection
 }
 
 /**

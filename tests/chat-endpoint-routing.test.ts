@@ -948,6 +948,19 @@ test("rejects an unknown model before upstream dispatch", async () => {
   })
 })
 
+test("treats an empty model catalog as unavailable instead of not found", async () => {
+  state.models = { object: "list", data: [] }
+
+  const response = await postChatRoute({})
+
+  expect(response.status).toBe(503)
+  expect(response.headers.get("retry-after")).toBe("1")
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(await response.json()).toMatchObject({
+    error: { code: "model_catalog_unavailable", param: "model" },
+  })
+})
+
 test("rejects explicit empty endpoint metadata before upstream dispatch", async () => {
   installModel({ id: "route-model", supported_endpoints: [] })
 

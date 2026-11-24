@@ -10,7 +10,7 @@ import type { Model } from "~/services/copilot/get-models"
 import {
   getLastUsedAccountId,
   runWithRoutedModelSelection,
-  selectRoutedModel,
+  selectCatalogRoutedModel,
 } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { getConfig } from "~/lib/config"
@@ -37,7 +37,6 @@ import {
   assertEndpointTranslationSupported,
   createEndpointTranslationError,
   createInvalidJsonBodyError,
-  createModelNotFoundError,
   isAbortError,
   isHTTPError,
   inspectHttpError,
@@ -1079,11 +1078,10 @@ const handleResponsesInner = async (
   expandCompactionItems(payload)
   expandCompactionItems(legacyPayload)
 
-  const routedModel = await selectRoutedModel(payload.model, {
+  const routedModel = await selectCatalogRoutedModel(payload.model, {
     copilotSessionToken,
   })
   const selectedModel = routedModel.model
-  if (state.models && !selectedModel) throw createModelNotFoundError()
   const nativeFinalized = finalizeNativeResponsesRequest(
     {
       source: payload,
