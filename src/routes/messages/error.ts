@@ -11,6 +11,7 @@ import {
   inspectHttpError,
   isAbortError,
   isHTTPError,
+  LocalHTTPError,
   reportHttpError,
   snapshotHttpErrorMetadata,
 } from "~/lib/error"
@@ -21,6 +22,27 @@ import type { AnthropicErrorEvent } from "./anthropic-types"
 import { createUpstreamPromptTooLongError } from "./prompt-too-long"
 
 type AnthropicErrorBody = AnthropicErrorEvent & { request_id?: string }
+
+/** Messages-dialect 503 while account model discovery is still running. */
+export function createMessagesModelCatalogUnavailableError(): LocalHTTPError {
+  const clientBody = {
+    type: "error",
+    error: {
+      type: "api_error",
+      code: "model_catalog_unavailable",
+      message: "The model catalog is still loading. Retry the request.",
+      param: "model",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, {
+      status: 503,
+      headers: { "Retry-After": "1" },
+    }),
+    clientBody,
+  )
+}
 
 function exactKeys(
   value: Readonly<Record<string, unknown>>,

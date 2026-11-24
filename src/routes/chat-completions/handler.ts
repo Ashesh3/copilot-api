@@ -14,7 +14,7 @@ import type { Model } from "~/services/copilot/get-models"
 import {
   getLastUsedAccountId,
   runWithRoutedModelSelection,
-  selectRoutedModel,
+  selectCatalogRoutedModel,
 } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
@@ -336,7 +336,7 @@ async function handleCompletionInner(
     reasoningEffort,
   })
 
-  const routedModel = await selectRoutedModel(routableSource.model, {
+  const routedModel = await selectCatalogRoutedModel(routableSource.model, {
     copilotSessionToken,
   })
   const selectedModel = routedModel.model

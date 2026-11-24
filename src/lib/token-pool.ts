@@ -485,6 +485,11 @@ export class TokenPool {
     return false
   }
 
+  /** A reinitializing account may publish models the current catalog lacks. */
+  isModelDiscoveryPending(): boolean {
+    return this.accountReinitializations.size > 0
+  }
+
   hasEnabledAccountForKnownModel(modelId: string): boolean | undefined {
     const eligible = this.modelIndex.get(modelId)
     if (eligible && eligible.length > 0) return true

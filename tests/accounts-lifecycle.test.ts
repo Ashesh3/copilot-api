@@ -26,9 +26,11 @@ import type { Storage } from "~/lib/storage/types"
 let storage: Storage
 let service: InstanceType<typeof AccountsService>
 let failValidation = false
-const validator: AccountValidator = (input) => {
-  if (failValidation) return Promise.reject(new Error("Upstream unavailable"))
-  return Promise.resolve({
+let validationGate: Promise<void> | undefined
+const validator: AccountValidator = async (input) => {
+  if (validationGate) await validationGate
+  if (failValidation) throw new Error("Upstream unavailable")
+  return {
     persisted: {
       token: input.token,
       instanceDomain: input.instanceDomain ?? "github.com",
@@ -44,7 +46,7 @@ const validator: AccountValidator = (input) => {
       accountSubject: `analytics:${input.token}`,
       models: { object: "list", data: [{ id: "model" }] as never },
     },
-  })
+  }
 }
 const context = (kind: string) =>
   createAccountMutationContext(storage, kind, { kind }, "admin:test")
@@ -65,6 +67,7 @@ beforeEach(async () => {
   })
   service = new AccountsService(storage, { validate: validator })
   failValidation = false
+  validationGate = undefined
 })
 afterEach(async () => {
   await service.whenIdle()
@@ -396,4 +399,47 @@ test("OAuth validation uses immutable GitHub user ID separately from Copilot ana
   } finally {
     globalThis.fetch = originalFetch
   }
+})
+
+test("reports model discovery as pending until reloaded accounts finish validation", async () => {
+  await add("a")
+  await service.whenIdle()
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  service = new AccountsService(storage, {
+    validate: async (input) => {
+      await gate
+      return validator(input)
+    },
+  })
+  expect(service.isModelDiscoveryPending()).toBe(false)
+
+  await service.refreshRuntime()
+
+  expect(service.isModelDiscoveryPending()).toBe(true)
+  release?.()
+  await service.whenIdle()
+  expect(service.isModelDiscoveryPending()).toBe(false)
+})
+
+test("reports model discovery as pending while an explicit model refresh runs", async () => {
+  const account = await add("a")
+  await service.whenIdle()
+  expect(service.isModelDiscoveryPending()).toBe(false)
+  let release: (() => void) | undefined
+  validationGate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+
+  const refreshed = service.refreshModels(
+    account.id,
+    await context("account.refresh-models"),
+  )
+
+  expect(service.isModelDiscoveryPending()).toBe(true)
+  release?.()
+  await refreshed
+  expect(service.isModelDiscoveryPending()).toBe(false)
 })

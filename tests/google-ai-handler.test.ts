@@ -1804,6 +1804,28 @@ test("estimates countTokens for an unknown model without inference dispatch", as
   expect(fetchMock).not.toHaveBeenCalled()
 })
 
+test("rejects generation for an unknown model as not found without dispatch", async () => {
+  const knownModel = structuredClone(responsesCapableModels.data[0])
+  knownModel.id = "known-google-model"
+  state.models = { object: "list", data: [knownModel] }
+  const response = await protocolRequest(
+    "/v1/models/missing-google-model:generateContent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }],
+      }),
+    },
+  )
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({
+    error: { code: "model_not_found", param: "model" },
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
 test.each(["/v1beta/models", "/v1/models", "/models"])(
   "returns a fixed invalid JSON error on %s",
   async (prefix) => {

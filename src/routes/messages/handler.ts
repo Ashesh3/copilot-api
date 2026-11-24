@@ -15,7 +15,7 @@ import type { RetryBudget } from "~/services/copilot/transport-retry"
 import {
   getLastUsedAccountId,
   runWithRoutedModelSelection,
-  selectRoutedModel,
+  selectCatalogRoutedModel,
 } from "~/lib/account-router"
 import { awaitApproval } from "~/lib/approval"
 import { applyReplacementsToPayload } from "~/lib/auto-replace"
@@ -139,6 +139,7 @@ import {
   type AnthropicStreamState,
   isAnthropicTextBlock,
 } from "./anthropic-types"
+import { createMessagesModelCatalogUnavailableError } from "./error"
 import {
   prepareMessagesChatCandidate,
   prepareMessagesCandidates,
@@ -501,11 +502,12 @@ async function handleCompletionInner(
       inboundSessionToken
     : undefined
 
-  const routedModel = await selectRoutedModel(anthropicPayload.model, {
+  const routedModel = await selectCatalogRoutedModel(anthropicPayload.model, {
     copilotSessionToken,
+    notFound: createMessagesModelNotFoundError,
+    unavailable: createMessagesModelCatalogUnavailableError,
   })
   const selectedModel = routedModel.model
-  if (state.models && !selectedModel) throw createMessagesModelNotFoundError()
   const routingModel =
     selectedModel
     ?? ({

@@ -190,6 +190,42 @@ export function createInvalidRequestError(
   )
 }
 
+export function createModelNotFoundError(): LocalHTTPError {
+  const clientBody = {
+    error: {
+      code: "model_not_found",
+      message: "The requested model was not found.",
+      param: "model",
+      type: "invalid_request_error",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 404 }),
+    clientBody,
+  )
+}
+
+/** Account model discovery is incomplete, so a missing model may still appear. */
+export function createModelCatalogUnavailableError(): LocalHTTPError {
+  const clientBody = {
+    error: {
+      code: "model_catalog_unavailable",
+      message: "The model catalog is still loading. Retry the request.",
+      param: "model",
+      type: "server_error",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, {
+      status: 503,
+      headers: { "Retry-After": "1" },
+    }),
+    clientBody,
+  )
+}
+
 export function createEndpointTranslationError(
   failure: EndpointRouteFailure,
 ): LocalHTTPError {
@@ -509,6 +545,7 @@ const SAFE_LOCAL_ERROR_CODES = new Set([
   "invalid_request",
   "invalid_type",
   "invalid_value",
+  "model_catalog_unavailable",
   "model_not_found",
   "request_too_large",
   "responses_payload_too_large",

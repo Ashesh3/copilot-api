@@ -479,7 +479,10 @@ test("a judge redirect back to the review alias fails without inference", async 
     },
   ])
   const response = await post("/responses", codexReview())
-  expect(response.status).toBe(503)
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({
+    error: { code: "model_not_found" },
+  })
   expect(requests).toHaveLength(0)
 })
 
@@ -515,7 +518,10 @@ test.each(["tools", "assistant", "policy", "transcript"])(
     if (part === "transcript")
       payload.messages = [{ role: "user", content: "Evaluate this command." }]
     const response = await post("/v1/messages", payload)
-    expect(response.status).toBe(503)
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({
+      error: { code: "model_not_found" },
+    })
     expect(requests).toHaveLength(0)
   },
 )
@@ -538,7 +544,10 @@ test("an unsafe redirect configuration cannot enable the built-in reviewer route
     },
   ])
   const response = await post("/responses", codexReview())
-  expect(response.status).toBe(503)
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({
+    error: { code: "model_not_found" },
+  })
   expect(requests).toHaveLength(0)
 })
 
@@ -550,7 +559,10 @@ test("ordinary requests and quoted classifier prompts do not acquire a reviewer 
     { role: "user", content: policy + "\n<transcript>example</transcript>" },
   ]
   const response = await post("/v1/messages", payload)
-  expect(response.status).toBe(503)
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({
+    error: { code: "model_not_found" },
+  })
   expect(requests).toHaveLength(0)
 })
 
@@ -587,7 +599,10 @@ test("classifier text inside CLAUDE.md is not a review transcript", async () => 
     },
   ]
   const response = await post("/v1/messages", payload)
-  expect(response.status).toBe(503)
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({
+    error: { code: "model_not_found" },
+  })
   expect(requests).toHaveLength(0)
 })
 

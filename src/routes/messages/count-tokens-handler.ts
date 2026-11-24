@@ -2,6 +2,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import { assertCatalogModel } from "~/lib/account-router"
 import {
   recordCopilotMessagesBeta,
   recordCopilotRequestNormalization,
@@ -39,6 +40,7 @@ import {
 } from "~/services/copilot/messages-contract"
 
 import { type AnthropicMessagesPayload } from "./anthropic-types"
+import { createMessagesModelCatalogUnavailableError } from "./error"
 import { translateToOpenAI } from "./non-stream-translation"
 
 /**
@@ -114,11 +116,10 @@ export async function handleCountTokens(c: Context) {
     })
   }
 
-  const selectedModel = state.models?.data.find(
-    (model) => model.id === targetModel,
-  )
-  if (state.models && !selectedModel)
-    throw createCountTokensModelNotFoundError()
+  assertCatalogModel(targetModel, {
+    notFound: createCountTokensModelNotFoundError,
+    unavailable: createMessagesModelCatalogUnavailableError,
+  })
 
   const result = await countAnthropicTokens(anthropicPayload.body, {
     ...nativeHeaders,

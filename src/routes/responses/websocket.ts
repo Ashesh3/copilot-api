@@ -11,7 +11,7 @@ import type { Model } from "~/services/copilot/get-models"
 import { withAccountLeaseScope } from "~/lib/account-lease-context"
 import {
   runWithRoutedModelSelection,
-  selectRoutedModel,
+  selectCatalogRoutedModel,
 } from "~/lib/account-router"
 import {
   recordCopilotEndpointRoute,
@@ -786,7 +786,7 @@ async function handleResponseCreate(
     return
   }
 
-  const routedModel = await selectRoutedModel(payload.model, {
+  const routedModel = await selectCatalogRoutedModel(payload.model, {
     createAssignment: !isSyntheticWarmupRequest(payload),
   })
   const selectedModel = routedModel.model
@@ -2398,9 +2398,14 @@ function normalizeLocalWebSocketErrorCode(
   code: string | undefined,
   status: number,
 ): string {
+  // Clients act on these local codes, so keep them instead of the generic 4xx code.
+  if (code !== undefined && PRESERVED_LOCAL_WEBSOCKET_ERROR_CODES.has(code))
+    return code
   if (status >= 400 && status < 500) return "bad_request"
   return code ?? mapHttpStatusToWebSocketErrorCode(status)
 }
+
+const PRESERVED_LOCAL_WEBSOCKET_ERROR_CODES = new Set(["model_not_found"])
 
 function mapHttpStatusToWebSocketErrorCode(status: number): string {
   switch (status) {

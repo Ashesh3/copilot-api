@@ -3627,6 +3627,32 @@ describe("responses websocket message handling", () => {
     expect(headers.get("x-model-provider-preference")).toBeNull()
   })
 
+  test("keeps model_not_found on a WebSocket error frame for an unknown model", async () => {
+    state.accountType = "individual"
+    state.copilotToken = "copilot-token"
+    state.models = responsesCapableModels
+    const ws = createTestWebSocket()
+
+    await seedProtocolDatabase().then(() =>
+      responsesWebSocket.message(
+        ws,
+        JSON.stringify({
+          type: "response.create",
+          model: "missing-websocket-model",
+          input: "Hello",
+        }),
+      ),
+    )
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(ws.data.closed).toBe(false)
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      type: "error",
+      status: 404,
+      error: { code: "model_not_found", param: "model" },
+    })
+  })
+
   test("returns a recoverable error when a WebSocket model has no endpoint", async () => {
     state.accountType = "individual"
     state.copilotToken = "copilot-token"
