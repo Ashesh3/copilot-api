@@ -285,78 +285,60 @@ describe("Gemini anyOf sibling constraints", () => {
     expect(payload).toEqual(normalized)
   })
 
-  test("intersects types and merges shared properties into each branch", () => {
-    const schema: Record<string, unknown> = {
-      type: ["object", "null"],
-      description: "A filter.",
-      properties: {
-        kind: { type: "string" },
-        limit: { type: "integer" },
-      },
-      required: ["kind", "limit", "missing"],
+  test("intersects branch types, treating integers as numbers", () => {
+    const limit: Record<string, unknown> = {
+      type: ["number", "null"],
+      description: "A limit.",
       anyOf: [
-        {
-          type: "object",
-          properties: { kind: { type: "string", enum: ["text"] } },
-          required: ["kind"],
-        },
-        { type: ["null", "object"] },
+        { type: ["integer", "null"], minimum: 1 },
+        { type: "number", maximum: 10 },
+        { description: "Any limit." },
       ],
+    }
+    const count: Record<string, unknown> = {
+      type: "integer",
+      anyOf: [{ type: "number", minimum: 0 }],
     }
 
     normalizeGeminiToolSchemas(
-      payloadFor({ type: "object", properties: { filter: schema } }),
+      payloadFor({ type: "object", properties: { limit, count } }),
     )
 
-    expect(schema).toEqual({
-      description: "A filter.",
+    expect(limit).toEqual({
+      description: "A limit.",
       anyOf: [
-        {
-          type: "object",
-          properties: {
-            kind: { type: "string", enum: ["text"] },
-            limit: { type: "integer" },
-          },
-          required: ["kind", "limit"],
-        },
-        {
-          type: ["null", "object"],
-          properties: {
-            kind: { type: "string" },
-            limit: { type: "integer" },
-          },
-          required: ["kind", "limit"],
-        },
+        { type: ["integer", "null"], minimum: 1 },
+        { type: "number", maximum: 10 },
+        { type: ["number", "null"], description: "Any limit." },
       ],
     })
+    expect(count).toEqual({ anyOf: [{ type: "integer", minimum: 0 }] })
   })
 
-  test("repairs nested properties before copying them into branches", () => {
-    const schema: Record<string, unknown> = {
-      type: "object",
-      properties: {
-        levels: { type: "array", enum: [1, 2], items: { type: "integer" } },
-      },
-      anyOf: [{ properties: { mode: { type: "string" } } }],
+  test("repairs items that the array enum repair replaced", () => {
+    const levels: Record<string, unknown> = {
+      type: "array",
+      enum: [1, 2],
+      items: { type: "integer", anyOf: [{ minimum: 0 }, { maximum: -5 }] },
     }
+    const payload = payloadFor({ type: "object", properties: { levels } })
 
-    normalizeGeminiToolSchemas(
-      payloadFor({ type: "object", properties: { filter: schema } }),
-    )
+    normalizeGeminiToolSchemas(payload)
 
-    expect(schema).toEqual({
-      anyOf: [
-        {
-          type: "object",
-          properties: {
-            levels: { type: "array", items: { type: "integer", enum: [1, 2] } },
-            mode: { type: "string" },
-          },
-        },
-      ],
+    expect(levels).toEqual({
+      type: "array",
+      items: {
+        enum: [1, 2],
+        anyOf: [
+          { type: "integer", minimum: 0 },
+          { type: "integer", maximum: -5 },
+        ],
+      },
     })
   })
+})
 
+describe("Gemini anyOf unions left unchanged", () => {
   test.each([
     {
       name: "annotation-only siblings",
@@ -380,8 +362,36 @@ describe("Gemini anyOf sibling constraints", () => {
       schema: { required: "name", anyOf: [{ type: "object" }] },
     },
     {
+      name: "parent properties beside anyOf",
+      schema: {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+        anyOf: [{ properties: { name: { const: "People" } } }],
+      },
+    },
+    {
+      name: "a required name that one branch does not declare",
+      schema: {
+        type: "object",
+        required: ["id"],
+        anyOf: [
+          { properties: { id: { type: "string" } } },
+          { properties: { name: { type: "string" } } },
+        ],
+      },
+    },
+    {
+      name: "a branch with its own union",
+      schema: { type: "object", anyOf: [{ anyOf: [{ type: "object" }] }] },
+    },
+    {
       name: "malformed branch properties",
-      schema: { type: "object", anyOf: [{ properties: [] }] },
+      schema: {
+        type: "object",
+        required: ["name"],
+        anyOf: [{ properties: [] }],
+      },
     },
     {
       name: "an empty anyOf",

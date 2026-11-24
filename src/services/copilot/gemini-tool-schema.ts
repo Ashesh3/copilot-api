@@ -23,7 +23,8 @@ const SCHEMA_FIELDS = new Set([
   "extends",
 ])
 const REFERENCE_FIELDS = ["$ref", "$dynamicRef", "$recursiveRef"] as const
-const ANY_OF_SIBLING_CONSTRAINTS = ["type", "properties", "required"] as const
+const ANY_OF_MOVABLE_CONSTRAINTS = ["type", "required"] as const
+const UNION_FIELDS = ["anyOf", "oneOf", "allOf"] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -98,90 +99,97 @@ function repairArrayItemEnum(schema: Record<string, unknown>): void {
 }
 
 interface AnyOfParentConstraints {
-  hasType: boolean
-  type: unknown
-  properties?: Record<string, unknown>
+  types?: Array<string>
   required?: Array<string>
 }
 
 interface AnyOfBranchUpdate {
   branch: Record<string, unknown>
-  type?: unknown
-  properties?: Record<string, unknown>
+  type?: string | Array<string>
   required?: Array<string>
 }
 
-function intersectTypes(parentType: unknown, branchType: unknown): unknown {
-  if (branchType === undefined) return structuredClone(parentType)
-  const parentMembers = typeMembers(parentType)
-  const branchMembers = typeMembers(branchType)
-  if (!parentMembers || !branchMembers) return undefined
-  const shared = branchMembers.filter((member) =>
-    parentMembers.includes(member),
+function intersectTypeMember(
+  member: string,
+  parentMembers: Array<string>,
+): string | null {
+  if (parentMembers.includes(member)) return member
+  // Every JSON Schema integer is also a number, in either operand order.
+  if (
+    (member === "integer" && parentMembers.includes("number"))
+    || (member === "number" && parentMembers.includes("integer"))
   )
-  if (shared.length === 0) return undefined
+    return "integer"
+  return null
+}
+
+function intersectTypes(
+  parentMembers: Array<string>,
+  branchType: unknown,
+): string | Array<string> | null {
+  const branchMembers =
+    branchType === undefined ? parentMembers : typeMembers(branchType)
+  if (!branchMembers) return null
+  const shared = [
+    ...new Set(
+      branchMembers
+        .map((member) => intersectTypeMember(member, parentMembers))
+        .filter((member) => member !== null),
+    ),
+  ]
+  if (shared.length === 0) return null
   return shared.length === 1 ? shared[0] : shared
 }
 
-function anyOfParentConstraints(
+function movableParentConstraints(
   schema: Record<string, unknown>,
 ): AnyOfParentConstraints | null {
-  if (!ANY_OF_SIBLING_CONSTRAINTS.some((field) => Object.hasOwn(schema, field)))
+  if (!ANY_OF_MOVABLE_CONSTRAINTS.some((field) => Object.hasOwn(schema, field)))
     return null
-  const hasType = Object.hasOwn(schema, "type")
-  const { type, properties, required } = schema
-  if (
-    (hasType && !typeMembers(type))
-    || (properties !== undefined && !isRecord(properties))
-    || (required !== undefined && !isStringArray(required))
-  )
-    return null
-  return {
-    hasType,
-    type,
-    properties: properties,
-    required: required,
+  // Moving parent properties would have to intersect or rescope them, so leave
+  // those unions unchanged rather than weakening the tool schema.
+  if (Object.hasOwn(schema, "properties")) return null
+  const constraints: AnyOfParentConstraints = {}
+  if (Object.hasOwn(schema, "type")) {
+    const types = typeMembers(schema.type)
+    if (!types) return null
+    constraints.types = types
   }
-}
-
-function isRepairableBranch(
-  branch: unknown,
-): branch is Record<string, unknown> {
-  return (
-    isRecord(branch)
-    && !hasReference(branch)
-    && (branch.properties === undefined || isRecord(branch.properties))
-    && (branch.required === undefined || isStringArray(branch.required))
-  )
+  if (Object.hasOwn(schema, "required")) {
+    if (!isStringArray(schema.required)) return null
+    constraints.required = schema.required
+  }
+  return constraints
 }
 
 function planBranchUpdate(
-  branch: Record<string, unknown>,
+  branch: unknown,
   parent: AnyOfParentConstraints,
 ): AnyOfBranchUpdate | null {
+  if (
+    !isRecord(branch)
+    || hasReference(branch)
+    || UNION_FIELDS.some((field) => Object.hasOwn(branch, field))
+  )
+    return null
   const update: AnyOfBranchUpdate = { branch }
-  if (parent.hasType) {
-    update.type = intersectTypes(parent.type, branch.type)
+  if (parent.types) {
+    const type = intersectTypes(parent.types, branch.type)
     // A branch outside the parent type cannot match; leave the schema intact.
-    if (update.type === undefined) return null
-  }
-  const branchProperties =
-    isRecord(branch.properties) ? branch.properties : undefined
-  if (parent.properties) {
-    update.properties = {
-      ...structuredClone(parent.properties),
-      ...branchProperties,
-    }
+    if (type === null) return null
+    update.type = type
   }
   if (parent.required) {
-    const properties = update.properties ?? branchProperties ?? {}
-    const required = new Set(
-      isStringArray(branch.required) ? branch.required : [],
+    const { properties, required } = branch
+    // Keep every requirement: each branch must declare the names it inherits.
+    if (
+      !isRecord(properties)
+      || !parent.required.every((name) => Object.hasOwn(properties, name))
+      || (required !== undefined && !isStringArray(required))
     )
-    for (const name of parent.required) {
-      if (Object.hasOwn(properties, name)) required.add(name)
-    }
-    if (required.size > 0) update.required = [...required]
+      return null
+    const branchRequired = isStringArray(required) ? required : []
+    update.required = [...new Set([...branchRequired, ...parent.required])]
   }
   return update
 }
@@ -189,28 +197,25 @@ function planBranchUpdate(
 function repairAnyOfSiblingConstraints(schema: Record<string, unknown>): void {
   const branches = schema.anyOf
   if (!Array.isArray(branches) || branches.length === 0) return
-  const parent = anyOfParentConstraints(schema)
+  const parent = movableParentConstraints(schema)
   if (!parent) return
 
   const updates: Array<AnyOfBranchUpdate> = []
   for (const branch of branches) {
-    if (!isRepairableBranch(branch)) return
     const update = planBranchUpdate(branch, parent)
     if (!update) return
     updates.push(update)
   }
 
-  // Gemini rejects object constraints beside anyOf, which some MCP servers use
-  // for discriminated unions. Each branch must satisfy those constraints anyway,
-  // so carrying them into the branches keeps the tool instead of failing the
-  // whole request. Gemini also rejects required names absent from properties.
-  for (const { branch, type, properties, required } of updates) {
+  // Gemini rejects type or required beside anyOf, which some MCP servers use
+  // for discriminated unions. Every branch must satisfy them anyway, so moving
+  // them into the branches keeps the same schema instead of failing the whole
+  // request.
+  for (const { branch, type, required } of updates) {
     if (type !== undefined) branch.type = type
-    if (properties !== undefined) branch.properties = properties
     if (required !== undefined) branch.required = required
   }
   delete schema.type
-  delete schema.properties
   delete schema.required
 }
 
@@ -274,8 +279,8 @@ export function normalizeGeminiToolSchemas(
     // Preserve reference-bearing parameters so shared targets keep their constraints.
     if (schemas.some((schema) => hasReference(schema))) continue
     for (const schema of schemas) repairArrayItemEnum(schema)
-    // Children precede parents, so properties copied into branches are already repaired.
-    for (const schema of schemas.toReversed()) {
+    // The array repair can replace items objects, so walk the current tree again.
+    for (const schema of collectSchemas(tool.function.parameters)) {
       repairAnyOfSiblingConstraints(schema)
     }
   }
