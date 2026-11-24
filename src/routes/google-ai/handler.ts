@@ -37,6 +37,7 @@ import {
 } from "~/lib/endpoint-routing"
 import {
   createEndpointTranslationError,
+  createModelNotFoundError,
   inspectHttpError,
   isAbortError,
   isHTTPError,
@@ -549,6 +550,8 @@ async function handleGoogleAIInner(c: Context) {
       advertised.push(
         state.models?.data.find((candidate) => candidate.id === model),
       )
+    if (state.models && !advertised.some(Boolean))
+      throw createModelNotFoundError()
     if (
       !advertised.some((candidate) => {
         const endpoints = getModelEndpointSupport(candidate)
@@ -632,6 +635,7 @@ async function handleGoogleAIInner(c: Context) {
   // model is known, including when the earlier capability probe chose an account.
   routedModel = await selectRoutedModel(finalPayload.model)
   selectedModel = routedModel.model
+  if (state.models && !selectedModel) throw createModelNotFoundError()
   const support = getModelEndpointSupport(selectedModel)
   if (!support.chat && !support.responses && !support.messages)
     throw createEndpointTranslationError({

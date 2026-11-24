@@ -37,6 +37,7 @@ import {
 import {
   createEndpointTranslationError,
   createInvalidJsonBodyError,
+  createModelNotFoundError,
   inspectHttpError,
   isAbortError,
   isHTTPError,
@@ -340,6 +341,7 @@ async function handleCompletionInner(
     copilotSessionToken,
   })
   const selectedModel = routedModel.model
+  if (state.models && !selectedModel) throw createModelNotFoundError()
 
   const candidates = await prepareChatCandidates({
     nativeMessagesOptions: { ...nativeOptions },

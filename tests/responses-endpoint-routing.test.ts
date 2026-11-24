@@ -192,6 +192,21 @@ test.each([
   expect(lastUpstreamPath).toBe(expected)
 })
 
+test("rejects an unknown Responses model as not found before dispatch", async () => {
+  installModel({ supported_endpoints: ["/responses"] })
+
+  const response = await postResponses({
+    input: "hello",
+    model: "missing-model",
+  })
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({
+    error: { code: "model_not_found", param: "model" },
+  })
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
 test("decodes zstd-compressed Codex HTTP continuations before routing", async () => {
   installModel({ supported_endpoints: ["/responses"] })
 

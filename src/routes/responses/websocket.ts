@@ -28,6 +28,7 @@ import {
 } from "~/lib/custom-providers"
 import {
   createEndpointTranslationError,
+  createModelNotFoundError,
   isHTTPError,
   reportHttpErrorForTransport,
 } from "~/lib/error"
@@ -984,6 +985,7 @@ async function prepareEvaluatedResponsesWebSocketCandidate(options: {
   selectedModel: Model | undefined
   signal?: AbortSignal
 }): Promise<ResponsesEndpointCandidate> {
+  if (state.models && !options.selectedModel) throw createModelNotFoundError()
   const evaluationPayload = structuredClone(options.payload)
   if (options.evaluationOnly) delete evaluationPayload.generate
   // Forced before native finalization, which adds controls such as the JSON

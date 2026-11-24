@@ -190,6 +190,22 @@ export function createInvalidRequestError(
   )
 }
 
+export function createModelNotFoundError(): LocalHTTPError {
+  const clientBody = {
+    error: {
+      code: "model_not_found",
+      message: "The requested model was not found.",
+      param: "model",
+      type: "invalid_request_error",
+    },
+  }
+  return new LocalHTTPError(
+    clientBody.error.message,
+    Response.json(clientBody, { status: 404 }),
+    clientBody,
+  )
+}
+
 export function createEndpointTranslationError(
   failure: EndpointRouteFailure,
 ): LocalHTTPError {

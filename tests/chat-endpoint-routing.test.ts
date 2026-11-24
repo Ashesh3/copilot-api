@@ -937,12 +937,15 @@ test("rejects an unknown model before upstream dispatch", async () => {
 
   const response = await postChatRoute({})
 
-  expect(response.status).toBe(400)
+  expect(response.status).toBe(404)
   expect(fetchMock).not.toHaveBeenCalled()
-  expect(await response.json()).toHaveProperty(
-    "error.code",
-    "endpoint_translation_unsupported",
-  )
+  expect(await response.json()).toMatchObject({
+    error: {
+      code: "model_not_found",
+      param: "model",
+      type: "invalid_request_error",
+    },
+  })
 })
 
 test("rejects explicit empty endpoint metadata before upstream dispatch", async () => {

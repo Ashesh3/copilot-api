@@ -37,6 +37,7 @@ import {
   assertEndpointTranslationSupported,
   createEndpointTranslationError,
   createInvalidJsonBodyError,
+  createModelNotFoundError,
   isAbortError,
   isHTTPError,
   inspectHttpError,
@@ -1082,6 +1083,7 @@ const handleResponsesInner = async (
     copilotSessionToken,
   })
   const selectedModel = routedModel.model
+  if (state.models && !selectedModel) throw createModelNotFoundError()
   const nativeFinalized = finalizeNativeResponsesRequest(
     {
       source: payload,
