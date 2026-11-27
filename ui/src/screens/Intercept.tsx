@@ -1,5 +1,5 @@
 /* eslint-disable max-lines, no-nested-ternary */
-import { Badge, type BadgeVariant } from "@astryxdesign/core/Badge"
+import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
 import { Card } from "@astryxdesign/core/Card"
@@ -63,9 +63,9 @@ function fmtBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-function statusBadgeVariant(
+function statusDotVariant(
   status: InterceptItemSummary["status"],
-): BadgeVariant {
+): "success" | "warning" | "error" | "neutral" {
   switch (status) {
     case "pending": {
       return "warning"
@@ -74,11 +74,9 @@ function statusBadgeVariant(
       return "success"
     }
     case "dropped":
-    case "aborted": {
-      return "error"
-    }
+    case "aborted":
     case "timed_out": {
-      return "orange"
+      return "error"
     }
     default: {
       return "neutral"
@@ -458,24 +456,27 @@ export default function InterceptScreen() {
       onRefresh={() => void refreshSnapshot()}
       actions={
         draftConfig ?
-          <HStack gap={2} vAlign="center" wrap="wrap">
-            <div
-              className="intercept-master-toggle"
-              data-active={draftConfig.enabled}
-            >
-              <StatusDot
-                variant={draftConfig.enabled ? "success" : "neutral"}
-                label={
-                  draftConfig.enabled ? "Intercept active" : "Intercept off"
-                }
-              />
-              <Switch
-                label={draftConfig.enabled ? "Intercept ON" : "Intercept OFF"}
-                value={draftConfig.enabled}
-                onChange={handleToggleEnabled}
-              />
-            </div>
+          <div
+            className="intercept-master-toggle"
+            data-active={draftConfig.enabled}
+          >
+            <Switch
+              label={draftConfig.enabled ? "Intercept ON" : "Intercept OFF"}
+              value={draftConfig.enabled}
+              onChange={handleToggleEnabled}
+            />
+          </div>
+        : null
+      }
+    >
+      {error ?
+        <Banner status="error" title="Intercept error" description={error} />
+      : null}
 
+      {/* Controls, stats & bulk actions toolbar */}
+      {snapshot && draftConfig ?
+        <div className="intercept-toolbar">
+          <HStack gap={3} vAlign="center" wrap="wrap">
             <SegmentedControl
               label="Capture direction"
               value={draftConfig.direction}
@@ -502,7 +503,7 @@ export default function InterceptScreen() {
 
             <Button
               label={
-                draftConfig.assistant.enabled ? "AI Assist: ON" : "AI Assist"
+                draftConfig.assistant.enabled ? "AI Assist (ON)" : "AI Assist"
               }
               size="sm"
               variant={drawerTab === "assistant" ? "primary" : "secondary"}
@@ -513,70 +514,32 @@ export default function InterceptScreen() {
                 )
               }
             />
+
+            <div className="intercept-stats">
+              <span className="intercept-stat">
+                <strong>{snapshot.stats.pendingCount}</strong> queued
+              </span>
+              <span className="intercept-stat-sep">·</span>
+              <span className="intercept-stat">
+                <strong>{snapshot.stats.forwardedCount}</strong> forwarded
+              </span>
+              <span className="intercept-stat-sep">·</span>
+              <span className="intercept-stat">
+                <strong>{snapshot.stats.modifiedCount}</strong> modified
+              </span>
+              <span className="intercept-stat-sep">·</span>
+              <span className="intercept-stat">
+                <strong>{snapshot.stats.droppedCount}</strong> dropped
+              </span>
+            </div>
           </HStack>
-        : null
-      }
-    >
-      {error ?
-        <Banner status="error" title="Intercept error" description={error} />
-      : null}
 
-      {/* Expandable configuration drawers for Filters or AI Assist */}
-      {drawerTab === "filters" && draftConfig ?
-        <InterceptFiltersPanel
-          filters={draftConfig.filters}
-          isSaving={isSavingConfig}
-          onChange={(filters) => setDraftConfig({ ...draftConfig, filters })}
-          onSave={() =>
-            void persistConfig(draftConfig, "Interception filters saved")
-          }
-        />
-      : null}
-
-      {drawerTab === "assistant" && draftConfig ?
-        <InterceptAssistantPanel
-          assistant={draftConfig.assistant}
-          availableModels={availableModels}
-          isSaving={isSavingConfig}
-          onChange={(assistant) =>
-            setDraftConfig({ ...draftConfig, assistant })
-          }
-          onSave={() =>
-            void persistConfig(draftConfig, "AI Assist settings saved")
-          }
-        />
-      : null}
-
-      {/* Stats & bulk actions toolbar */}
-      {snapshot && draftConfig ?
-        <div className="intercept-toolbar">
-          <HStack gap={3} vAlign="center" wrap="wrap">
+          <HStack gap={2} vAlign="center" wrap="wrap">
             <HStack gap={1.5} vAlign="center">
-              <Badge
-                variant={
-                  snapshot.stats.pendingCount > 0 ? "warning" : "neutral"
-                }
-                label={`${snapshot.stats.pendingCount} Queued`}
-              />
-              <Badge
-                variant="success"
-                label={`${snapshot.stats.forwardedCount} Forwarded`}
-              />
-              <Badge
-                variant="info"
-                label={`${snapshot.stats.modifiedCount} Modified`}
-              />
-              <Badge
-                variant="error"
-                label={`${snapshot.stats.droppedCount} Dropped`}
-              />
-            </HStack>
-
-            <HStack gap={2} vAlign="center">
               <Text type="supporting" color="secondary">
-                Hold timeout (s):
+                Timeout (s)
               </Text>
-              <div style={{ width: 88 }}>
+              <div style={{ width: 76 }}>
                 <TextInput
                   label="Timeout seconds"
                   isLabelHidden
@@ -592,9 +555,7 @@ export default function InterceptScreen() {
                 />
               </div>
             </HStack>
-          </HStack>
 
-          <HStack gap={2} vAlign="center" wrap="wrap">
             {snapshot.stats.pendingCount > 0 ?
               <>
                 <Button
@@ -632,6 +593,31 @@ export default function InterceptScreen() {
         </div>
       : null}
 
+      {/* Expandable configuration drawers for Filters or AI Assist */}
+      {drawerTab === "filters" && draftConfig ?
+        <InterceptFiltersPanel
+          filters={draftConfig.filters}
+          isSaving={isSavingConfig}
+          onChange={(filters) => setDraftConfig({ ...draftConfig, filters })}
+          onSave={() =>
+            void persistConfig(draftConfig, "Interception filters saved")
+          }
+        />
+      : null}
+
+      {drawerTab === "assistant" && draftConfig ?
+        <InterceptAssistantPanel
+          assistant={draftConfig.assistant}
+          availableModels={availableModels}
+          isSaving={isSavingConfig}
+          onChange={(assistant) =>
+            setDraftConfig({ ...draftConfig, assistant })
+          }
+          onSave={() =>
+            void persistConfig(draftConfig, "AI Assist settings saved")
+          }
+        />
+      : null}
       {/* Burp-style master-detail split workbench */}
       <div className="intercept-workbench">
         {/* Left Queue Sidebar */}
@@ -682,24 +668,25 @@ export default function InterceptScreen() {
                     onClick={() => handleSelectQueueItem(item.id)}
                   >
                     <HStack hAlign="between" vAlign="center" gap={1}>
-                      <HStack gap={1} vAlign="center">
+                      <HStack gap={1.5} vAlign="center">
                         <Badge
-                          variant={item.phase === "request" ? "blue" : "purple"}
+                          variant="neutral"
                           label={item.phase === "request" ? "REQ" : "RES"}
                         />
-                        {item.status !== "pending" ?
-                          <Badge
-                            variant={statusBadgeVariant(item.status)}
-                            label={item.status}
-                          />
-                        : null}
+                        <StatusDot
+                          variant={statusDotVariant(item.status)}
+                          label={item.status}
+                        />
+                        <Text type="supporting" color="secondary">
+                          {item.status}
+                        </Text>
                         {item.modified ?
-                          <Badge variant="orange" label="Edited" />
+                          <Badge variant="neutral" label="Edited" />
                         : null}
                         {item.assistantStatus === "ready" ?
-                          <Badge variant="purple" label="AI Diff" />
+                          <Badge variant="neutral" label="AI Diff" />
                         : item.assistantStatus === "running" ?
-                          <Badge variant="info" label="AI…" />
+                          <Badge variant="neutral" label="AI…" />
                         : null}
                       </HStack>
                       <Text type="supporting" color="secondary">
@@ -753,24 +740,27 @@ export default function InterceptScreen() {
                   <VStack gap={0.5}>
                     <HStack gap={2} vAlign="center" wrap="wrap">
                       <Badge
-                        variant={
-                          selectedDetail.phase === "request" ? "blue" : "purple"
-                        }
+                        variant="neutral"
                         label={
                           selectedDetail.phase === "request" ?
-                            "OUTGOING REQUEST"
-                          : `INCOMING RESPONSE${selectedDetail.responseStatus ? ` (${selectedDetail.responseStatus})` : ""}`
+                            "REQUEST"
+                          : `RESPONSE${selectedDetail.responseStatus ? ` ${selectedDetail.responseStatus}` : ""}`
                         }
-                      />
-                      <Badge
-                        variant={statusBadgeVariant(selectedDetail.status)}
-                        label={selectedDetail.status.toUpperCase()}
                       />
                       <Heading level={3}>
                         {selectedDetail.model ?? selectedDetail.path}
                       </Heading>
+                      <HStack gap={1} vAlign="center">
+                        <StatusDot
+                          variant={statusDotVariant(selectedDetail.status)}
+                          label={selectedDetail.status}
+                        />
+                        <Text type="supporting" color="secondary">
+                          {selectedDetail.status}
+                        </Text>
+                      </HStack>
                       {selectedDetail.stream ?
-                        <Badge variant="cyan" label="SSE Stream" />
+                        <Badge variant="neutral" label="SSE" />
                       : null}
                     </HStack>
                     <HStack gap={2} vAlign="center" wrap="wrap">

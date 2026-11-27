@@ -100,11 +100,11 @@ export function InterceptFiltersPanel({
             <HStack gap={2} vAlign="center">
               <Heading level={3}>Interception Filters</Heading>
               <Badge
-                variant={filters.enabled ? "info" : "neutral"}
+                variant="neutral"
                 label={
                   filters.enabled ?
                     `${filters.conditions.filter((c) => c.enabled).length} active`
-                  : "Intercepting all"
+                  : "All traffic"
                 }
               />
             </HStack>

@@ -45,7 +45,7 @@ export function InterceptAssistantPanel({
             <HStack gap={2} vAlign="center">
               <Heading level={3}>LLM-Assisted Interception</Heading>
               <Badge
-                variant={assistant.enabled ? "purple" : "neutral"}
+                variant="neutral"
                 label={assistant.enabled ? "Enabled" : "Off"}
               />
             </HStack>

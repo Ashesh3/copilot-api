@@ -1,5 +1,5 @@
 /* eslint-disable no-nested-ternary */
-import { Badge, type BadgeVariant } from "@astryxdesign/core/Badge"
+import { Badge } from "@astryxdesign/core/Badge"
 import { Button } from "@astryxdesign/core/Button"
 import { Card } from "@astryxdesign/core/Card"
 import { Selector } from "@astryxdesign/core/Selector"
@@ -32,33 +32,6 @@ const KIND_OPTIONS: Array<{ label: string; value: CanonicalItemKind }> = [
   { label: "Tool Call", value: "tool_call" },
   { label: "Tool Result", value: "tool_result" },
 ]
-
-function kindBadgeVariant(kind: CanonicalItemKind): BadgeVariant {
-  switch (kind) {
-    case "system":
-    case "developer": {
-      return "purple"
-    }
-    case "user": {
-      return "blue"
-    }
-    case "assistant": {
-      return "green"
-    }
-    case "tool_call": {
-      return "orange"
-    }
-    case "tool_result": {
-      return "cyan"
-    }
-    case "thinking": {
-      return "yellow"
-    }
-    default: {
-      return "neutral"
-    }
-  }
-}
 
 export function StructuredMessageEditor({
   items,
@@ -125,7 +98,7 @@ export function StructuredMessageEditor({
             <HStack hAlign="between" vAlign="center" wrap="wrap" gap={2}>
               <HStack gap={2} vAlign="center" wrap="wrap">
                 <Badge
-                  variant={kindBadgeVariant(item.kind)}
+                  variant="neutral"
                   label={item.kind.replace("_", " ").toUpperCase()}
                 />
                 <code className="intercept-item-id">{item.id}</code>

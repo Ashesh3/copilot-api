@@ -1,5 +1,5 @@
 /* eslint-disable no-nested-ternary */
-import { Badge, type BadgeVariant } from "@astryxdesign/core/Badge"
+import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
 import { CheckboxInput } from "@astryxdesign/core/CheckboxInput"
@@ -24,12 +24,6 @@ interface InterceptDiffViewerProps {
   onReject: () => void
 }
 
-function opBadgeVariant(op: AssistantDiffOp["op"]): BadgeVariant {
-  if (op === "replace") return "warning"
-  if (op === "delete") return "error"
-  return "success"
-}
-
 export function InterceptDiffViewer({
   suggestion,
   currentItems,
@@ -52,7 +46,7 @@ export function InterceptDiffViewer({
     <div className="intercept-diff-panel">
       <HStack hAlign="between" vAlign="center" wrap="wrap" gap={2}>
         <HStack gap={2} vAlign="center" wrap="wrap">
-          <Badge variant="purple" label="AI Suggestion" />
+          <Badge variant="neutral" label="AI Suggestion" />
           <Text weight="semibold">{suggestion.summary}</Text>
           <Text type="supporting" color="secondary">
             {suggestion.model} · {suggestion.durationMs}ms ·{" "}
@@ -117,10 +111,7 @@ export function InterceptDiffViewer({
                         }
                       />
                     : null}
-                    <Badge
-                      variant={opBadgeVariant(op.op)}
-                      label={op.op.toUpperCase()}
-                    />
+                    <Badge variant="neutral" label={op.op.toUpperCase()} />
                     {op.op === "insert_after" ?
                       <Text type="supporting">
                         Insert <strong>{op.kind}</strong>{" "}
