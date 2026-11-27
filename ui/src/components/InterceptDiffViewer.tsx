@@ -31,18 +31,40 @@ const OP_LABEL: Record<AssistantDiffOp["op"], string> = {
   insert_after: "Insert",
 }
 
+/** Executable identity of a tool item; changes here alter what the client runs. */
+interface ToolFacts {
+  toolName?: string
+  toolCallId?: string
+}
+
 function DiffSide({
   tone,
   label,
   text,
+  facts,
 }: {
   tone: "before" | "after"
   label: string
   text: string
+  facts?: ToolFacts
 }) {
   return (
     <div className={`intercept-diff-side is-${tone}`}>
       <div className="intercept-diff-label">{label}</div>
+      {facts?.toolName || facts?.toolCallId ?
+        <div className="intercept-diff-facts">
+          {facts.toolName ?
+            <span>
+              tool <code>{facts.toolName}</code>
+            </span>
+          : null}
+          {facts.toolCallId ?
+            <span>
+              call <code>{facts.toolCallId}</code>
+            </span>
+          : null}
+        </div>
+      : null}
       <pre>{text}</pre>
     </div>
   )
@@ -55,13 +77,22 @@ function OpDiff({
   op: AssistantDiffOp
   target: CanonicalItem | undefined
 }) {
+  // Tool calls are reviewed by their arguments, as the editor shows them.
+  let targetText = "(item not found)"
+  if (target) {
+    targetText =
+      target.kind === "tool_call" && !target.opaque ?
+        (target.toolArguments ?? target.content)
+      : target.content
+  }
   if (op.op === "delete") {
     return (
       <div className="intercept-diff is-single">
         <DiffSide
           tone="before"
           label="Removed"
-          text={target?.content ?? "(item not found)"}
+          text={targetText}
+          facts={target}
         />
       </div>
     )
@@ -73,21 +104,22 @@ function OpDiff({
           tone="after"
           label="Added"
           text={op.toolArguments ?? op.content}
+          facts={op}
         />
       </div>
     )
   }
   return (
     <div className="intercept-diff">
-      <DiffSide
-        tone="before"
-        label="Before"
-        text={target?.content ?? "(item not found)"}
-      />
+      <DiffSide tone="before" label="Before" text={targetText} facts={target} />
       <DiffSide
         tone="after"
         label="After"
-        text={op.toolArguments ?? op.content ?? target?.content ?? ""}
+        text={op.toolArguments ?? op.content ?? (target ? targetText : "")}
+        facts={{
+          toolName: op.toolName ?? target?.toolName,
+          toolCallId: target?.toolCallId,
+        }}
       />
     </div>
   )
@@ -205,6 +237,18 @@ export function InterceptDiffViewer({
                       {target ?
                         ` · ${KIND_LABEL[target.kind]}`
                       : " · not found"}
+                      {(
+                        op.op === "replace"
+                        && op.toolName !== undefined
+                        && op.toolName !== target?.toolName
+                      ) ?
+                        <>
+                          {" · renames "}
+                          <code>{target?.toolName ?? "(none)"}</code>
+                          {" → "}
+                          <code>{op.toolName}</code>
+                        </>
+                      : null}
                     </Text>
                   }
                   {op.reason ?

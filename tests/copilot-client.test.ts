@@ -12,6 +12,7 @@ import consola from "consola"
 
 import { runWithCopilotRequestAttribution } from "../src/lib/copilot-request-context"
 /* eslint-disable max-lines -- Copilot client integration cases share singleton fetch fixtures */
+import { interceptEngine } from "../src/lib/intercept/engine"
 import {
   clearLlmDebugLogs,
   getLlmDebugLog,
@@ -653,6 +654,51 @@ test("stops after a single retry for retryable upstream responses", async () => 
 
   expect(response.status).toBe(503)
   expect(capturedRequests).toHaveLength(2)
+})
+
+test("Intercept holds a request once and its retry resends the approved body", async () => {
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  const queued = Promise.withResolvers<string>()
+  const unsubscribe = interceptEngine.subscribe((event) => {
+    if (event.type === "queued") queued.resolve(event.item.id)
+  })
+  try {
+    queuedResults.push(
+      new Response("Retry me", {
+        status: 503,
+        headers: { "retry-after": "0" },
+      }),
+      new Response("{}", { status: 200 }),
+    )
+    const approved = JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "approved" }],
+    })
+
+    const pending = copilotFetch("/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer expired-copilot-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "original" }],
+      }),
+    })
+    interceptEngine.forwardItem(await queued.promise, { body: approved })
+    const response = await pending
+
+    expect(response.status).toBe(200)
+    expect(capturedRequests.map(({ init }) => init?.body)).toEqual([
+      approved,
+      approved,
+    ])
+    expect(interceptEngine.getSnapshot().recent).toHaveLength(1)
+  } finally {
+    unsubscribe()
+    interceptEngine.resetForTest()
+  }
 })
 
 test("includes a per-session X-Agent-Task-Id header", () => {

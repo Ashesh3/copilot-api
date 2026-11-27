@@ -76,6 +76,26 @@ function extractFieldValue(
   }
 }
 
+// Conditions are recreated whenever the config changes, so keying by object
+// compiles each pattern once per saved config.
+const compiledPatterns = new WeakMap<InterceptFilterCondition, RE2JS | null>()
+
+function compiledPattern(condition: InterceptFilterCondition): RE2JS | null {
+  const cached = compiledPatterns.get(condition)
+  if (cached !== undefined) return cached
+  let pattern: RE2JS | null
+  try {
+    pattern = RE2JS.compile(
+      condition.value,
+      condition.caseSensitive === true ? 0 : RE2JS.CASE_INSENSITIVE,
+    )
+  } catch {
+    pattern = null
+  }
+  compiledPatterns.set(condition, pattern)
+  return pattern
+}
+
 export function evaluateFilterCondition(
   condition: InterceptFilterCondition,
   ctx: InterceptMatchContext,
@@ -86,13 +106,7 @@ export function evaluateFilterCondition(
 
   if (condition.operator === "regex") {
     if (!expected) return true
-    try {
-      const flags = caseSensitive ? 0 : RE2JS.CASE_INSENSITIVE
-      const pattern = RE2JS.compile(expected, flags)
-      return pattern.matcher(actual).find()
-    } catch {
-      return false
-    }
+    return compiledPattern(condition)?.matcher(actual).find() ?? false
   }
 
   const lhs = caseSensitive ? actual : actual.toLowerCase()
@@ -141,6 +155,32 @@ export function shouldIntercept(
   if (!config.enabled) return false
   if (!directionMatchesPhase(config.direction, ctx.phase)) return false
   return matchesInterceptFilters(config.filters, ctx)
+}
+
+/**
+ * Decide from metadata alone whether a response could still be held, so that
+ * streams which cannot match are returned before any body is read.
+ * `true` means "possibly"; only body conditions remain undecided.
+ */
+export function responseMayMatch(
+  config: InterceptConfig,
+  ctx: InterceptMatchContext,
+): boolean {
+  if (!config.enabled || !directionMatchesPhase(config.direction, ctx.phase)) {
+    return false
+  }
+  const { filters } = config
+  if (!filters.enabled) return true
+  const active = filters.conditions.filter((condition) => condition.enabled)
+  if (active.length === 0) return true
+  const known = active.filter((condition) => condition.field !== "responseBody")
+  if (filters.matchMode === "any") {
+    return (
+      known.length < active.length
+      || known.some((condition) => evaluateFilterCondition(condition, ctx))
+    )
+  }
+  return known.every((condition) => evaluateFilterCondition(condition, ctx))
 }
 
 export function validateFilterRegex(pattern: string): string | null {

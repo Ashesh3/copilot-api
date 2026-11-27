@@ -1702,6 +1702,20 @@ body {
   font-size: var(--text-supporting-size);
 }
 
+.intercept-diff-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1) var(--spacing-3);
+  margin-bottom: var(--spacing-1);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+}
+
+.intercept-diff-facts code {
+  color: var(--color-text-primary);
+  font-family: var(--font-family-code);
+}
+
 .intercept-diff-side pre {
   margin: 0;
   font-family: var(--font-family-code);

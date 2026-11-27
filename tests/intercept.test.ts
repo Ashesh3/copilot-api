@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 
 import {
   buildAssistantPrompt,
+  type InterceptAssistantResult,
   isInterceptBypassed,
   parseAssistantDiffResponse,
   runBypassingIntercept,
@@ -20,7 +21,6 @@ import {
 } from "~/lib/intercept/filters"
 import {
   type AssistantDiffOp,
-  type AssistantSuggestion,
   DEFAULT_INTERCEPT_CONFIG,
   type InterceptAssistantConfig,
   type InterceptFilterCondition,
@@ -393,7 +393,6 @@ describe("InterceptEngine Queue Lifecycle", () => {
     expect(engine.forwardItem(id, { body: editedBody })).toBe(true)
 
     const outcome = await promise
-    expect(outcome.action).toBe("forward")
     expect(outcome.modified).toBe(true)
     expect(outcome.body).toBe(editedBody)
     expect(engine.getSnapshot().pending).toHaveLength(0)
@@ -468,11 +467,10 @@ describe("InterceptEngine Queue Lifecycle", () => {
     expect(engine.getSnapshot().pending).toHaveLength(0)
 
     const res = await p1
-    expect(res.action).toBe("forward")
     expect(res.modified).toBe(false)
   })
 
-  test("dropping an item rejects request with LocalHTTPError(499)", async () => {
+  test("dropping an item rejects the request with the operator's reason", async () => {
     engine.updateConfig({ enabled: true, direction: "request" })
     const p = engine.interceptRequest({
       method: "POST",
@@ -497,7 +495,9 @@ describe("InterceptEngine Queue Lifecycle", () => {
   })
 })
 
-function suggestion(operations: Array<AssistantDiffOp>): AssistantSuggestion {
+function suggestion(
+  operations: Array<AssistantDiffOp>,
+): InterceptAssistantResult {
   return {
     id: "sugg-test",
     createdAt: new Date(0).toISOString(),

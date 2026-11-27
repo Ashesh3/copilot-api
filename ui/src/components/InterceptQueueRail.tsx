@@ -33,6 +33,8 @@ interface InterceptQueueRailProps {
   recent: Array<InterceptItemSummary>
   selectedId: string | undefined
   onSelect: (id: string) => void
+  /** Held items with unsaved local edits. */
+  draftIds: ReadonlySet<string>
   stats: InterceptSnapshot["stats"]
   isIntercepting: boolean
   isActing: boolean
@@ -44,11 +46,13 @@ interface InterceptQueueRailProps {
 function QueueRow({
   item,
   isSelected,
+  hasDraft,
   now,
   onSelect,
 }: {
   item: InterceptItemSummary
   isSelected: boolean
+  hasDraft: boolean
   now: number
   onSelect: (id: string) => void
 }) {
@@ -58,6 +62,7 @@ function QueueRow({
       "Autopilot"
     : STATUS_LABEL[item.status]
   const flags = [
+    hasDraft ? "unsaved edits" : null,
     item.modified && !item.autopilot ? "edited" : null,
     item.assistantStatus === "ready" ? "AI suggestion" : null,
     item.assistantStatus === "running" ? "AI running" : null,
@@ -115,6 +120,7 @@ export function InterceptQueueRail({
   recent,
   selectedId,
   onSelect,
+  draftIds,
   stats,
   isIntercepting,
   isActing,
@@ -124,6 +130,7 @@ export function InterceptQueueRail({
 }: InterceptQueueRailProps) {
   const now = useNow()
   const items = view === "pending" ? pending : recent
+  const draftCount = pending.filter((item) => draftIds.has(item.id)).length
 
   let emptyText = "Nothing has been intercepted yet."
   if (view === "pending") {
@@ -167,6 +174,7 @@ export function InterceptQueueRail({
                 key={item.id}
                 item={item}
                 isSelected={item.id === selectedId}
+                hasDraft={draftIds.has(item.id)}
                 now={now}
                 onSelect={onSelect}
               />
@@ -183,14 +191,27 @@ export function InterceptQueueRail({
         </div>
         {view === "pending" && pending.length > 0 ?
           <HStack gap={2}>
-            <Button
-              label="Forward all"
-              size="sm"
-              variant="secondary"
-              icon={<PlayIcon />}
-              isDisabled={isActing}
-              onClick={() => void onForwardAll()}
-            />
+            {draftCount > 0 ?
+              <ConfirmButton
+                label="Forward all"
+                size="sm"
+                variant="secondary"
+                icon={<PlayIcon />}
+                isDisabled={isActing}
+                confirmTitle={`Discard unsaved edits on ${draftCount} item${draftCount === 1 ? "" : "s"}?`}
+                confirmDescription="Forward all sends each held item as the server has it. Your unsaved edits are not included."
+                confirmActionLabel="Forward all"
+                onConfirm={onForwardAll}
+              />
+            : <Button
+                label="Forward all"
+                size="sm"
+                variant="secondary"
+                icon={<PlayIcon />}
+                isDisabled={isActing}
+                onClick={() => void onForwardAll()}
+              />
+            }
             <ConfirmButton
               label="Drop all"
               size="sm"

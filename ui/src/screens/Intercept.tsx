@@ -20,10 +20,15 @@ import type {
   InterceptConfig,
   InterceptDirection,
   InterceptFilterConfig,
+  InterceptItemSummary,
   InterceptPendingItem,
   InterceptSnapshot,
   InterceptTimeoutAction,
 } from "../../../src/lib/intercept/types"
+import type {
+  InterceptDraft,
+  InterceptDraftUpdate,
+} from "../lib/intercept-view"
 
 import { EmptyState } from "../components/common"
 import { InterceptAssistantPanel } from "../components/InterceptAssistantPanel"
@@ -78,6 +83,16 @@ function eventItemId(data: string): string | undefined {
   }
 }
 
+/** Drafts only matter while their item is held; resolved items cannot change. */
+function retainHeldDrafts(
+  drafts: ReadonlyMap<string, InterceptDraft>,
+  pending: ReadonlyArray<InterceptItemSummary>,
+): ReadonlyMap<string, InterceptDraft> {
+  const held = new Set(pending.map((item) => item.id))
+  if ([...drafts.keys()].every((id) => held.has(id))) return drafts
+  return new Map([...drafts].filter(([id]) => held.has(id)))
+}
+
 function rulesFromConfig(config: InterceptConfig): RulesDraft {
   return {
     timeoutSeconds: String(config.timeoutSeconds),
@@ -103,25 +118,74 @@ export default function InterceptScreen() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<InterceptPendingItem | null>(null)
   const [detailVersion, setDetailVersion] = useState(0)
+  // Unsaved payload edits per held item; they outlive the inspector, so
+  // switching items, lists, or views never discards them.
+  const [drafts, setDrafts] = useState<ReadonlyMap<string, InterceptDraft>>(
+    () => new Map(),
+  )
   const [rulesDraft, setRulesDraft] = useState<RulesDraft | null>(null)
   const [assistantDraft, setAssistantDraft] =
     useState<InterceptAssistantConfig | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [isActing, setIsActing] = useState(false)
   const effectiveIdRef = useRef<string | undefined>(undefined)
+  const refreshSeqRef = useRef(0)
+  // Bumped whenever an edit response replaces the detail, so a detail GET
+  // that started earlier cannot overwrite it with an older body.
+  const detailWriteRef = useRef(0)
 
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeqRef.current
     try {
-      setState(await get<InterceptStateResponse>(API))
+      const next = await get<InterceptStateResponse>(API)
+      if (seq !== refreshSeqRef.current) return
+      setState(next)
+      setDrafts((prev) => retainHeldDrafts(prev, next.pending))
       setLoadError(null)
     } catch (err) {
+      if (seq !== refreshSeqRef.current) return
       setLoadError(errorMessage(err, "Could not load intercept state"))
     }
+  }, [])
+
+  /** Summaries and the selected item's detail, for reconnects and Refresh. */
+  const refreshAll = useCallback(async () => {
+    setDetailVersion((version) => version + 1)
+    await refresh()
+  }, [refresh])
+
+  const updateDraft = useCallback(
+    (id: string, update: InterceptDraftUpdate) => {
+      setDrafts((prev) => {
+        const current = prev.get(id)
+        const next = update(current)
+        if (next === current) return prev
+        const updated = new Map(prev)
+        if (next) updated.set(id, next)
+        else updated.delete(id)
+        return updated
+      })
+    },
+    [],
+  )
+
+  /** Edit responses for an item that is no longer selected are dropped. */
+  const handleItemChange = useCallback((item: InterceptPendingItem) => {
+    if (item.id !== effectiveIdRef.current) return
+    detailWriteRef.current += 1
+    setDetail(item)
   }, [])
 
   useEffect(() => {
     void refresh()
     const source = new EventSource(`${API}/events`)
+    let hasOpened = false
+    // Events may have been missed while disconnected; reload the selected
+    // detail as well as the summaries.
+    const handleOpen = () => {
+      if (hasOpened) void refreshAll()
+      hasOpened = true
+    }
     const handleStateEvent = () => {
       void refresh()
     }
@@ -132,12 +196,14 @@ export default function InterceptScreen() {
         setDetailVersion((version) => version + 1)
       }
     }
+    source.addEventListener("open", handleOpen)
     source.addEventListener("snapshot", handleStateEvent)
     source.addEventListener("config", handleStateEvent)
     source.addEventListener("queued", handleStateEvent)
     source.addEventListener("updated", handleItemEvent)
     source.addEventListener("resolved", handleItemEvent)
     return () => {
+      source.removeEventListener("open", handleOpen)
       source.removeEventListener("snapshot", handleStateEvent)
       source.removeEventListener("config", handleStateEvent)
       source.removeEventListener("queued", handleStateEvent)
@@ -145,7 +211,7 @@ export default function InterceptScreen() {
       source.removeEventListener("resolved", handleItemEvent)
       source.close()
     }
-  }, [refresh])
+  }, [refresh, refreshAll])
 
   const listItems =
     queueView === "pending" ? (state?.pending ?? []) : (state?.recent ?? [])
@@ -161,12 +227,18 @@ export default function InterceptScreen() {
   useEffect(() => {
     if (effectiveId === undefined) return
     let isCurrent = true
+    const writeAtStart = detailWriteRef.current
     get<InterceptPendingItem>(`${API}/items/${encodeURIComponent(effectiveId)}`)
       .then((item) => {
-        if (isCurrent) setDetail(item)
+        if (isCurrent && writeAtStart === detailWriteRef.current) {
+          setDetail(item)
+        }
       })
       .catch(() => {
-        if (isCurrent) setDetail(null)
+        // Keep what is shown for this item; the next event or Refresh retries.
+        if (isCurrent) {
+          setDetail((prev) => (prev?.id === effectiveId ? prev : null))
+        }
       })
     return () => {
       isCurrent = false
@@ -224,6 +296,7 @@ export default function InterceptScreen() {
     try {
       const res = await put<ConfigUpdateResponse>(`${API}/config`, patch)
       setState((prev) => (prev ? { ...prev, ...res.snapshot } : prev))
+      setDrafts((prev) => retainHeldDrafts(prev, res.snapshot.pending))
       return true
     } catch (err) {
       toast.error(errorMessage(err, "Could not update Intercept"))
@@ -306,8 +379,10 @@ export default function InterceptScreen() {
         <InterceptDetail
           key={shownDetail.id}
           item={shownDetail}
+          draft={drafts.get(shownDetail.id)}
           timeoutAction={config.timeoutAction}
-          onItemChange={setDetail}
+          onDraftUpdate={updateDraft}
+          onItemChange={handleItemChange}
           onResolved={refresh}
         />
       )
@@ -501,6 +576,7 @@ export default function InterceptScreen() {
           recent={state.recent}
           selectedId={effectiveId}
           onSelect={setSelectedId}
+          draftIds={new Set(drafts.keys())}
           stats={state.stats}
           isIntercepting={config.enabled}
           isActing={isActing}
@@ -523,7 +599,7 @@ export default function InterceptScreen() {
       isRefreshing={isRefreshing}
       onRefresh={() => {
         setIsRefreshing(true)
-        void refresh().finally(() => setIsRefreshing(false))
+        void refreshAll().finally(() => setIsRefreshing(false))
       }}
       actions={
         <HStack gap={3} vAlign="center" wrap="wrap">

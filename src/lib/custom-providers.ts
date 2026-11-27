@@ -468,27 +468,69 @@ function recordCustomProviderCall(options: {
   })
 }
 
-async function fetchCustomProvider(
+/**
+ * Send one logical request. Intercept holds the request once and only the
+ * response returned to the caller; the automatic retry resends the approved
+ * body instead of rebuilding it from the payload.
+ */
+async function sendCustomProviderRequest(
   request: CustomProviderFetchRequest,
+  options: { retryOnce: boolean },
 ): Promise<Response> {
-  const { reference, path, payload, options } = request
+  const { reference, path } = request
+  const signal = request.options?.signal
+  let body = request.rawBody ?? JSON.stringify(request.payload)
   const url = providerUrl(reference.provider, path)
-  let headers = buildHeaders(reference.provider)
-  let body = request.rawBody ?? JSON.stringify(payload)
-  const interceptedReq = await interceptEngine.interceptRequest({
+  const held =
+    interceptEngine.isEnabled() ?
+      await interceptEngine.interceptRequest({
+        method: "POST",
+        path,
+        url,
+        upstream: "custom",
+        providerId: reference.provider.id,
+        headers: buildHeaders(reference.provider),
+        body,
+        signal,
+      })
+    : undefined
+  if (held) body = held.body
+
+  let response = await fetchCustomProvider(request, body)
+  const retryDelayMs =
+    options.retryOnce ? customProviderRetryDelayMs(response) : undefined
+  if (retryDelayMs !== undefined) {
+    consola.warn(
+      `Custom provider ${reference.provider.name} returned HTTP ${response.status} for ${reference.upstreamModel}; retrying once in ${(retryDelayMs / 1000).toFixed(1)}s`,
+    )
+    // Drain the refused attempt so its debug capture completes.
+    await response.text().catch(() => undefined)
+    await waitForCustomProviderRetry(retryDelayMs, signal)
+    response = await fetchCustomProvider(
+      { ...request, reason: "http_retry" },
+      body,
+    )
+  }
+  if (!held) return response
+  return await interceptEngine.interceptResponse({
     method: "POST",
     path,
     url,
     upstream: "custom",
     providerId: reference.provider.id,
-    headers,
-    body,
-    signal: options?.signal,
+    response,
+    requestSnapshot: held.requestSnapshot,
+    signal,
   })
-  if (interceptedReq.modified) {
-    body = interceptedReq.body
-    headers = interceptedReq.headers
-  }
+}
+
+async function fetchCustomProvider(
+  request: CustomProviderFetchRequest,
+  body: string,
+): Promise<Response> {
+  const { reference, path, options } = request
+  const url = providerUrl(reference.provider, path)
+  const headers = buildHeaders(reference.provider)
   consola.info(
     `Custom provider request: ${reference.provider.name}/${reference.provider.id}/${reference.upstreamModel} POST ${path}`,
   )
@@ -515,20 +557,10 @@ async function fetchCustomProvider(
         AbortSignal.any([options.signal, captureSignal])
       : captureSignal,
     )
-    const rawResponse =
+    const response =
       path === "/chat/completions" ?
         await recordModelFallbackResponse(tapped.response)
       : tapped.response
-    const response = await interceptEngine.interceptResponse({
-      method: "POST",
-      path,
-      url,
-      upstream: "custom",
-      providerId: reference.provider.id,
-      response: rawResponse,
-      requestSnapshot: interceptedReq.requestSnapshot,
-      signal: options?.signal,
-    })
     void captureCustomProviderDebugResponse(logId, response, tapped.capture)
     recordCustomProviderCall({
       outcome: customProviderOutcome(response),
@@ -678,17 +710,9 @@ async function createCustomProviderChatCompletionsCore(
     payload: outgoing,
     options,
   }
-  let response = await fetchCustomProvider(request)
-  const retryDelayMs = customProviderRetryDelayMs(response)
-  if (retryDelayMs !== undefined) {
-    consola.warn(
-      `Custom provider ${reference.provider.name} returned HTTP ${response.status} for ${reference.upstreamModel}; retrying once in ${(retryDelayMs / 1000).toFixed(1)}s`,
-    )
-    // Drain the refused attempt so its debug capture completes.
-    await response.text().catch(() => undefined)
-    await waitForCustomProviderRetry(retryDelayMs, options?.signal)
-    response = await fetchCustomProvider({ ...request, reason: "http_retry" })
-  }
+  const response = await sendCustomProviderRequest(request, {
+    retryOnce: true,
+  })
 
   if (!response.ok) {
     await throwCustomProviderError({
@@ -756,12 +780,10 @@ export async function createCustomProviderEmbeddings(
     ...(payload as unknown as Record<string, unknown>),
     model: reference.upstreamModel,
   }
-  const response = await fetchCustomProvider({
-    reference,
-    path: "/embeddings",
-    payload: outgoing,
-    options,
-  })
+  const response = await sendCustomProviderRequest(
+    { reference, path: "/embeddings", payload: outgoing, options },
+    { retryOnce: false },
+  )
 
   if (!response.ok) {
     await throwCustomProviderError({
@@ -812,19 +834,22 @@ export async function replayCustomProviderRequest(options: {
       clientBody,
     )
   }
-  return await fetchCustomProvider({
-    reference: {
-      provider,
-      model,
-      requestedModel: model.id,
-      upstreamModel: model.id,
-      matchedAlias: false,
+  return await sendCustomProviderRequest(
+    {
+      reference: {
+        provider,
+        model,
+        requestedModel: model.id,
+        upstreamModel: model.id,
+        matchedAlias: false,
+      },
+      path: "/chat/completions",
+      payload: options.payload,
+      rawBody: options.rawBody,
+      options: { signal: options.signal },
     },
-    path: "/chat/completions",
-    payload: options.payload,
-    rawBody: options.rawBody,
-    options: { signal: options.signal },
-  })
+    { retryOnce: false },
+  )
 }
 
 function redactProviderRequestPayload(

@@ -795,6 +795,8 @@ Open `/dashboard` on the same host as the API. The dashboard includes:
 - active Claude Code sessions and registered environments;
 - outbound Copilot request/response attempts with structured/raw views;
 - replay for logged Chat Completions and Responses attempts;
+- Intercept: hold, edit, forward, or drop inference requests and upstream
+  responses, with optional assistant-proposed edits;
 - GrowthBook feature flags and Codex/ChatGPT Statsig overrides;
 - request replacements and ordered model redirects;
 - HTTP 422 and buffered refusal fallback chains with stored conversation routing;
@@ -841,6 +843,27 @@ stream; the file is removed when capture finishes, and retained captures are
 process-local. Clear and restart remove captures. Capture follows downstream consumption with bounded read-ahead.
 Read-only containers need writable mounts for `/app/data` and a temporary
 directory such as `/tmp`.
+
+Intercept is off by default, and its settings are kept in memory until restart.
+When enabled, it holds Copilot and custom-provider inference requests, their
+upstream responses, or both, optionally only when filters on session, model,
+path, upstream, headers, or body text match. Each held item can be edited as
+structured messages or raw text, then forwarded or dropped; without a decision
+it is forwarded or dropped when the configured hold time (15–3600 seconds)
+ends. A request is held once: automatic resends carry the approved
+body, and only the final upstream response is held. Held bodies stay in server
+memory and share the LLM Debug memory budget; when it is full, traffic passes
+through unheld. Credential headers are shown redacted. Turning Intercept off
+forwards everything it holds.
+
+AI Assist sends a selected Chat Completions model the operator's instructions
+and a structured view of the held item: message text, tool calls, and tool
+results, with images, documents, and signed or encrypted blocks named but not
+included. The model replies with edit operations, which are checked against the
+item and shown as a diff to accept in full or in part, or reject. Autopilot
+applies them and forwards without review, but keeps the item held when the
+assistant fails or its changes do not apply. Assistant calls run as separate
+requests and are never intercepted.
 
 In GitHub Accounts, expand an account's settings to enter an Integration ID.
 Leave it blank to use the hardcoded `copilot-developer-cli` default shown in the

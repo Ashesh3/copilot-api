@@ -733,17 +733,63 @@ async function applyRetryResponseAction(options: {
   }
 }
 
-// Keep the retry state machine in one scope so all resends share one budget.
-// eslint-disable-next-line complexity, max-lines-per-function
+/**
+ * Intercept holds each logical request once and only the response returned to
+ * the caller: automatic resends carry the approved body, and holding happens
+ * outside the transport retry boundary.
+ */
 export async function copilotFetch(
   path: string,
   init?: RequestInit,
-  fetchOptions?: {
-    baseUrl?: string
-    maxHttpRetryDelaySeconds?: number
-    retryBudget?: RetryBudget
-    telemetry?: CopilotTelemetryOptions
-  },
+  fetchOptions?: CopilotFetchOptions,
+): Promise<Response> {
+  if (
+    !interceptEngine.isEnabled()
+    || !isLlmDebugPath(path)
+    || typeof init?.body !== "string"
+  ) {
+    return await sendCopilotRequest(path, init, fetchOptions)
+  }
+  const method = init.method ?? "POST"
+  const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
+  const held = await interceptEngine.interceptRequest({
+    method,
+    path,
+    url,
+    upstream: "copilot",
+    headers: filterCopilotRequestHeaders(init.headers),
+    body: init.body,
+    signal: init.signal,
+  })
+  const response = await sendCopilotRequest(
+    path,
+    held.modified ? { ...init, body: held.body } : init,
+    fetchOptions,
+  )
+  return await interceptEngine.interceptResponse({
+    method,
+    path,
+    url,
+    upstream: "copilot",
+    response,
+    requestSnapshot: held.requestSnapshot,
+    signal: init.signal,
+  })
+}
+
+interface CopilotFetchOptions {
+  baseUrl?: string
+  maxHttpRetryDelaySeconds?: number
+  retryBudget?: RetryBudget
+  telemetry?: CopilotTelemetryOptions
+}
+
+// Keep the retry state machine in one scope so all resends share one budget.
+// eslint-disable-next-line complexity, max-lines-per-function
+async function sendCopilotRequest(
+  path: string,
+  init?: RequestInit,
+  fetchOptions?: CopilotFetchOptions,
 ): Promise<Response> {
   const budget = fetchOptions?.retryBudget ?? createRetryBudget()
   const maxHttpRetryDelaySeconds =
@@ -771,35 +817,9 @@ export async function copilotFetch(
     const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
 
     try {
-      let headers = filterCopilotRequestHeaders(requestInit?.headers)
+      const headers = filterCopilotRequestHeaders(requestInit?.headers)
       // Retry request-ID refreshes must retain all normalized beta lines.
       requestInit = { ...requestInit, headers }
-
-      let interceptSnapshot:
-        | Awaited<
-            ReturnType<typeof interceptEngine.interceptRequest>
-          >["requestSnapshot"]
-        | undefined
-      if (isLlmDebugPath(path) && typeof requestInit.body === "string") {
-        const intercepted = await interceptEngine.interceptRequest({
-          method: requestInit.method ?? "POST",
-          path,
-          url,
-          upstream: "copilot",
-          headers,
-          body: requestInit.body,
-          signal: requestInit.signal,
-        })
-        interceptSnapshot = intercepted.requestSnapshot
-        if (intercepted.modified) {
-          headers = filterCopilotRequestHeaders(intercepted.headers)
-          requestInit = {
-            ...requestInit,
-            headers,
-            body: intercepted.body,
-          }
-        }
-      }
 
       debugLogId = startLlmDebugAttempt({
         headers,
@@ -820,7 +840,7 @@ export async function copilotFetch(
         url,
       })
 
-      const tappedResponse = await normalizeConnectionOwnershipRejection(
+      const response = await normalizeConnectionOwnershipRejection(
         path,
         captureLlmDebugAttemptResponse(
           debugLogId,
@@ -828,19 +848,6 @@ export async function copilotFetch(
           requestInit.signal ?? undefined,
         ),
       )
-
-      const response =
-        interceptSnapshot ?
-          await interceptEngine.interceptResponse({
-            method: requestInit.method ?? "POST",
-            path,
-            url,
-            upstream: "copilot",
-            response: tappedResponse,
-            requestSnapshot: interceptSnapshot,
-            signal: requestInit.signal,
-          })
-        : tappedResponse
       // Once a new response arrived, an earlier retry response can no longer
       // be returned. Drain through its tap with bounded stream backpressure.
       if (lastResponse) {

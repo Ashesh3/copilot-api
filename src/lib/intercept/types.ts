@@ -100,7 +100,11 @@ export interface CanonicalItem {
   toolCallId?: string
   /** JSON-formatted arguments for tool_call items. */
   toolArguments?: string
-  /** True when the item came from a read-only/opaque block (e.g. image/encrypted). */
+  /**
+   * Read-only node (signed thinking, encrypted reasoning, images, documents,
+   * unknown blocks). It is preserved verbatim and may be deleted, but its
+   * content cannot be edited. `content` is a short placeholder, never the raw node.
+   */
   opaque?: boolean
 }
 
@@ -113,6 +117,8 @@ export interface CanonicalView {
   items: Array<CanonicalItem>
   /** True if structured edits can be cleanly written back to the raw payload. */
   editable: boolean
+  /** Why structured edits are unavailable when `editable` is false. */
+  readOnlyReason?: string
   note?: string
 }
 
@@ -153,6 +159,8 @@ export interface AssistantSuggestion {
   previewCanonical: CanonicalView | null
   error?: string
   durationMs: number
+  /** Item revision the assistant read; applying it to a newer revision is refused. */
+  revision: number
 }
 
 export type InterceptItemStatus =
@@ -171,6 +179,8 @@ export interface InterceptPendingItem {
   expiresAtMs: number
   resolvedAt?: string
   modified: boolean
+  /** Incremented on every server-side edit; suggestions are bound to it. */
+  revision: number
   /** Upstream metadata */
   method: string
   path: string

@@ -161,6 +161,8 @@ export function isCredentialControlRequest(reference: string): boolean {
 
 export function shouldOmitRequestBodyFromDiagnostics(path: string): boolean {
   if (isCredentialControlRequest(path)) return true
+  // Held conversations and their edits are as sensitive as the inference itself.
+  if (/^\/dashboard\/api\/intercept(?:[/?#]|$)/.test(path)) return true
   if (/^\/v1\/audio\/transcriptions\/?(?:[?#]|$)/.test(path)) return true
   if (/^\/v1\/codex\/auth\/refresh\/?(?:[?#]|$)/.test(path)) return true
   if (!isGoogleModelActionPath(path)) return false

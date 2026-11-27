@@ -3,12 +3,13 @@ import type { TableColumn } from "@astryxdesign/core/Table"
 import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
+import { HStack } from "@astryxdesign/core/Stack"
 import { StatusDot } from "@astryxdesign/core/StatusDot"
 import { Switch } from "@astryxdesign/core/Switch"
 import { proportional } from "@astryxdesign/core/Table"
 import { Tab, TabList } from "@astryxdesign/core/TabList"
 import { Text } from "@astryxdesign/core/Text"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
 import type {
   AssistantDiffOp,
@@ -21,6 +22,9 @@ import { PlayIcon, RefreshCwIcon, SparklesIcon, XIcon } from "../icons"
 import { post, put } from "../lib/api"
 import {
   formatCountdown,
+  type InterceptDraft,
+  type InterceptDraftUpdate,
+  responseJsonDiagnostic,
   STATUS_DOT,
   STATUS_LABEL,
   useNow,
@@ -34,8 +38,12 @@ import { JsonCodeEditor } from "./JsonCodeEditor"
 import { StructuredMessageEditor } from "./StructuredMessageEditor"
 
 type DetailTab = "suggestion" | "messages" | "raw" | "headers" | "context"
-type DraftSource = "none" | "structured" | "raw"
-type DraftPayload = { canonicalItems: Array<CanonicalItem> } | { body: string }
+type DraftPayload =
+  | { canonicalItems: Array<CanonicalItem>; baseRevision: number }
+  | { body: string }
+
+const CONFLICT_MESSAGE =
+  "This item changed on the server. Resolve the notice above your edits first."
 
 interface HeaderRow extends Record<string, unknown> {
   name: string
@@ -85,14 +93,19 @@ function HoldCountdown({
 
 export interface InterceptDetailProps {
   item: InterceptPendingItem
+  /** Unsaved edits for this item; the screen owns them so they outlive the inspector. */
+  draft: InterceptDraft | undefined
   timeoutAction: InterceptTimeoutAction
+  onDraftUpdate: (id: string, update: InterceptDraftUpdate) => void
   onItemChange: (item: InterceptPendingItem) => void
   onResolved: () => Promise<void>
 }
 
 export function InterceptDetail({
   item,
+  draft: heldDraft,
   timeoutAction,
+  onDraftUpdate,
   onItemChange,
   onResolved,
 }: InterceptDetailProps) {
@@ -103,25 +116,25 @@ export function InterceptDetail({
     item.phase === "response"
     && (item.stream === true
       || item.responseContentType?.includes("text/event-stream") === true)
+  const isText = isStream || item.canonical.protocol === "raw_text"
+
+  // A resolved item can no longer change, so any leftover draft is moot.
+  const draft = isPending ? heldDraft : undefined
+  const isSaving = draft?.savingEdits !== undefined
+  // The server item changed under an unsaved draft (another operator, a
+  // revert, an applied suggestion). Neither side wins until the operator chooses.
+  const hasConflict =
+    draft !== undefined && !isSaving && draft.baseRevision !== item.revision
+  const structuredItems =
+    draft?.source === "structured" ? draft.items : item.canonical.items
+  const rawBody = draft?.source === "raw" ? draft.body : item.currentBody
 
   const [tab, setTab] = useState<DetailTab>(
     item.assistantSuggestion ? "suggestion" : "messages",
   )
   const [wrap, setWrap] = useState(true)
-  const [draftBody, setDraftBody] = useState(item.currentBody)
-  const [draftItems, setDraftItems] = useState(item.canonical.items)
-  const [draftSource, setDraftSource] = useState<DraftSource>("none")
-  const [syncedBody, setSyncedBody] = useState(item.currentBody)
   const [isActing, setIsActing] = useState(false)
   const [isRunningAssistant, setIsRunningAssistant] = useState(false)
-
-  // Server-side changes (applied suggestion, revert, live updates) replace the
-  // drafts only while the operator has no unsaved edits of their own.
-  if (syncedBody !== item.currentBody && draftSource === "none") {
-    setSyncedBody(item.currentBody)
-    setDraftBody(item.currentBody)
-    setDraftItems(item.canonical.items)
-  }
 
   let activeTab = tab
   if (
@@ -130,12 +143,21 @@ export function InterceptDetail({
   ) {
     activeTab = "messages"
   }
+  // Only the editor that owns a draft may show the payload; the other one
+  // would display a stale document.
+  if (activeTab === "messages" && draft?.source === "raw") {
+    activeTab = "raw"
+  } else if (activeTab === "raw" && draft?.source === "structured") {
+    activeTab = "messages"
+  }
 
   const rawDiagnostic = useMemo(() => {
-    if (isStream || item.canonical.protocol === "raw_text") return null
-    const result = validateReplayDocument(draftBody)
+    if (isText) return null
+    // Responses (including upstream errors) need not look like a request.
+    if (item.phase === "response") return responseJsonDiagnostic(rawBody)
+    const result = validateReplayDocument(rawBody)
     return result.ok ? null : result.diagnostic
-  }, [draftBody, isStream, item.canonical.protocol])
+  }, [isText, item.phase, rawBody])
 
   const headerRows = useMemo<Array<HeaderRow>>(
     () =>
@@ -143,35 +165,80 @@ export function InterceptDetail({
     [item.headers],
   )
 
-  function draftPayload(): DraftPayload | undefined {
-    if (draftSource === "structured") return { canonicalItems: draftItems }
-    if (draftSource === "raw") return { body: draftBody }
-    return undefined
+  const updateDraft = (update: InterceptDraftUpdate) =>
+    onDraftUpdate(item.id, update)
+
+  function editStructured(items: Array<CanonicalItem>) {
+    updateDraft((prev) => ({
+      source: "structured",
+      items,
+      baseRevision: prev?.baseRevision ?? item.revision,
+      edits: (prev?.edits ?? 0) + 1,
+      savingEdits: prev?.savingEdits,
+    }))
+  }
+
+  function editRaw(body: string) {
+    updateDraft((prev) => ({
+      source: "raw",
+      body,
+      baseRevision: prev?.baseRevision ?? item.revision,
+      edits: (prev?.edits ?? 0) + 1,
+      savingEdits: prev?.savingEdits,
+    }))
   }
 
   /** Persist local edits server-side so every view and the assistant see them. */
   async function commitDraft(): Promise<boolean> {
-    const payload = draftPayload()
-    if (!payload) return true
+    if (!draft) return true
+    if (isSaving) return false
+    if (hasConflict) {
+      toast.error(CONFLICT_MESSAGE)
+      return false
+    }
+    if (draft.source === "raw" && rawDiagnostic) {
+      toast.error("Fix the JSON error first")
+      return false
+    }
+    const sentEdits = draft.edits
+    const payload: DraftPayload =
+      draft.source === "structured" ?
+        { canonicalItems: draft.items, baseRevision: draft.baseRevision }
+      : { body: draft.body }
+    updateDraft((prev) => prev && { ...prev, savingEdits: sentEdits })
     try {
       const updated = await put<InterceptPendingItem>(
         itemPath(item.id),
         payload,
       )
-      setDraftSource("none")
+      // Edits typed while the save was in flight stay dirty, now based on
+      // the body the server acknowledged.
+      updateDraft((prev) => {
+        if (!prev || prev.edits === sentEdits) return undefined
+        return {
+          ...prev,
+          savingEdits: undefined,
+          baseRevision: updated.revision,
+        }
+      })
       onItemChange(updated)
       return true
     } catch (err) {
+      updateDraft((prev) => prev && { ...prev, savingEdits: undefined })
       toast.error(errorMessage(err, "Could not save your edits"))
       return false
     }
   }
 
   function discardDraft() {
-    setDraftSource("none")
-    setSyncedBody(item.currentBody)
-    setDraftBody(item.currentBody)
-    setDraftItems(item.canonical.items)
+    updateDraft(() => undefined)
+  }
+
+  /** Raw drafts only: a raw body is a full replacement, so it may overwrite. */
+  function keepDraft() {
+    updateDraft((prev) =>
+      prev?.source === "raw" ? { ...prev, baseRevision: item.revision } : prev,
+    )
   }
 
   async function revertToOriginal() {
@@ -190,15 +257,28 @@ export function InterceptDetail({
   }
 
   async function forward() {
-    if (!isPending || isActing) return
-    if (draftSource === "raw" && rawDiagnostic) {
+    if (!isPending || isActing || isSaving) return
+    if (hasConflict) {
+      toast.error(CONFLICT_MESSAGE)
+      return
+    }
+    if (draft?.source === "raw" && rawDiagnostic) {
       toast.error("Fix the JSON error before forwarding")
       return
     }
+    let payload: DraftPayload | undefined
+    if (draft?.source === "structured") {
+      payload = {
+        canonicalItems: draft.items,
+        baseRevision: draft.baseRevision,
+      }
+    } else if (draft?.source === "raw") {
+      payload = { body: draft.body }
+    }
     setIsActing(true)
     try {
-      await post(itemPath(item.id, "/forward"), draftPayload())
-      setDraftSource("none")
+      await post(itemPath(item.id, "/forward"), payload)
+      updateDraft(() => undefined)
       toast.success(
         item.phase === "request" ?
           "Request sent upstream"
@@ -206,6 +286,7 @@ export function InterceptDetail({
       )
       await onResolved()
     } catch (err) {
+      // The draft stays dirty so the operator can fix it and try again.
       toast.error(errorMessage(err, "Could not forward"))
     } finally {
       setIsActing(false)
@@ -285,21 +366,26 @@ export function InterceptDetail({
 
   function handleTabChange(next: string) {
     const nextTab = next as DetailTab
-    const leavingEdits =
-      (activeTab === "messages" && draftSource === "structured")
-      || (activeTab === "raw" && draftSource === "raw")
-    if (!leavingEdits || (nextTab !== "messages" && nextTab !== "raw")) {
+    // Opening the other editor from any tab first saves the draft, so the
+    // destination shows (and Forward sends) the same document.
+    const opensOtherEditor =
+      (nextTab === "raw" && draft?.source === "structured")
+      || (nextTab === "messages" && draft?.source === "raw")
+    if (!opensOtherEditor) {
       setTab(nextTab)
-      return
-    }
-    if (draftSource === "raw" && rawDiagnostic) {
-      toast.error("Fix the JSON error before switching views")
       return
     }
     void commitDraft().then((saved) => {
       if (saved) setTab(nextTab)
     })
   }
+
+  // The listener registers once per held item and always calls the latest
+  // `forward`, which closes over the current draft.
+  const forwardRef = useRef(forward)
+  useEffect(() => {
+    forwardRef.current = forward
+  })
 
   useEffect(() => {
     if (!isPending) return
@@ -310,20 +396,21 @@ export function InterceptDetail({
         && !event.defaultPrevented
       ) {
         event.preventDefault()
-        void forward()
+        void forwardRef.current()
       }
     }
     globalThis.addEventListener("keydown", handleKeyDown)
     return () => globalThis.removeEventListener("keydown", handleKeyDown)
-  })
+  }, [isPending])
 
   let revertAction = null
-  if (draftSource !== "none") {
+  if (draft) {
     revertAction = (
       <Button
         label="Discard edits"
         size="sm"
         variant="ghost"
+        isDisabled={isSaving}
         onClick={discardDraft}
       />
     )
@@ -349,7 +436,7 @@ export function InterceptDetail({
               suggestion={item.assistantSuggestion}
               currentItems={item.canonical.items}
               readOnly={!isPending}
-              canApply={draftSource === "none"}
+              canApply={draft === undefined}
               isApplying={isActing}
               onApply={(ops) => void applySuggestion(ops)}
               onReject={() => void rejectSuggestion()}
@@ -357,18 +444,18 @@ export function InterceptDetail({
           : null
       }
       case "raw": {
-        if (!isPending || isStream) {
+        if (!isPending || isText) {
+          let ariaLabel = "Raw JSON"
+          if (isStream) ariaLabel = "Raw event stream"
+          else if (isText) ariaLabel = "Raw text"
           return (
             <CodeMirrorDocument
-              ariaLabel={isStream ? "Raw event stream" : "Raw JSON"}
-              language={isStream ? "text" : "json"}
+              ariaLabel={ariaLabel}
+              language={isText ? "text" : "json"}
               readOnly={!isPending}
-              value={draftBody}
+              value={rawBody}
               wrap={wrap}
-              onChange={(value) => {
-                setDraftBody(value)
-                setDraftSource("raw")
-              }}
+              onChange={editRaw}
             />
           )
         }
@@ -376,12 +463,9 @@ export function InterceptDetail({
           <JsonCodeEditor
             diagnostic={rawDiagnostic}
             label="Raw JSON"
-            value={draftBody}
+            value={rawBody}
             wrap={wrap}
-            onChange={(value) => {
-              setDraftBody(value)
-              setDraftSource("raw")
-            }}
+            onChange={editRaw}
           />
         )
       }
@@ -412,17 +496,17 @@ export function InterceptDetail({
             : null}
             {item.canonical.editable ? null : (
               <Text type="supporting">
-                This payload has no message structure. Edit it in Raw.
+                {item.canonical.readOnlyReason
+                  ?? "This payload has no message structure."}
+                {isPending ? " Edit it in Raw." : null}
               </Text>
             )}
             <StructuredMessageEditor
-              items={draftItems}
+              items={structuredItems}
               readOnly={!isPending}
               editable={item.canonical.editable}
-              onChange={(next) => {
-                setDraftItems(next)
-                setDraftSource("structured")
-              }}
+              isDisabled={isSaving || isActing}
+              onChange={editStructured}
             />
           </>
         )
@@ -498,7 +582,7 @@ export function InterceptDetail({
               isLoading={
                 isRunningAssistant || item.assistantStatus === "running"
               }
-              isDisabled={isActing}
+              isDisabled={isActing || isSaving}
               onClick={() => void runAssistant()}
             />
             {revertAction}
@@ -517,6 +601,7 @@ export function InterceptDetail({
               icon={<PlayIcon />}
               tooltip="Forward (Ctrl+Enter)"
               isLoading={isActing}
+              isDisabled={isSaving}
               onClick={() => void forward()}
             />
           </div>
@@ -541,7 +626,7 @@ export function InterceptDetail({
             value="messages"
             label="Messages"
             endContent={
-              <Badge variant="neutral" label={String(draftItems.length)} />
+              <Badge variant="neutral" label={String(structuredItems.length)} />
             }
           />
           <Tab value="raw" label="Raw" />
@@ -568,6 +653,44 @@ export function InterceptDetail({
           : "intercept-detail-body"
         }
       >
+        {hasConflict && draft.source === "structured" ?
+          <Banner
+            status="warning"
+            title="Changed on the server"
+            description="The held payload changed while you had unsaved message edits, so they can't be re-applied safely. Copy any text you want to keep, then discard your edits to load the server version."
+            endContent={
+              <Button
+                label="Discard mine"
+                size="sm"
+                variant="secondary"
+                onClick={discardDraft}
+              />
+            }
+          />
+        : null}
+        {hasConflict && draft.source === "raw" ?
+          <Banner
+            status="warning"
+            title="Changed on the server"
+            description="This item changed while you had unsaved raw edits. Discard yours to load the server version, or keep yours to replace it when you save or forward."
+            endContent={
+              <HStack gap={2}>
+                <Button
+                  label="Discard mine"
+                  size="sm"
+                  variant="ghost"
+                  onClick={discardDraft}
+                />
+                <Button
+                  label="Keep mine"
+                  size="sm"
+                  variant="secondary"
+                  onClick={keepDraft}
+                />
+              </HStack>
+            }
+          />
+        : null}
         {item.assistantError ?
           <Banner
             status="error"

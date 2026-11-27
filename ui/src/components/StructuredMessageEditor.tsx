@@ -18,6 +18,8 @@ interface StructuredMessageEditorProps {
   items: Array<CanonicalItem>
   readOnly: boolean
   editable: boolean
+  /** Keeps the fields visible but inert, e.g. while a save is in flight. */
+  isDisabled?: boolean
   onChange?: (next: Array<CanonicalItem>) => void
 }
 
@@ -48,9 +50,13 @@ function rowsFor(text: string, max: number): number {
 }
 
 function MessageText({ item }: { item: CanonicalItem }) {
-  const isMono = item.kind === "tool_call" || item.kind === "tool_result"
+  const isMono =
+    item.opaque === true
+    || item.kind === "tool_call"
+    || item.kind === "tool_result"
+  // Opaque content is a short placeholder such as "[image]", never the raw node.
   const text =
-    item.kind === "tool_call" ?
+    item.kind === "tool_call" && !item.opaque ?
       (item.toolArguments ?? item.content)
     : item.content
   return (
@@ -68,6 +74,7 @@ export function StructuredMessageEditor({
   items,
   readOnly,
   editable,
+  isDisabled = false,
   onChange,
 }: StructuredMessageEditorProps) {
   const canEdit = !readOnly && editable && onChange !== undefined
@@ -81,7 +88,7 @@ export function StructuredMessageEditor({
   const insertAfter = (index: number) => {
     const next = [...items]
     next.splice(index + 1, 0, {
-      id: `manual-${Date.now()}`,
+      id: crypto.randomUUID(),
       kind: "user",
       role: "user",
       label: KIND_LABEL.user,
@@ -91,7 +98,8 @@ export function StructuredMessageEditor({
   }
 
   const renderContent = (item: CanonicalItem, index: number) => {
-    if (!canEdit) return <MessageText item={item} />
+    // Opaque nodes are preserved verbatim; they can be removed, never rewritten.
+    if (!canEdit || item.opaque) return <MessageText item={item} />
     if (item.kind === "tool_call") {
       return (
         <>
@@ -100,6 +108,7 @@ export function StructuredMessageEditor({
             label="Tool name"
             size="sm"
             width={280}
+            isDisabled={isDisabled}
             value={item.toolName ?? ""}
             onChange={(toolName) =>
               update(index, { toolName, label: `Tool call: ${toolName}` })
@@ -109,6 +118,7 @@ export function StructuredMessageEditor({
             className="intercept-mono-field"
             label="Arguments (JSON)"
             rows={rowsFor(item.toolArguments ?? item.content, 14)}
+            isDisabled={isDisabled}
             value={item.toolArguments ?? item.content}
             onChange={(value) =>
               update(index, { toolArguments: value, content: value })
@@ -125,6 +135,7 @@ export function StructuredMessageEditor({
         label={`${KIND_LABEL[item.kind]} content`}
         isLabelHidden
         rows={rowsFor(item.content, 18)}
+        isDisabled={isDisabled}
         value={item.content}
         onChange={(content) => update(index, { content })}
       />
@@ -141,6 +152,7 @@ export function StructuredMessageEditor({
             size="sm"
             variant="secondary"
             icon={<PlusIcon />}
+            isDisabled={isDisabled}
             onClick={() => insertAfter(-1)}
           />
         : null}
@@ -154,12 +166,13 @@ export function StructuredMessageEditor({
         <div key={item.id} className="intercept-message">
           <div className="intercept-message-head">
             <div className="intercept-message-id">
-              {canEdit ?
+              {canEdit && !item.opaque ?
                 <Selector
                   label="Message kind"
                   isLabelHidden
                   size="sm"
                   width={140}
+                  isDisabled={isDisabled}
                   value={item.kind}
                   options={KIND_OPTIONS}
                   onChange={(value) => {
@@ -182,7 +195,7 @@ export function StructuredMessageEditor({
                 </span>
               : null}
               {item.opaque ?
-                <span>includes non-text parts</span>
+                <span>read-only, kept as sent</span>
               : null}
             </div>
             {canEdit ?
@@ -190,11 +203,13 @@ export function StructuredMessageEditor({
                 <IconAction
                   label="Insert message below"
                   icon={<PlusIcon />}
+                  isDisabled={isDisabled}
                   onClick={() => insertAfter(index)}
                 />
                 <IconAction
                   label="Remove message"
                   icon={<Trash2Icon />}
+                  isDisabled={isDisabled}
                   onClick={() => onChange(items.filter((_, i) => i !== index))}
                 />
               </RowActions>

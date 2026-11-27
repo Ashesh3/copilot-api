@@ -1,10 +1,17 @@
 import consola from "consola"
 import { randomUUID } from "node:crypto"
 
+import {
+  releaseDebugCaptureMemory,
+  reserveDebugCaptureMemory,
+} from "~/lib/debug-capture"
 import { LocalHTTPError } from "~/lib/error"
 import { getClientSessionId, getRequestId } from "~/lib/request-session"
 
-import type { InterceptAssistantRunner } from "./assistant"
+import type {
+  InterceptAssistantResult,
+  InterceptAssistantRunner,
+} from "./assistant"
 import type {
   AssistantDiffOp,
   CanonicalItem,
@@ -22,6 +29,7 @@ import {
   isInterceptBypassed,
   resolveAssistantInstruction,
   runInterceptAssistant,
+  validateDiffOps,
 } from "./assistant"
 import {
   applyCanonicalDiffOps,
@@ -29,7 +37,13 @@ import {
   parseCanonicalView,
   serializeCanonicalItemsToBody,
 } from "./canonical"
-import { shouldIntercept } from "./filters"
+import { responseMayMatch, shouldIntercept } from "./filters"
+import {
+  HELD_BODY_COPIES,
+  readResponseCopy,
+  redactHeaders,
+  warnCaptureBudget,
+} from "./held-body"
 import { DEFAULT_INTERCEPT_CONFIG } from "./types"
 
 export interface InterceptRequestInput {
@@ -43,20 +57,21 @@ export interface InterceptRequestInput {
   signal?: AbortSignal | null
 }
 
-export interface InterceptRequestOutcome {
-  action: "forward" | "drop"
+/** Request facts kept so a later response decision has the full context. */
+export interface InterceptRequestSnapshot {
+  method: string
+  path: string
+  model?: string
   body: string
   headers: Record<string, string>
+  sessionId?: string
+}
+
+export interface InterceptRequestOutcome {
+  /** The body to send upstream: the operator's final version, or the input. */
+  body: string
   modified: boolean
-  /** Saved context so a matching response intercept has the full request context. */
-  requestSnapshot: {
-    method: string
-    path: string
-    model?: string
-    body: string
-    headers: Record<string, string>
-    sessionId?: string
-  }
+  requestSnapshot: InterceptRequestSnapshot
 }
 
 export interface InterceptResponseInput {
@@ -66,27 +81,51 @@ export interface InterceptResponseInput {
   upstream: "copilot" | "custom"
   providerId?: string
   response: Response
-  requestSnapshot: InterceptRequestOutcome["requestSnapshot"]
+  requestSnapshot: InterceptRequestSnapshot
   signal?: AbortSignal | null
 }
 
+export interface InterceptItemEdit {
+  body?: string
+  canonicalItems?: Array<CanonicalItem>
+  /** Revision the edit was written against; a mismatch is refused. */
+  baseRevision?: number
+}
+
+/** The edit or suggestion was made for an earlier revision of the item. */
+export class StaleRevisionError extends Error {}
+
 type PendingResolution =
-  | {
-      action: "forward"
-      body: string
-      headers: Record<string, string>
-      modified: boolean
-    }
-  | {
-      action: "drop"
-      reason: string
-    }
+  | { action: "forward"; body: string }
+  | { action: "drop"; reason: string; status: DropStatus }
+
+/** 403: dropped by the operator. 504: no decision before the hold expired. 499: client gone. */
+type DropStatus = 403 | 499 | 504
+
+interface AssistantRun {
+  abort: AbortController
+  /** Item revision the run reads; its result applies only to that revision. */
+  revision: number
+}
+
+type AssistantOutcome =
+  | { suggestion: InterceptAssistantResult }
+  | { error: string }
 
 interface PendingSlot {
   item: InterceptPendingItem
   resolve: (result: PendingResolution) => void
   timer: ReturnType<typeof setTimeout>
   cleanupAbort?: () => void
+  reservedBytes: number
+  /** Autopilot covered this item's direction when it was held. */
+  autopilotEligible: boolean
+  assistantRun?: AssistantRun
+}
+
+interface RecentEntry {
+  item: InterceptPendingItem
+  reservedBytes: number
 }
 
 export type InterceptEvent =
@@ -98,7 +137,8 @@ export type InterceptEvent =
 
 type InterceptListener = (event: InterceptEvent) => void
 
-const MAX_RECENT_ITEMS = 60
+const RECENT_ITEMS_KEPT = 60
+const TEXT_CONTENT_TYPE = /^(?:text\/|application\/(?:json|[\w.+-]+\+json)\b)/i
 
 function cloneConfig(config: InterceptConfig): InterceptConfig {
   return {
@@ -114,7 +154,7 @@ function cloneConfig(config: InterceptConfig): InterceptConfig {
 function summarizeItem(item: InterceptPendingItem): InterceptItemSummary {
   const firstMeaningful =
     item.canonical.items.find(
-      (entry) => entry.kind !== "system" && entry.content,
+      (entry) => entry.kind !== "system" && !entry.opaque && entry.content,
     ) ?? item.canonical.items.at(0)
   const rawPreview =
     firstMeaningful ? firstMeaningful.content : item.currentBody
@@ -144,23 +184,20 @@ function summarizeItem(item: InterceptPendingItem): InterceptItemSummary {
   }
 }
 
-function createDroppedResponse(reason: string): {
-  body: Record<string, unknown>
-  response: Response
-} {
-  const body = {
+function dropBody(resolution: Extract<PendingResolution, { action: "drop" }>) {
+  return {
     error: {
       code: "intercept_dropped",
-      type: "api_error",
-      message: `Request dropped by Intercept proxy: ${reason}`,
+      type: resolution.status === 403 ? "permission_error" : "api_error",
+      message: `Dropped by Intercept: ${resolution.reason}`,
     },
   }
-  return { body, response: Response.json(body, { status: 499 }) }
 }
+
 export class InterceptEngine {
   private config: InterceptConfig = cloneConfig(DEFAULT_INTERCEPT_CONFIG)
   private readonly pending = new Map<string, PendingSlot>()
-  private readonly recent: Array<InterceptPendingItem> = []
+  private readonly recent: Array<RecentEntry> = []
   private readonly listeners = new Set<InterceptListener>()
   private stats = {
     forwardedCount: 0,
@@ -172,6 +209,11 @@ export class InterceptEngine {
   /** `runAssistant` is a test seam; production calls the configured model. */
   constructor(runAssistant: InterceptAssistantRunner = runInterceptAssistant) {
     this.runAssistant = runAssistant
+  }
+
+  /** Cheap gate so transports skip all intercept work while it is off. */
+  isEnabled(): boolean {
+    return this.config.enabled
   }
 
   getConfig(): InterceptConfig {
@@ -208,7 +250,7 @@ export class InterceptEngine {
     this.config = next
     this.emit({ type: "config", config: this.getConfig() })
 
-    // When master toggle turns OFF, release all held items immediately
+    // Turning Intercept off releases everything it was holding.
     if (wasEnabled && !next.enabled && this.pending.size > 0) {
       this.forwardAllPending()
     }
@@ -254,11 +296,10 @@ export class InterceptEngine {
     const pendingList = [...this.pending.values()]
       .sort((a, b) => a.item.createdAtMs - b.item.createdAtMs)
       .map((slot) => summarizeItem(slot.item))
-    const recentList = this.recent.map((item) => summarizeItem(item))
     return {
       config: this.getConfig(),
       pending: pendingList,
-      recent: recentList,
+      recent: this.recent.map((entry) => summarizeItem(entry.item)),
       stats: {
         pendingCount: pendingList.length,
         forwardedCount: this.stats.forwardedCount,
@@ -269,9 +310,10 @@ export class InterceptEngine {
   }
 
   getItem(id: string): InterceptPendingItem | undefined {
-    const slot = this.pending.get(id)
-    if (slot) return slot.item
-    return this.recent.find((entry) => entry.id === id)
+    return (
+      this.pending.get(id)?.item
+      ?? this.recent.find((entry) => entry.item.id === id)?.item
+    )
   }
 
   subscribe(listener: InterceptListener): () => void {
@@ -286,15 +328,15 @@ export class InterceptEngine {
       try {
         listener(event)
       } catch {
-        // Ignore subscriber failures
+        // One failing subscriber must not affect the others.
       }
     }
   }
 
-  private pushRecent(item: InterceptPendingItem): void {
-    this.recent.unshift(item)
-    if (this.recent.length > MAX_RECENT_ITEMS) {
-      this.recent.length = MAX_RECENT_ITEMS
+  private pushRecent(entry: RecentEntry): void {
+    this.recent.unshift(entry)
+    for (const evicted of this.recent.splice(RECENT_ITEMS_KEPT)) {
+      releaseDebugCaptureMemory(evicted.reservedBytes)
     }
   }
 
@@ -308,78 +350,104 @@ export class InterceptEngine {
     this.pending.delete(id)
     clearTimeout(slot.timer)
     slot.cleanupAbort?.()
+    slot.assistantRun?.abort.abort()
+    slot.assistantRun = undefined
 
-    slot.item.status = status
-    slot.item.resolvedAt = new Date().toISOString()
+    const { item } = slot
+    item.status = status
+    item.resolvedAt = new Date().toISOString()
     if (resolution.action === "forward") {
-      slot.item.currentBody = resolution.body
-      slot.item.headers = resolution.headers
-      slot.item.modified = resolution.modified
+      item.modified = resolution.body !== item.originalBody
       this.stats.forwardedCount += 1
-      if (resolution.modified) this.stats.modifiedCount += 1
+      if (item.modified) this.stats.modifiedCount += 1
     } else {
       this.stats.droppedCount += 1
     }
 
-    this.pushRecent(slot.item)
+    this.pushRecent({ item, reservedBytes: slot.reservedBytes })
     this.emit({ type: "resolved", id, status })
     slot.resolve(resolution)
     return true
   }
 
+  /**
+   * Replace the held payload. Throws `StaleRevisionError` when `baseRevision`
+   * is not the current revision, and `CanonicalEditError` for edits that
+   * cannot be written back faithfully. Any suggestion or running assistant
+   * call was made for the previous revision, so both are discarded.
+   */
   editPendingItem(
     id: string,
-    update: {
-      body?: string
-      canonicalItems?: Array<CanonicalItem>
-      headers?: Record<string, string>
-    },
+    update: InterceptItemEdit,
   ): InterceptPendingItem | undefined {
     const slot = this.pending.get(id)
     if (!slot) return undefined
+    const { item } = slot
+    if (
+      update.baseRevision !== undefined
+      && update.baseRevision !== item.revision
+    ) {
+      throw new StaleRevisionError(
+        "The held payload changed since this edit was started. Reload it and edit again.",
+      )
+    }
 
-    let nextBody = slot.item.currentBody
+    let nextBody = item.currentBody
     if (update.canonicalItems) {
       nextBody = serializeCanonicalItemsToBody({
-        originalBody: slot.item.currentBody,
-        canonical: slot.item.canonical,
+        originalBody: item.currentBody,
+        canonical: item.canonical,
         items: update.canonicalItems,
-        contentType: slot.item.responseContentType,
+        contentType: item.responseContentType,
       })
     } else if (update.body !== undefined) {
       nextBody = update.body
     }
 
-    slot.item.currentBody = nextBody
-    if (update.headers) {
-      slot.item.headers = { ...update.headers }
-    }
-    slot.item.modified = nextBody !== slot.item.originalBody
-    slot.item.canonical = parseCanonicalView({
-      path: slot.item.path,
-      phase: slot.item.phase,
+    slot.assistantRun?.abort.abort()
+    slot.assistantRun = undefined
+    item.currentBody = nextBody
+    item.revision += 1
+    item.modified = nextBody !== item.originalBody
+    item.canonical = parseCanonicalView({
+      path: item.path,
+      phase: item.phase,
       body: nextBody,
-      contentType: slot.item.responseContentType,
+      contentType: item.responseContentType,
     })
-    this.emit({ type: "updated", item: summarizeItem(slot.item) })
-    return slot.item
+    item.assistantSuggestion = undefined
+    item.assistantError = undefined
+    item.assistantStatus = "idle"
+    this.emit({ type: "updated", item: summarizeItem(item) })
+    return item
   }
 
+  /**
+   * Apply suggested operations, or the operator's selection of them. Throws
+   * `StaleRevisionError` if the item changed after the suggestion was made and
+   * `AssistantDiffError` for operations that do not fit the item.
+   */
   applyAssistantDiff(
     id: string,
     selectedOperations?: Array<AssistantDiffOp>,
   ): InterceptPendingItem | undefined {
     const slot = this.pending.get(id)
     if (!slot) return undefined
-    const ops =
-      selectedOperations ?? slot.item.assistantSuggestion?.operations ?? []
-    if (ops.length === 0) return slot.item
-
-    const nextItems = applyCanonicalDiffOps(slot.item.canonical.items, ops)
-    // An applied suggestion is consumed: its item IDs address the pre-edit payload.
-    slot.item.assistantSuggestion = undefined
-    slot.item.assistantStatus = "idle"
-    return this.editPendingItem(id, { canonicalItems: nextItems })
+    const suggestion = slot.item.assistantSuggestion
+    if (!suggestion || suggestion.revision !== slot.item.revision) {
+      throw new StaleRevisionError(
+        "This suggestion no longer matches the item. Run AI Assist again.",
+      )
+    }
+    const operations = selectedOperations ?? suggestion.operations
+    if (operations.length === 0) return slot.item
+    validateDiffOps(slot.item.canonical.items, operations)
+    return this.editPendingItem(id, {
+      canonicalItems: applyCanonicalDiffOps(
+        slot.item.canonical.items,
+        operations,
+      ),
+    })
   }
 
   rejectAssistantSuggestion(id: string): InterceptPendingItem | undefined {
@@ -398,78 +466,106 @@ export class InterceptEngine {
   ): Promise<InterceptPendingItem | undefined> {
     const slot = this.pending.get(id)
     if (!slot) return undefined
+    const { item } = slot
 
-    slot.item.assistantStatus = "running"
-    slot.item.assistantError = undefined
-    this.emit({ type: "updated", item: summarizeItem(slot.item) })
-
-    try {
-      const suggestion = await this.runAssistant({
-        item: slot.item,
-        config: this.config.assistant,
-        instructionOverride: options?.instruction,
-        modelOverride: options?.model,
-      })
-      if (!this.pending.has(id)) return slot.item
-      slot.item.assistantStatus = "ready"
-      slot.item.assistantSuggestion = suggestion
-      this.emit({ type: "updated", item: summarizeItem(slot.item) })
-      return slot.item
-    } catch (error) {
-      if (!this.pending.has(id)) return slot.item
-      slot.item.assistantStatus = "error"
-      slot.item.assistantError =
-        error instanceof Error ? error.message : String(error)
-      this.emit({ type: "updated", item: summarizeItem(slot.item) })
-      return slot.item
+    slot.assistantRun?.abort.abort()
+    const run: AssistantRun = {
+      abort: new AbortController(),
+      revision: item.revision,
     }
+    slot.assistantRun = run
+    item.assistantStatus = "running"
+    item.assistantError = undefined
+    this.emit({ type: "updated", item: summarizeItem(item) })
+
+    let outcome: AssistantOutcome
+    try {
+      outcome = {
+        suggestion: await this.runAssistant({
+          item: { ...item },
+          config: this.config.assistant,
+          instructionOverride: options?.instruction,
+          modelOverride: options?.model,
+          signal: run.abort.signal,
+        }),
+      }
+    } catch (error) {
+      outcome = {
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+    this.settleAssistantRun(slot, run, outcome)
+    return item
   }
 
-  forwardItem(
-    id: string,
-    override?: {
-      body?: string
-      canonicalItems?: Array<CanonicalItem>
-      headers?: Record<string, string>
-    },
-  ): boolean {
+  /** Record a finished run unless its item resolved, changed, or ran again. */
+  private settleAssistantRun(
+    slot: PendingSlot,
+    run: AssistantRun,
+    outcome: AssistantOutcome,
+  ): void {
+    const { item } = slot
+    if (
+      this.pending.get(item.id) !== slot
+      || slot.assistantRun !== run
+      || item.revision !== run.revision
+    ) {
+      return
+    }
+    slot.assistantRun = undefined
+    if ("suggestion" in outcome) {
+      item.assistantStatus = "ready"
+      item.assistantSuggestion = {
+        ...outcome.suggestion,
+        revision: run.revision,
+      }
+    } else {
+      item.assistantStatus = "error"
+      item.assistantError = outcome.error
+    }
+    this.emit({ type: "updated", item: summarizeItem(item) })
+  }
+
+  forwardItem(id: string, override?: InterceptItemEdit): boolean {
     const slot = this.pending.get(id)
     if (!slot) return false
-    if (override) {
+    if (override?.body !== undefined || override?.canonicalItems) {
       this.editPendingItem(id, override)
     }
     return this.finalizeSlot(id, "forwarded", {
       action: "forward",
       body: slot.item.currentBody,
-      headers: slot.item.headers,
-      modified: slot.item.currentBody !== slot.item.originalBody,
     })
   }
 
   dropItem(id: string, reason = "Dropped by operator"): boolean {
-    return this.finalizeSlot(id, "dropped", { action: "drop", reason })
+    return this.finalizeSlot(id, "dropped", {
+      action: "drop",
+      reason,
+      status: 403,
+    })
   }
 
   forwardAllPending(): number {
-    const ids = [...this.pending.keys()]
     let count = 0
-    for (const id of ids) {
+    for (const id of this.pending.keys()) {
       if (this.forwardItem(id)) count += 1
     }
     return count
   }
 
-  dropAllPending(reason = "Dropped all pending items"): number {
-    const ids = [...this.pending.keys()]
+  dropAllPending(reason = "Dropped all held items"): number {
     let count = 0
-    for (const id of ids) {
+    for (const id of this.pending.keys()) {
       if (this.dropItem(id, reason)) count += 1
     }
     return count
   }
 
   clearRecent(): void {
-    this.recent.length = 0
+    for (const entry of this.recent.splice(0)) {
+      releaseDebugCaptureMemory(entry.reservedBytes)
+    }
     this.emit({ type: "snapshot", snapshot: this.getSnapshot() })
   }
 
@@ -478,12 +574,11 @@ export class InterceptEngine {
     return enabled && (autopilot === "both" || autopilot === phase)
   }
 
-  private maybeAutoRunAssistant(item: InterceptPendingItem): void {
+  private maybeAutoRunAssistant(slot: PendingSlot): void {
     const cfg = this.config.assistant
-    const autopilot = this.autopilotCovers(item.phase)
-    if (!cfg.enabled || (!cfg.autoRun && !autopilot) || !cfg.model.trim()) {
-      return
-    }
+    const { item } = slot
+    if (!cfg.enabled || !cfg.model.trim() || !item.canonical.editable) return
+    if (!cfg.autoRun && !slot.autopilotEligible) return
     if (!resolveAssistantInstruction(cfg, item.phase)) return
     void this.triggerAssistant(item.id).then(() => {
       this.completeAutopilot(item.id)
@@ -491,291 +586,300 @@ export class InterceptEngine {
   }
 
   /**
-   * Apply every proposed change and forward. A failed run, or Autopilot being
-   * switched off while the assistant ran, leaves the item held for review.
+   * Apply every proposed change and forward. The item stays held when it was
+   * not eligible when held, Autopilot was switched off, the assistant failed,
+   * or its changes cannot be written back.
    */
   private completeAutopilot(id: string): void {
     const slot = this.pending.get(id)
-    const suggestion = slot?.item.assistantSuggestion
     if (
-      !slot
-      || !suggestion
+      !slot?.autopilotEligible
       || slot.item.assistantStatus !== "ready"
       || !this.autopilotCovers(slot.item.phase)
     ) {
       return
     }
-    if (suggestion.operations.length > 0) {
-      this.applyAssistantDiff(id, suggestion.operations)
+    try {
+      this.applyAssistantDiff(id)
+    } catch (error) {
+      slot.item.assistantStatus = "error"
+      slot.item.assistantError =
+        error instanceof Error ? error.message : String(error)
+      this.emit({ type: "updated", item: summarizeItem(slot.item) })
+      return
     }
     slot.item.autopilot = true
     this.forwardItem(id)
   }
 
+  private resolveOnTimeout(id: string): void {
+    const slot = this.pending.get(id)
+    if (!slot) return
+    if (this.config.timeoutAction === "drop") {
+      this.finalizeSlot(id, "timed_out", {
+        action: "drop",
+        reason: `no decision within ${this.config.timeoutSeconds}s`,
+        status: 504,
+      })
+      return
+    }
+    this.finalizeSlot(id, "timed_out", {
+      action: "forward",
+      body: slot.item.currentBody,
+    })
+  }
+
   private enqueueItem(
     item: InterceptPendingItem,
+    reservedBytes: number,
     signal?: AbortSignal | null,
   ): Promise<PendingResolution> {
-    return new Promise<PendingResolution>((resolve) => {
-      const timeoutMs = this.config.timeoutSeconds * 1000
-      const timer = setTimeout(() => {
-        if (this.config.timeoutAction === "drop") {
-          this.finalizeSlot(item.id, "timed_out", {
-            action: "drop",
-            reason: `Intercept timed out after ${this.config.timeoutSeconds}s`,
-          })
-        } else {
-          this.finalizeSlot(item.id, "timed_out", {
-            action: "forward",
-            body: item.currentBody,
-            headers: item.headers,
-            modified: item.currentBody !== item.originalBody,
-          })
-        }
-      }, timeoutMs)
+    const { promise, resolve } = Promise.withResolvers<PendingResolution>()
+    if (signal?.aborted) {
+      releaseDebugCaptureMemory(reservedBytes)
+      resolve({ action: "drop", reason: "client disconnected", status: 499 })
+      return promise
+    }
 
-      let cleanupAbort: (() => void) | undefined
-      if (signal) {
-        const onAbort = () => {
-          this.finalizeSlot(item.id, "aborted", {
-            action: "drop",
-            reason: "Client aborted connection while held in intercept queue",
-          })
-        }
-        if (signal.aborted) {
-          clearTimeout(timer)
-          resolve({
-            action: "drop",
-            reason: "Client aborted connection",
-          })
-          return
-        }
-        signal.addEventListener("abort", onAbort, { once: true })
-        cleanupAbort = () => signal.removeEventListener("abort", onAbort)
-      }
+    // Operator-configured hold deadline for Intercept, not an upstream timeout.
+    const holdMs = this.config.timeoutSeconds * 1000
+    const timer = setTimeout(() => this.resolveOnTimeout(item.id), holdMs)
+    const onAbort = () => {
+      this.finalizeSlot(item.id, "aborted", {
+        action: "drop",
+        reason: "client disconnected",
+        status: 499,
+      })
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
 
-      this.pending.set(item.id, { item, resolve, timer, cleanupAbort })
-      this.emit({ type: "queued", item: summarizeItem(item) })
-      this.maybeAutoRunAssistant(item)
-    })
+    const slot: PendingSlot = {
+      item,
+      resolve,
+      timer,
+      reservedBytes,
+      autopilotEligible: this.autopilotCovers(item.phase),
+      cleanupAbort: () => signal?.removeEventListener("abort", onAbort),
+    }
+    this.pending.set(item.id, slot)
+    this.emit({ type: "queued", item: summarizeItem(item) })
+    this.maybeAutoRunAssistant(slot)
+    return promise
   }
 
   async interceptRequest(
     input: InterceptRequestInput,
   ): Promise<InterceptRequestOutcome> {
-    const model = extractModelFromBody(input.body)
-    const sessionId = getClientSessionId()
-    const requestSnapshot: InterceptRequestOutcome["requestSnapshot"] = {
+    const requestSnapshot: InterceptRequestSnapshot = {
       method: input.method,
       path: input.path,
-      model,
       body: input.body,
       headers: { ...input.headers },
-      sessionId,
+    }
+    if (isInterceptBypassed() || !this.config.enabled) {
+      return { body: input.body, modified: false, requestSnapshot }
     }
 
-    if (isInterceptBypassed()) {
-      return {
-        action: "forward",
-        body: input.body,
-        headers: input.headers,
-        modified: false,
-        requestSnapshot,
-      }
-    }
-
+    requestSnapshot.model = extractModelFromBody(input.body)
+    requestSnapshot.sessionId = getClientSessionId()
+    const unchanged = { body: input.body, modified: false, requestSnapshot }
     const matches = shouldIntercept(this.config, {
       phase: "request",
       path: input.path,
       upstream: input.upstream,
       providerId: input.providerId,
-      model,
-      sessionId,
+      model: requestSnapshot.model,
+      sessionId: requestSnapshot.sessionId,
       headers: input.headers,
       requestBody: input.body,
     })
+    if (!matches) return unchanged
 
-    if (!matches) {
-      return {
-        action: "forward",
-        body: input.body,
-        headers: input.headers,
-        modified: false,
-        requestSnapshot,
-      }
+    const reservedBytes =
+      Buffer.byteLength(input.body, "utf8") * HELD_BODY_COPIES
+    if (!reserveDebugCaptureMemory(reservedBytes)) {
+      warnCaptureBudget(input.path)
+      return unchanged
     }
 
-    const now = Date.now()
     const canonical = parseCanonicalView({
       path: input.path,
       phase: "request",
       body: input.body,
     })
-
-    const item: InterceptPendingItem = {
-      id: randomUUID(),
+    const item = this.createItem({
       phase: "request",
-      status: "pending",
-      createdAt: new Date(now).toISOString(),
-      createdAtMs: now,
-      expiresAtMs: now + this.config.timeoutSeconds * 1000,
-      modified: false,
-      method: input.method,
-      path: input.path,
-      url: input.url,
-      upstream: input.upstream,
-      providerId: input.providerId,
-      model: model ?? canonical.model,
-      sessionId,
-      requestId: getRequestId(),
-      stream: canonical.stream,
-      headers: { ...input.headers },
-      originalBody: input.body,
-      currentBody: input.body,
+      input,
+      headers: input.headers,
+      body: input.body,
+      model: requestSnapshot.model ?? canonical.model,
+      sessionId: requestSnapshot.sessionId,
       canonical,
-      assistantStatus: "idle",
-    }
+    })
 
     consola.info(
       `[Intercept] Holding REQUEST ${item.id.slice(0, 8)} ${input.method} ${input.path} (model=${item.model ?? "unknown"})`,
     )
 
-    const resolution = await this.enqueueItem(item, input.signal)
+    const resolution = await this.enqueueItem(item, reservedBytes, input.signal)
     if (resolution.action === "drop") {
-      const dropped = createDroppedResponse(resolution.reason)
+      const body = dropBody(resolution)
       throw new LocalHTTPError(
-        resolution.reason,
-        dropped.response,
-        dropped.body,
+        body.error.message,
+        Response.json(body, { status: resolution.status }),
+        body,
       )
     }
 
-    const updatedSnapshot = {
-      ...requestSnapshot,
-      body: resolution.body,
-      headers: resolution.headers,
-      model: extractModelFromBody(resolution.body) ?? model,
-    }
-
     return {
-      action: "forward",
       body: resolution.body,
-      headers: resolution.headers,
-      modified: resolution.modified,
-      requestSnapshot: updatedSnapshot,
+      modified: resolution.body !== input.body,
+      requestSnapshot: {
+        ...requestSnapshot,
+        body: resolution.body,
+        model: extractModelFromBody(resolution.body) ?? requestSnapshot.model,
+      },
     }
   }
 
+  /**
+   * Returns the original response object unless the operator edited or
+   * dropped it, so unheld and unchanged responses keep their identity, bytes,
+   * and streaming.
+   */
   async interceptResponse(input: InterceptResponseInput): Promise<Response> {
     if (isInterceptBypassed()) return input.response
-    if (!this.config.enabled) return input.response
-    if (this.config.direction === "request") return input.response
-
-    const responseHeaders = Object.fromEntries(input.response.headers.entries())
     const contentType = input.response.headers.get("content-type") ?? undefined
+    if (contentType && !TEXT_CONTENT_TYPE.test(contentType)) {
+      return input.response
+    }
 
-    // Buffer full body (including SSE) so we can inspect, filter on responseBody, and edit
-    const rawBody = await input.response.text()
-
-    const matches = shouldIntercept(this.config, {
-      phase: "response",
+    const snapshot = input.requestSnapshot
+    const responseHeaders = Object.fromEntries(input.response.headers.entries())
+    const context = {
+      phase: "response" as const,
       path: input.path,
       upstream: input.upstream,
       providerId: input.providerId,
-      model: input.requestSnapshot.model ?? extractModelFromBody(rawBody),
-      sessionId: input.requestSnapshot.sessionId,
+      model: snapshot.model,
+      sessionId: snapshot.sessionId,
       headers: responseHeaders,
-      requestBody: input.requestSnapshot.body,
-      responseBody: rawBody,
-    })
+      requestBody: snapshot.body,
+    }
+    if (!responseMayMatch(this.config, context)) return input.response
 
-    if (!matches) {
-      return rebuildResponse(input.response, rawBody, responseHeaders)
+    const copy = await readResponseCopy(input.response, input.path)
+    if (!copy) return input.response
+    if (
+      !shouldIntercept(this.config, { ...context, responseBody: copy.text })
+    ) {
+      releaseDebugCaptureMemory(copy.reservedBytes)
+      return input.response
     }
 
-    const now = Date.now()
     const canonical = parseCanonicalView({
       path: input.path,
       phase: "response",
-      body: rawBody,
+      body: copy.text,
       contentType,
     })
-    const reqCanonical = parseCanonicalView({
-      path: input.requestSnapshot.path,
-      phase: "request",
-      body: input.requestSnapshot.body,
-    })
-
-    const item: InterceptPendingItem = {
-      id: randomUUID(),
+    const item = this.createItem({
       phase: "response",
-      status: "pending",
-      createdAt: new Date(now).toISOString(),
-      createdAtMs: now,
-      expiresAtMs: now + this.config.timeoutSeconds * 1000,
-      modified: false,
-      method: input.method,
-      path: input.path,
-      url: input.url,
-      upstream: input.upstream,
-      providerId: input.providerId,
-      model: input.requestSnapshot.model ?? canonical.model,
-      sessionId: input.requestSnapshot.sessionId,
-      requestId: getRequestId(),
-      stream: canonical.stream,
-      responseStatus: input.response.status,
-      responseStatusText: input.response.statusText,
-      responseContentType: contentType,
+      input,
       headers: responseHeaders,
-      originalBody: rawBody,
-      currentBody: rawBody,
-      requestContext: {
-        method: input.requestSnapshot.method,
-        path: input.requestSnapshot.path,
-        model: input.requestSnapshot.model,
-        body: input.requestSnapshot.body,
-        canonical: reqCanonical,
-      },
+      body: copy.text,
+      model: snapshot.model ?? canonical.model,
+      sessionId: snapshot.sessionId,
       canonical,
-      assistantStatus: "idle",
+    })
+    item.responseStatus = input.response.status
+    item.responseStatusText = input.response.statusText
+    item.responseContentType = contentType
+    item.requestContext = {
+      method: snapshot.method,
+      path: snapshot.path,
+      model: snapshot.model,
+      body: snapshot.body,
+      canonical: parseCanonicalView({
+        path: snapshot.path,
+        phase: "request",
+        body: snapshot.body,
+      }),
     }
 
     consola.info(
       `[Intercept] Holding RESPONSE ${item.id.slice(0, 8)} ${input.response.status} ${input.path} (model=${item.model ?? "unknown"})`,
     )
 
-    const resolution = await this.enqueueItem(item, input.signal)
-    if (resolution.action === "drop") {
-      return createDroppedResponse(resolution.reason).response
+    const resolution = await this.enqueueItem(
+      item,
+      copy.reservedBytes,
+      input.signal,
+    )
+    if (resolution.action === "forward" && resolution.body === copy.text) {
+      return input.response
     }
+    // The original body will not be delivered; release its upstream stream.
+    void input.response.body?.cancel().catch(() => undefined)
+    if (resolution.action === "drop") {
+      return Response.json(dropBody(resolution), { status: resolution.status })
+    }
+    const headers = new Headers(responseHeaders)
+    // The body changed length and is no longer the upstream encoding.
+    headers.delete("content-encoding")
+    headers.delete("content-length")
+    headers.delete("transfer-encoding")
+    return new Response(resolution.body, {
+      status: input.response.status,
+      statusText: input.response.statusText,
+      headers,
+    })
+  }
 
-    return rebuildResponse(input.response, resolution.body, resolution.headers)
+  private createItem(options: {
+    phase: InterceptPhase
+    input: InterceptRequestInput | InterceptResponseInput
+    headers: Record<string, string>
+    body: string
+    model?: string
+    sessionId?: string
+    canonical: InterceptPendingItem["canonical"]
+  }): InterceptPendingItem {
+    const now = Date.now()
+    const { input } = options
+    return {
+      id: randomUUID(),
+      phase: options.phase,
+      status: "pending",
+      createdAt: new Date(now).toISOString(),
+      createdAtMs: now,
+      expiresAtMs: now + this.config.timeoutSeconds * 1000,
+      modified: false,
+      revision: 0,
+      method: input.method,
+      path: input.path,
+      url: input.url,
+      upstream: input.upstream,
+      providerId: input.providerId,
+      model: options.model,
+      sessionId: options.sessionId,
+      requestId: getRequestId(),
+      stream: options.canonical.stream,
+      headers: redactHeaders(options.headers),
+      originalBody: options.body,
+      currentBody: options.body,
+      canonical: options.canonical,
+      assistantStatus: "idle",
+    }
   }
 
   /** Test helper to reset engine state between test cases. */
   resetForTest(): void {
     this.dropAllPending("Test reset")
-    this.recent.length = 0
+    this.clearRecent()
     this.config = cloneConfig(DEFAULT_INTERCEPT_CONFIG)
     this.stats = { forwardedCount: 0, droppedCount: 0, modifiedCount: 0 }
   }
-}
-
-function rebuildResponse(
-  original: Response,
-  body: string,
-  headersRecord: Record<string, string>,
-): Response {
-  const headers = new Headers(headersRecord)
-  // Body may have changed length or been decompressed during buffering
-  headers.delete("content-encoding")
-  headers.delete("content-length")
-  headers.delete("transfer-encoding")
-  return new Response(body, {
-    status: original.status,
-    statusText: original.statusText,
-    headers,
-  })
 }
 
 export const interceptEngine = new InterceptEngine()

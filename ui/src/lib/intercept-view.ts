@@ -3,9 +3,60 @@ import type { StatusDotProps } from "@astryxdesign/core/StatusDot"
 import { useEffect, useState } from "react"
 
 import type {
+  CanonicalItem,
   CanonicalItemKind,
   InterceptItemStatus,
 } from "../../../src/lib/intercept/types"
+
+import {
+  documentDiagnostic,
+  findJsonDocumentDiagnostic,
+  type JsonDocumentDiagnostic,
+} from "./json-document"
+
+interface DraftState {
+  /**
+   * `revision` of the server item this draft was written against. Structured
+   * IDs are positional, so a structured draft can only patch this revision.
+   */
+  baseRevision: number
+  /** Local edit counter; a save clears the draft only if no newer edit landed. */
+  edits: number
+  /** `edits` value of the save request in flight, if any. */
+  savingEdits?: number
+}
+
+/**
+ * Unsaved operator edits for one held item. Exactly one editor owns a draft:
+ * structured drafts live in Messages, raw drafts in Raw.
+ */
+export type InterceptDraft =
+  | (DraftState & { source: "structured"; items: Array<CanonicalItem> })
+  | (DraftState & { source: "raw"; body: string })
+
+export type InterceptDraftUpdate = (
+  prev: InterceptDraft | undefined,
+) => InterceptDraft | undefined
+
+/** Responses only need to be JSON; request-only rules (like `model`) do not apply. */
+export function responseJsonDiagnostic(
+  raw: string,
+): JsonDocumentDiagnostic | null {
+  const syntaxError = findJsonDocumentDiagnostic(raw)
+  if (syntaxError) return syntaxError
+  try {
+    JSON.parse(raw)
+    return null
+  } catch {
+    return documentDiagnostic({
+      from: 0,
+      kind: "syntax",
+      message: "Invalid JSON.",
+      raw,
+      to: raw.length,
+    })
+  }
+}
 
 export function fmtBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`

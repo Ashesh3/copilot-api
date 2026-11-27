@@ -3,11 +3,15 @@ import type { Context } from "hono"
 import { streamSSE } from "hono/streaming"
 import { z } from "zod"
 
-import { getCustomProviderModels } from "~/lib/custom-providers"
-import { interceptEngine } from "~/lib/intercept/engine"
+import { authenticateAdminRequest } from "~/lib/admin-auth"
+import {
+  AssistantDiffError,
+  assistantDiffOpsSchema,
+  listAssistantModels,
+} from "~/lib/intercept/assistant"
+import { CanonicalEditError } from "~/lib/intercept/canonical"
+import { interceptEngine, StaleRevisionError } from "~/lib/intercept/engine"
 import { validateFilterRegex } from "~/lib/intercept/filters"
-import { state } from "~/lib/state"
-import { tokenPool } from "~/lib/token-pool"
 
 const filterConditionSchema = z.object({
   id: z.string().max(128).optional().default(""),
@@ -82,157 +86,148 @@ const canonicalItemSchema = z.object({
   opaque: z.boolean().optional(),
 })
 
-const editItemSchema = z.object({
-  body: z.string().optional(),
-  canonicalItems: z.array(canonicalItemSchema).optional(),
-  headers: z.record(z.string(), z.string()).optional(),
+// Structured item IDs are positional, so a structured edit may only patch the
+// revision it was parsed from. A raw body is an explicit full replacement.
+const editItemSchema = z
+  .object({
+    body: z.string().optional(),
+    canonicalItems: z.array(canonicalItemSchema).optional(),
+    baseRevision: z.number().int().min(0).optional(),
+  })
+  .refine((edit) => (edit.body === undefined) !== !edit.canonicalItems, {
+    message: "Send either body or canonicalItems",
+  })
+  .refine((edit) => !edit.canonicalItems || edit.baseRevision !== undefined, {
+    message: "canonicalItems needs the baseRevision it was edited from",
+  })
+
+const dropSchema = z.object({ reason: z.string().max(500).optional() })
+
+const triggerAssistantSchema = z.object({
+  instruction: z.string().max(16000).optional(),
+  model: z.string().max(256).optional(),
 })
 
-const assistantOpSchema = z.discriminatedUnion("op", [
-  z.object({
-    op: z.literal("replace"),
-    id: z.string(),
-    content: z.string().optional(),
-    toolName: z.string().optional(),
-    toolArguments: z.string().optional(),
-    reason: z.string().optional(),
-  }),
-  z.object({
-    op: z.literal("delete"),
-    id: z.string(),
-    reason: z.string().optional(),
-  }),
-  z.object({
-    op: z.literal("insert_after"),
-    afterId: z.string().nullable(),
-    kind: z.enum([
-      "system",
-      "developer",
-      "user",
-      "assistant",
-      "tool_call",
-      "tool_result",
-      "thinking",
-    ]),
-    content: z.string(),
-    toolName: z.string().optional(),
-    toolCallId: z.string().optional(),
-    toolArguments: z.string().optional(),
-    reason: z.string().optional(),
-  }),
-])
+const applyAssistantSchema = z.object({
+  operations: assistantDiffOpsSchema.optional(),
+})
 
-function collectAvailableModels(): Array<string> {
-  const models = new Set<string>()
-  for (const m of state.models?.data ?? []) {
-    if (m.id) models.add(m.id)
+type ParsedBody<T> = { ok: true; value: T } | { ok: false; error: string }
+
+function firstIssue(error: z.ZodError, fallback: string): string {
+  return error.issues[0]?.message ?? fallback
+}
+
+/**
+ * Parse a JSON body against `schema`. An empty body is `undefined`; malformed
+ * JSON or a schema mismatch is an error, never treated as an absent body.
+ */
+async function readJsonBody<T>(
+  c: Context,
+  schema: z.ZodType<T>,
+  options: { optional: boolean },
+): Promise<ParsedBody<T | undefined>> {
+  const text = await c.req.text()
+  if (!text.trim()) {
+    return options.optional ?
+        { ok: true, value: undefined }
+      : { ok: false, error: "A JSON body is required" }
   }
-  for (const m of tokenPool.getAllModels().data) {
-    if (m.id) models.add(m.id)
-  }
+  let raw: unknown
   try {
-    for (const m of getCustomProviderModels()) {
-      if (m.kind === "chat" && m.id) models.add(m.id)
-    }
+    raw = JSON.parse(text)
   } catch {
-    // Storage may not be initialized in unit tests
+    return { ok: false, error: "The body is not valid JSON" }
   }
-  return [...models].sort((a, b) => a.localeCompare(b))
+  const parsed = schema.safeParse(raw)
+  return parsed.success ?
+      { ok: true, value: parsed.data }
+    : { ok: false, error: firstIssue(parsed.error, "Invalid request body") }
+}
+
+/** 409: the item changed underneath. 422: the edit cannot be written back. */
+function editFailure(c: Context, error: unknown) {
+  if (error instanceof StaleRevisionError) {
+    return c.json({ error: error.message }, 409)
+  }
+  if (
+    error instanceof CanonicalEditError
+    || error instanceof AssistantDiffError
+  ) {
+    return c.json({ error: error.message }, 422)
+  }
+  throw error
+}
+
+function notHeld(c: Context) {
+  return c.json({ error: "Pending intercept item not found" }, 404)
 }
 
 export function handleGetInterceptState(c: Context) {
   return c.json({
     ...interceptEngine.getSnapshot(),
-    availableModels: collectAvailableModels(),
+    availableModels: listAssistantModels(),
   })
 }
 
 export async function handleUpdateInterceptConfig(c: Context) {
-  const raw: unknown = await c.req.json().catch(() => null)
-  const parsed = configPatchSchema.safeParse(raw)
-  if (!parsed.success) {
-    return c.json(
-      { error: parsed.error.issues[0]?.message ?? "Invalid intercept config" },
-      400,
-    )
-  }
+  const body = await readJsonBody(c, configPatchSchema, { optional: false })
+  if (!body.ok) return c.json({ error: body.error }, 400)
+  const patch = body.value ?? {}
 
-  if (parsed.data.filters) {
-    for (const cond of parsed.data.filters.conditions) {
-      if (cond.operator === "regex" && cond.value) {
-        const regexError = validateFilterRegex(cond.value)
-        if (regexError) {
-          return c.json(
-            { error: `Invalid regex "${cond.value}": ${regexError}` },
-            400,
-          )
-        }
-      }
+  for (const condition of patch.filters?.conditions ?? []) {
+    if (condition.operator !== "regex" || !condition.value) continue
+    const regexError = validateFilterRegex(condition.value)
+    if (regexError) {
+      return c.json(
+        { error: `Invalid regex "${condition.value}": ${regexError}` },
+        400,
+      )
     }
   }
 
-  const config = interceptEngine.updateConfig(parsed.data)
+  const config = interceptEngine.updateConfig(patch)
   return c.json({ config, snapshot: interceptEngine.getSnapshot() })
 }
 
 export function handleGetInterceptItem(c: Context) {
-  const id = c.req.param("id") ?? ""
-  const item = interceptEngine.getItem(id)
+  const item = interceptEngine.getItem(c.req.param("id") ?? "")
   if (!item) return c.json({ error: "Intercept item not found" }, 404)
   return c.json(item)
 }
 
 export async function handleEditInterceptItem(c: Context) {
-  const id = c.req.param("id") ?? ""
-  const raw: unknown = await c.req.json().catch(() => null)
-  const parsed = editItemSchema.safeParse(raw)
-  if (!parsed.success) {
-    return c.json(
-      { error: parsed.error.issues[0]?.message ?? "Invalid edit payload" },
-      400,
+  const body = await readJsonBody(c, editItemSchema, { optional: false })
+  if (!body.ok) return c.json({ error: body.error }, 400)
+  try {
+    const updated = interceptEngine.editPendingItem(
+      c.req.param("id") ?? "",
+      body.value ?? {},
     )
+    return updated ? c.json(updated) : notHeld(c)
+  } catch (error) {
+    return editFailure(c, error)
   }
-  const updated = interceptEngine.editPendingItem(id, parsed.data)
-  if (!updated) {
-    return c.json({ error: "Pending intercept item not found" }, 404)
-  }
-  return c.json(updated)
 }
 
 export async function handleForwardInterceptItem(c: Context) {
   const id = c.req.param("id") ?? ""
-  const raw: unknown = await c.req.json().catch(() => undefined)
-  let override: z.infer<typeof editItemSchema> | undefined
-  if (raw !== undefined && raw !== null) {
-    const parsed = editItemSchema.safeParse(raw)
-    if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid forward payload" },
-        400,
-      )
-    }
-    override = parsed.data
+  const body = await readJsonBody(c, editItemSchema, { optional: true })
+  if (!body.ok) return c.json({ error: body.error }, 400)
+  try {
+    if (!interceptEngine.forwardItem(id, body.value)) return notHeld(c)
+  } catch (error) {
+    return editFailure(c, error)
   }
-  const ok = interceptEngine.forwardItem(id, override)
-  if (!ok) return c.json({ error: "Pending intercept item not found" }, 404)
   return c.json({ ok: true, id })
 }
 
 export async function handleDropInterceptItem(c: Context) {
   const id = c.req.param("id") ?? ""
-  const raw: unknown = await c.req.json().catch(() => undefined)
-  const reason =
-    (
-      raw
-      && typeof raw === "object"
-      && "reason" in raw
-      && typeof raw.reason === "string"
-      && raw.reason.trim()
-    ) ?
-      raw.reason.trim()
-    : undefined
-  const ok = interceptEngine.dropItem(id, reason)
-  if (!ok) return c.json({ error: "Pending intercept item not found" }, 404)
+  const body = await readJsonBody(c, dropSchema, { optional: true })
+  if (!body.ok) return c.json({ error: body.error }, 400)
+  const reason = body.value?.reason?.trim() || undefined
+  if (!interceptEngine.dropItem(id, reason)) return notHeld(c)
   return c.json({ ok: true, id })
 }
 
@@ -252,103 +247,111 @@ export function handleClearInterceptRecent(c: Context) {
 }
 
 export async function handleTriggerInterceptAssistant(c: Context) {
-  const id = c.req.param("id") ?? ""
-  const raw: unknown = await c.req.json().catch(() => undefined)
-  const instruction =
-    (
-      raw
-      && typeof raw === "object"
-      && "instruction" in raw
-      && typeof raw.instruction === "string"
-    ) ?
-      raw.instruction
-    : undefined
-  const model =
-    (
-      raw
-      && typeof raw === "object"
-      && "model" in raw
-      && typeof raw.model === "string"
-    ) ?
-      raw.model
-    : undefined
-
-  const updated = await interceptEngine.triggerAssistant(id, {
-    instruction,
-    model,
+  const body = await readJsonBody(c, triggerAssistantSchema, {
+    optional: true,
   })
-  if (!updated) {
-    return c.json({ error: "Pending intercept item not found" }, 404)
-  }
-  return c.json(updated)
+  if (!body.ok) return c.json({ error: body.error }, 400)
+  const updated = await interceptEngine.triggerAssistant(
+    c.req.param("id") ?? "",
+    body.value,
+  )
+  return updated ? c.json(updated) : notHeld(c)
 }
 
 export async function handleApplyInterceptAssistant(c: Context) {
-  const id = c.req.param("id") ?? ""
-  const raw: unknown = await c.req.json().catch(() => undefined)
-  let operations: Array<z.infer<typeof assistantOpSchema>> | undefined
-  if (
-    raw
-    && typeof raw === "object"
-    && "operations" in raw
-    && Array.isArray(raw.operations)
-  ) {
-    const parsed = z.array(assistantOpSchema).safeParse(raw.operations)
-    if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues[0]?.message ?? "Invalid operations" },
-        400,
-      )
-    }
-    operations = parsed.data
+  const body = await readJsonBody(c, applyAssistantSchema, { optional: true })
+  if (!body.ok) return c.json({ error: body.error }, 400)
+  try {
+    const updated = interceptEngine.applyAssistantDiff(
+      c.req.param("id") ?? "",
+      body.value?.operations,
+    )
+    return updated ? c.json(updated) : notHeld(c)
+  } catch (error) {
+    return editFailure(c, error)
   }
-
-  const updated = interceptEngine.applyAssistantDiff(id, operations)
-  if (!updated) {
-    return c.json({ error: "Pending intercept item not found" }, 404)
-  }
-  return c.json(updated)
 }
 
 export function handleRejectInterceptAssistant(c: Context) {
-  const id = c.req.param("id") ?? ""
-  const updated = interceptEngine.rejectAssistantSuggestion(id)
-  if (!updated) {
-    return c.json({ error: "Pending intercept item not found" }, 404)
-  }
-  return c.json(updated)
+  const updated = interceptEngine.rejectAssistantSuggestion(
+    c.req.param("id") ?? "",
+  )
+  return updated ? c.json(updated) : notHeld(c)
 }
+
+const HEARTBEAT_MS = 15_000
+/** Events are delivered only while the admin session that opened the stream is valid. */
+const SESSION_RECHECK_MS = 5_000
+/** A client this far behind reconnects and starts again from a snapshot. */
+const MAX_QUEUED_EVENTS = 500
 
 export function handleInterceptEvents(c: Context) {
   c.header("Cache-Control", "no-store")
   return streamSSE(c, async (stream) => {
-    await stream.writeSSE({
-      event: "snapshot",
-      data: JSON.stringify(interceptEngine.getSnapshot()),
-    })
-
+    const { promise: finished, resolve: finish } = Promise.withResolvers<null>()
     let closed = false
-    const unsubscribe = interceptEngine.subscribe((event) => {
-      if (closed) return
-      void stream.writeSSE({
-        event: event.type,
-        data: JSON.stringify(event),
-      })
-    })
+    let queued = 0
+    let delivery = Promise.resolve()
+    let verifiedAt = Date.now()
 
-    const heartbeat = setInterval(() => {
+    const close = () => {
       if (closed) return
-      void stream.writeSSE({ event: "ping", data: String(Date.now()) })
-    }, 15_000)
-
-    const { promise, resolve } = Promise.withResolvers<null>()
-    stream.onAbort(() => {
       closed = true
       clearInterval(heartbeat)
       unsubscribe()
-      resolve(null)
-    })
+      finish(null)
+    }
 
-    await promise
+    const markVerified = () => {
+      verifiedAt = Date.now()
+    }
+
+    // Delivery stops for good once the session that opened the stream is
+    // logged out, expires, or is replaced by a password change.
+    const sessionValid = async () => {
+      if (Date.now() - verifiedAt < SESSION_RECHECK_MS) return true
+      if (!(await authenticateAdminRequest(c.req.raw))) return false
+      markVerified()
+      return true
+    }
+
+    const deliver = async (message: { event: string; data: string }) => {
+      if (closed) return
+      if (!(await sessionValid())) {
+        close()
+        return
+      }
+      await stream.writeSSE(message)
+    }
+
+    // Writes run one at a time and in order.
+    const send = (event: string, data: string) => {
+      if (closed) return
+      if (queued >= MAX_QUEUED_EVENTS) {
+        close()
+        return
+      }
+      queued += 1
+      delivery = delivery
+        .then(() => deliver({ event, data }))
+        .catch(close)
+        .finally(() => {
+          queued -= 1
+        })
+    }
+
+    // Cleanup is registered and the snapshot queued in the same tick as the
+    // subscription, so no event is lost and an early disconnect is seen.
+    stream.onAbort(close)
+    const unsubscribe = interceptEngine.subscribe((event) => {
+      send(event.type, JSON.stringify(event))
+    })
+    const heartbeat = setInterval(() => {
+      send("ping", String(Date.now()))
+    }, HEARTBEAT_MS)
+    send("snapshot", JSON.stringify(interceptEngine.getSnapshot()))
+    if (stream.aborted) close()
+
+    await finished
   })
 }

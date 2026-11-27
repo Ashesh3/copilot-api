@@ -120,7 +120,7 @@ const REDACTED_DEBUG_HEADERS = new Set([
   "x-client-session-id",
 ])
 
-function shouldRedactDebugHeader(name: string): boolean {
+export function shouldRedactDebugHeader(name: string): boolean {
   const normalized = name.toLowerCase()
   return (
     REDACTED_DEBUG_HEADERS.has(normalized)
