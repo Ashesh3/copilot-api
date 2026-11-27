@@ -15,12 +15,14 @@ import type { ModelsResponse } from "../src/services/copilot/get-models"
 
 import { setReplacementsForTest } from "../src/lib/auto-replace"
 import { setConfigForTest } from "../src/lib/config"
+import { setCustomProviderRetrySleepForTest } from "../src/lib/custom-provider-retry"
 import {
   createCustomProviderChatCompletions,
   createCustomProviderEmbeddings,
   resolveCustomProviderModel,
 } from "../src/lib/custom-providers"
 import { HTTPError } from "../src/lib/error"
+import { interceptEngine } from "../src/lib/intercept/engine"
 import {
   clearLlmDebugLogs,
   getLlmDebugLog,
@@ -2280,6 +2282,56 @@ test("preserves a custom-provider 402 in an Anthropic stream error event", async
       type: "api_error",
     },
   })
+})
+
+test("Intercept holds a custom provider request once and its retry resends the approved body", async () => {
+  setCustomProviderRetrySleepForTest(() => Promise.resolve())
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  const queued = Promise.withResolvers<string>()
+  const unsubscribe = interceptEngine.subscribe((event) => {
+    if (event.type === "queued") queued.resolve(event.item.id)
+  })
+  fetchMock.mockImplementationOnce((url: string, init?: RequestInit) => {
+    const body =
+      typeof init?.body === "string" ?
+        (JSON.parse(init.body) as Record<string, unknown>)
+      : {}
+    requests.push({ url, body, headers: new Headers(init?.headers) })
+    return new Response("busy", {
+      status: 503,
+      headers: { "retry-after": "0" },
+    })
+  })
+  try {
+    const reference = resolveCustomProviderModel({
+      model: "z-ai/glm-5.3-free",
+      kind: "chat",
+    })
+    if (!reference) throw new Error("ZenMux test provider was not resolved")
+
+    const pending = createCustomProviderChatCompletions(reference, {
+      model: "z-ai/glm-5.3-free",
+      messages: [{ role: "user", content: "original" }],
+    })
+    const id = await queued.promise
+    const held = interceptEngine.getItem(id)
+    if (!held) throw new Error("Request was not held")
+    expect(held.headers.Authorization).toBe("[REDACTED]")
+    interceptEngine.forwardItem(id, {
+      body: held.currentBody.replace("original", "approved"),
+    })
+    await pending
+
+    expect(requests.map(({ body }) => body.messages)).toEqual([
+      [{ role: "user", content: "approved" }],
+      [{ role: "user", content: "approved" }],
+    ])
+    expect(interceptEngine.getSnapshot().recent).toHaveLength(1)
+  } finally {
+    unsubscribe()
+    interceptEngine.resetForTest()
+    setCustomProviderRetrySleepForTest()
+  }
 })
 
 test.each([

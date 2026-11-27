@@ -1309,3 +1309,505 @@ body {
 .json-code-diagnostic.is-visible {
   color: var(--color-error);
 }
+
+/* ─── Page fill mode: header stays put, children own their scroll regions ── */
+
+.page-fill-body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ─── Intercept ─────────────────────────────────────────────────────────── */
+
+.intercept-views {
+  padding-inline: var(--spacing-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.intercept-banner {
+  padding: var(--spacing-3) var(--spacing-4) 0;
+}
+
+.intercept-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  padding: var(--spacing-4);
+}
+
+.intercept-mono {
+  font-family: var(--font-family-code);
+}
+
+.intercept-ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Workbench: queue rail | detail, each scrolling on its own */
+
+.intercept-workbench {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 0;
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+}
+
+.intercept-rail {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  border-inline-end: 1px solid var(--color-border);
+}
+
+.intercept-rail-head {
+  padding: var(--spacing-3) var(--spacing-3) var(--spacing-2);
+}
+
+.intercept-rail-list {
+  min-height: 0;
+  flex: 1 1 0;
+  overflow-y: auto;
+  padding: 0 var(--spacing-2) var(--spacing-2);
+}
+
+.intercept-rail-empty {
+  padding: var(--spacing-6) var(--spacing-3);
+  text-align: center;
+}
+
+.intercept-rail-foot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  padding: var(--spacing-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.intercept-stats {
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.intercept-stats strong {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.intercept-row-title {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.intercept-row-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--spacing-0-5);
+}
+
+.intercept-row-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-1) var(--spacing-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+}
+
+.intercept-row-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+}
+
+.intercept-row-preview {
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.intercept-row-time {
+  margin-inline-start: auto;
+  color: var(--color-text-secondary);
+  font-family: var(--font-family-code);
+  font-size: var(--text-supporting-size);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Detail pane */
+
+.intercept-detail {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.intercept-detail.is-empty {
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-6);
+}
+
+.intercept-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  padding: var(--spacing-3) var(--spacing-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.intercept-detail-title {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--spacing-1);
+}
+
+.intercept-detail-title-row {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.intercept-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1) var(--spacing-3);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+}
+
+.intercept-detail-meta code {
+  font-family: var(--font-family-code);
+}
+
+.intercept-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.intercept-detail-tabs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  padding-inline: var(--spacing-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.intercept-detail-body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  overflow-y: auto;
+  padding: var(--spacing-4);
+}
+
+.intercept-detail-body.is-fill {
+  overflow: hidden;
+}
+
+.intercept-detail-body.is-fill .json-code-editor,
+.intercept-detail-body.is-fill .code-document {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 0;
+}
+
+/* The tab already names the editor; keep the label for assistive tech only. */
+.intercept-detail-body .code-document-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Structured messages */
+
+.intercept-messages {
+  display: flex;
+  flex-direction: column;
+}
+
+.intercept-message {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  padding-block: var(--spacing-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.intercept-message:first-child {
+  padding-top: 0;
+}
+
+.intercept-message:last-child {
+  border-bottom: 0;
+}
+
+.intercept-message-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+}
+
+.intercept-message-id {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+}
+
+.intercept-message-id code {
+  font-family: var(--font-family-code);
+}
+
+.intercept-mono-field input,
+.intercept-mono-field textarea {
+  font-family: var(--font-family-code);
+}
+
+.intercept-message-text {
+  margin: 0;
+  color: var(--color-text-primary);
+  font: inherit;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.intercept-message-text.is-mono {
+  font-family: var(--font-family-code);
+  font-size: var(--text-supporting-size);
+}
+
+.intercept-messages-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-2);
+}
+
+/* AI suggestion review */
+
+.intercept-suggestion {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+}
+
+.intercept-suggestion-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+}
+
+.intercept-ops {
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  list-style: none;
+}
+
+.intercept-op {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  padding: var(--spacing-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.intercept-op:last-child {
+  border-bottom: 0;
+}
+
+.intercept-op-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.intercept-op-head code {
+  font-family: var(--font-family-code);
+  font-size: var(--text-supporting-size);
+}
+
+.intercept-op-reason {
+  margin-inline-start: auto;
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+}
+
+.intercept-diff {
+  display: grid;
+  gap: var(--spacing-2);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.intercept-diff.is-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.intercept-diff-side {
+  min-width: 0;
+  padding: var(--spacing-2) var(--spacing-3);
+  border-radius: var(--radius-inner);
+}
+
+.intercept-diff-side.is-before {
+  background: color-mix(in srgb, var(--color-error) 9%, transparent);
+}
+
+.intercept-diff-side.is-after {
+  background: color-mix(in srgb, var(--color-success) 9%, transparent);
+}
+
+.intercept-diff-label {
+  margin-bottom: var(--spacing-1);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+}
+
+.intercept-diff-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1) var(--spacing-3);
+  margin-bottom: var(--spacing-1);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+}
+
+.intercept-diff-facts code {
+  color: var(--color-text-primary);
+  font-family: var(--font-family-code);
+}
+
+.intercept-diff-side pre {
+  margin: 0;
+  font-family: var(--font-family-code);
+  font-size: var(--text-supporting-size);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* Rules / AI Assist settings views */
+
+.intercept-settings {
+  min-height: 0;
+  flex: 1 1 0;
+  overflow-y: auto;
+  padding: var(--spacing-4);
+}
+
+.intercept-settings-inner {
+  display: flex;
+  max-width: 960px;
+  flex-direction: column;
+  gap: var(--spacing-4);
+}
+
+.intercept-settings-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+}
+
+.intercept-autopilot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  padding-top: var(--spacing-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.intercept-field-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-1);
+}
+
+.intercept-hold-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--spacing-4) var(--spacing-6);
+}
+
+.intercept-filter-row {
+  display: grid;
+  align-items: center;
+  gap: var(--spacing-2);
+  grid-template-columns:
+    auto minmax(150px, 180px) minmax(130px, 160px)
+    minmax(0, 1fr) auto;
+}
+
+.intercept-filter-row.has-header {
+  grid-template-columns:
+    auto minmax(150px, 180px) minmax(120px, 160px)
+    minmax(130px, 160px) minmax(0, 1fr) auto;
+}
+
+.intercept-assistant-grid {
+  display: grid;
+  align-items: start;
+  gap: var(--spacing-3) var(--spacing-4);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 900px) {
+  .intercept-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(160px, 38%) minmax(0, 1fr);
+  }
+
+  .intercept-rail {
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .intercept-diff,
+  .intercept-assistant-grid,
+  .intercept-filter-row,
+  .intercept-filter-row.has-header {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

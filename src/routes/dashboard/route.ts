@@ -68,6 +68,21 @@ import {
 import { handleExportDatabase } from "./database-export"
 import { handleGetFallbacks, handleSetFallbacks } from "./fallbacks"
 import { handleSetImageRouting } from "./image-routing-settings"
+import {
+  handleApplyInterceptAssistant,
+  handleClearInterceptRecent,
+  handleDropAllIntercept,
+  handleDropInterceptItem,
+  handleEditInterceptItem,
+  handleForwardAllIntercept,
+  handleForwardInterceptItem,
+  handleGetInterceptItem,
+  handleGetInterceptState,
+  handleInterceptEvents,
+  handleRejectInterceptAssistant,
+  handleTriggerInterceptAssistant,
+  handleUpdateInterceptConfig,
+} from "./intercept"
 import { handleReplayLlmDebugLog } from "./llm-debug-replay"
 import {
   handleDeleteModelSettings,
@@ -90,7 +105,7 @@ dashboardRoutes.get("/", (c) => {
 dashboardRoutes.route("/auth", dashboardAuthRoutes)
 
 dashboardRoutes.use("/api/*", async (c, next) => {
-  if (/\/api\/llm-debug(?:\/|$)/.test(c.req.path))
+  if (/\/api\/(?:llm-debug|intercept)(?:\/|$)/.test(c.req.path))
     c.header("Cache-Control", "no-store")
   const mutating = !["GET", "HEAD", "OPTIONS"].includes(c.req.method)
   const session = await authenticateAdminRequest(c.req.raw, {
@@ -230,6 +245,33 @@ dashboardRoutes.get("/api/llm-debug", handleListLlmDebugLogs)
 dashboardRoutes.post("/api/llm-debug/:id/replay", handleReplayLlmDebugLog)
 dashboardRoutes.get("/api/llm-debug/:id", handleGetLlmDebugLog)
 dashboardRoutes.delete("/api/llm-debug", handleClearLlmDebugLogs)
+
+// Traffic Intercept
+dashboardRoutes.get("/api/intercept", handleGetInterceptState)
+dashboardRoutes.put("/api/intercept/config", handleUpdateInterceptConfig)
+dashboardRoutes.get("/api/intercept/events", handleInterceptEvents)
+dashboardRoutes.post("/api/intercept/forward-all", handleForwardAllIntercept)
+dashboardRoutes.post("/api/intercept/drop-all", handleDropAllIntercept)
+dashboardRoutes.delete("/api/intercept/recent", handleClearInterceptRecent)
+dashboardRoutes.get("/api/intercept/items/:id", handleGetInterceptItem)
+dashboardRoutes.put("/api/intercept/items/:id", handleEditInterceptItem)
+dashboardRoutes.post(
+  "/api/intercept/items/:id/forward",
+  handleForwardInterceptItem,
+)
+dashboardRoutes.post("/api/intercept/items/:id/drop", handleDropInterceptItem)
+dashboardRoutes.post(
+  "/api/intercept/items/:id/assistant",
+  handleTriggerInterceptAssistant,
+)
+dashboardRoutes.post(
+  "/api/intercept/items/:id/assistant/apply",
+  handleApplyInterceptAssistant,
+)
+dashboardRoutes.post(
+  "/api/intercept/items/:id/assistant/reject",
+  handleRejectInterceptAssistant,
+)
 
 // Settings
 dashboardRoutes.get("/api/settings", handleGetSettings)

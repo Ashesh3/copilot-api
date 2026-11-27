@@ -1,17 +1,9 @@
 import { Hono } from "hono"
 import { randomUUID } from "node:crypto"
 
-import { runWithCopilotContractObservabilityScope } from "~/lib/copilot-contract-observability"
-import {
-  type CopilotRequestAttribution,
-  resolveCopilotRequestAttribution,
-  runWithCopilotRequestAttribution,
-} from "~/lib/copilot-request-context"
-import {
-  type RoutingAffinity,
-  resolveRoutingAffinityFromHeaders,
-  runWithRoutingAffinity,
-} from "~/lib/routing-affinity"
+import { resolveCopilotRequestAttribution } from "~/lib/copilot-request-context"
+import { runWithRequestRoutingScopes } from "~/lib/request-scopes"
+import { resolveRoutingAffinityFromHeaders } from "~/lib/routing-affinity"
 import { webToolsMiddleware } from "~/services/web/middleware"
 
 import { authenticateAdminRequest } from "./lib/admin-auth"
@@ -26,12 +18,9 @@ import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
 import {
   createRoutingTelemetryRequestState,
-  copilotResponseHeadersStorage,
   getCopilotResponseHeaders,
   requestIdStorage,
-  routedAccountStorage,
   routingTelemetryStorage,
-  runWithRequestDiagnostics,
 } from "./lib/request-session"
 import { storageAdmission } from "./lib/storage/admission"
 import { transparentProxy } from "./lib/transparent-proxy"
@@ -110,29 +99,6 @@ function applySecurityHeaders(c: {
   c.header("Cross-Origin-Opener-Policy", "same-origin")
   c.header("Cross-Origin-Resource-Policy", "same-origin")
   c.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-}
-
-async function runWithRequestRoutingScopes<T>(
-  attribution: CopilotRequestAttribution,
-  affinity: RoutingAffinity | undefined,
-  callback: () => Promise<T>,
-): Promise<T> {
-  const runWithDiagnostics = async () =>
-    await runWithRequestDiagnostics(
-      async () => await runWithCopilotContractObservabilityScope(callback),
-    )
-  return await runWithCopilotRequestAttribution(
-    attribution,
-    async () =>
-      await runWithRoutingAffinity(
-        affinity,
-        async () =>
-          await copilotResponseHeadersStorage.run(
-            {},
-            async () => await routedAccountStorage.run({}, runWithDiagnostics),
-          ),
-      ),
-  )
 }
 
 // Global middleware — applied to ALL routes including pre-auth ones

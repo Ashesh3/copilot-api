@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- transport retry and intercept lifecycle live in one boundary */
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { randomUUID } from "node:crypto"
@@ -16,6 +17,7 @@ import {
   DebugCaptureError,
 } from "~/lib/debug-capture"
 import { resolveCopilotApiBaseUrl } from "~/lib/github-instance"
+import { interceptEngine } from "~/lib/intercept/engine"
 import {
   abortLlmDebugLog,
   failLlmDebugLog,
@@ -731,17 +733,63 @@ async function applyRetryResponseAction(options: {
   }
 }
 
-// Keep the retry state machine in one scope so all resends share one budget.
-// eslint-disable-next-line complexity, max-lines-per-function
+/**
+ * Intercept holds each logical request once and only the response returned to
+ * the caller: automatic resends carry the approved body, and holding happens
+ * outside the transport retry boundary.
+ */
 export async function copilotFetch(
   path: string,
   init?: RequestInit,
-  fetchOptions?: {
-    baseUrl?: string
-    maxHttpRetryDelaySeconds?: number
-    retryBudget?: RetryBudget
-    telemetry?: CopilotTelemetryOptions
-  },
+  fetchOptions?: CopilotFetchOptions,
+): Promise<Response> {
+  if (
+    !interceptEngine.isEnabled()
+    || !isLlmDebugPath(path)
+    || typeof init?.body !== "string"
+  ) {
+    return await sendCopilotRequest(path, init, fetchOptions)
+  }
+  const method = init.method ?? "POST"
+  const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
+  const held = await interceptEngine.interceptRequest({
+    method,
+    path,
+    url,
+    upstream: "copilot",
+    headers: filterCopilotRequestHeaders(init.headers),
+    body: init.body,
+    signal: init.signal,
+  })
+  const response = await sendCopilotRequest(
+    path,
+    held.modified ? { ...init, body: held.body } : init,
+    fetchOptions,
+  )
+  return await interceptEngine.interceptResponse({
+    method,
+    path,
+    url,
+    upstream: "copilot",
+    response,
+    requestSnapshot: held.requestSnapshot,
+    signal: init.signal,
+  })
+}
+
+interface CopilotFetchOptions {
+  baseUrl?: string
+  maxHttpRetryDelaySeconds?: number
+  retryBudget?: RetryBudget
+  telemetry?: CopilotTelemetryOptions
+}
+
+// Keep the retry state machine in one scope so all resends share one budget.
+// eslint-disable-next-line complexity, max-lines-per-function
+async function sendCopilotRequest(
+  path: string,
+  init?: RequestInit,
+  fetchOptions?: CopilotFetchOptions,
 ): Promise<Response> {
   const budget = fetchOptions?.retryBudget ?? createRetryBudget()
   const maxHttpRetryDelaySeconds =
