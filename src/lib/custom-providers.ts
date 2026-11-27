@@ -28,6 +28,7 @@ import {
   DebugCaptureError,
 } from "~/lib/debug-capture"
 import { CustomProviderHTTPError, LocalHTTPError } from "~/lib/error"
+import { interceptEngine } from "~/lib/intercept/engine"
 import {
   abortLlmDebugLog,
   failLlmDebugLog,
@@ -472,8 +473,22 @@ async function fetchCustomProvider(
 ): Promise<Response> {
   const { reference, path, payload, options } = request
   const url = providerUrl(reference.provider, path)
-  const headers = buildHeaders(reference.provider)
-  const body = request.rawBody ?? JSON.stringify(payload)
+  let headers = buildHeaders(reference.provider)
+  let body = request.rawBody ?? JSON.stringify(payload)
+  const interceptedReq = await interceptEngine.interceptRequest({
+    method: "POST",
+    path,
+    url,
+    upstream: "custom",
+    providerId: reference.provider.id,
+    headers,
+    body,
+    signal: options?.signal,
+  })
+  if (interceptedReq.modified) {
+    body = interceptedReq.body
+    headers = interceptedReq.headers
+  }
   consola.info(
     `Custom provider request: ${reference.provider.name}/${reference.provider.id}/${reference.upstreamModel} POST ${path}`,
   )
@@ -500,10 +515,20 @@ async function fetchCustomProvider(
         AbortSignal.any([options.signal, captureSignal])
       : captureSignal,
     )
-    const response =
+    const rawResponse =
       path === "/chat/completions" ?
         await recordModelFallbackResponse(tapped.response)
       : tapped.response
+    const response = await interceptEngine.interceptResponse({
+      method: "POST",
+      path,
+      url,
+      upstream: "custom",
+      providerId: reference.provider.id,
+      response: rawResponse,
+      requestSnapshot: interceptedReq.requestSnapshot,
+      signal: options?.signal,
+    })
     void captureCustomProviderDebugResponse(logId, response, tapped.capture)
     recordCustomProviderCall({
       outcome: customProviderOutcome(response),

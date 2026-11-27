@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- transport retry and intercept lifecycle live in one boundary */
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { randomUUID } from "node:crypto"
@@ -16,6 +17,7 @@ import {
   DebugCaptureError,
 } from "~/lib/debug-capture"
 import { resolveCopilotApiBaseUrl } from "~/lib/github-instance"
+import { interceptEngine } from "~/lib/intercept/engine"
 import {
   abortLlmDebugLog,
   failLlmDebugLog,
@@ -769,9 +771,35 @@ export async function copilotFetch(
     const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
 
     try {
-      const headers = filterCopilotRequestHeaders(requestInit?.headers)
+      let headers = filterCopilotRequestHeaders(requestInit?.headers)
       // Retry request-ID refreshes must retain all normalized beta lines.
       requestInit = { ...requestInit, headers }
+
+      let interceptSnapshot:
+        | Awaited<
+            ReturnType<typeof interceptEngine.interceptRequest>
+          >["requestSnapshot"]
+        | undefined
+      if (isLlmDebugPath(path) && typeof requestInit.body === "string") {
+        const intercepted = await interceptEngine.interceptRequest({
+          method: requestInit.method ?? "POST",
+          path,
+          url,
+          upstream: "copilot",
+          headers,
+          body: requestInit.body,
+          signal: requestInit.signal,
+        })
+        interceptSnapshot = intercepted.requestSnapshot
+        if (intercepted.modified) {
+          headers = filterCopilotRequestHeaders(intercepted.headers)
+          requestInit = {
+            ...requestInit,
+            headers,
+            body: intercepted.body,
+          }
+        }
+      }
 
       debugLogId = startLlmDebugAttempt({
         headers,
@@ -792,7 +820,7 @@ export async function copilotFetch(
         url,
       })
 
-      const response = await normalizeConnectionOwnershipRejection(
+      const tappedResponse = await normalizeConnectionOwnershipRejection(
         path,
         captureLlmDebugAttemptResponse(
           debugLogId,
@@ -800,6 +828,19 @@ export async function copilotFetch(
           requestInit.signal ?? undefined,
         ),
       )
+
+      const response =
+        interceptSnapshot ?
+          await interceptEngine.interceptResponse({
+            method: requestInit.method ?? "POST",
+            path,
+            url,
+            upstream: "copilot",
+            response: tappedResponse,
+            requestSnapshot: interceptSnapshot,
+            signal: requestInit.signal,
+          })
+        : tappedResponse
       // Once a new response arrived, an earlier retry response can no longer
       // be returned. Drain through its tap with bounded stream backpressure.
       if (lastResponse) {

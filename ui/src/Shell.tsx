@@ -22,6 +22,7 @@ import {
   MonitorIcon,
   MoonIcon,
   PlugIcon,
+  RadioIcon,
   Repeat2Icon,
   RouteIcon,
   SettingsIcon,
@@ -48,6 +49,7 @@ const MONITOR_ITEMS: Array<NavEntry> = [
 
 const CONTROL_ITEMS: Array<NavEntry> = [
   { section: "accounts", label: "GitHub Accounts", icon: CopilotIcon },
+  { section: "intercept", label: "Intercept", icon: RadioIcon },
   { section: "flags", label: "Feature Flags", icon: FlagIcon },
   { section: "replacements", label: "Replacements", icon: Repeat2Icon },
   {

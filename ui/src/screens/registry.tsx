@@ -5,6 +5,7 @@ import CustomProvidersScreen from "./CustomProviders"
 import EnvironmentsScreen from "./Environments"
 import FallbacksScreen from "./Fallbacks"
 import FlagsScreen from "./Flags"
+import InterceptScreen from "./Intercept"
 import LlmDebugScreen from "./LlmDebug"
 import LlmReplayScreen from "./LlmReplay"
 import ModelRedirectsScreen from "./ModelRedirects"
@@ -57,6 +58,11 @@ export const SCREENS: Record<string, ScreenEntry> = {
     kicker: "Monitor",
     title: "Usage",
     component: UsageScreen,
+  },
+  intercept: {
+    kicker: "Control",
+    title: "Intercept",
+    component: InterceptScreen,
   },
   flags: {
     kicker: "Control",
