@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 
 import { extractRequestCredential } from "~/lib/credential-resolver"
 import { isHTTPError } from "~/lib/error"
+import { deferUntilResponseDecided } from "~/lib/intercept/send-owner"
 import {
   getModelFallbackConfig,
   getModelFallbackConfigRevision,
@@ -250,11 +251,20 @@ export async function recordModelFallbackResponse(
       throw new ModelFallbackResponseError(response, outcome.reason)
     }
   }
-  return await acceptModelFallbackResponse(
-    attempt,
-    response,
-    outcome?.successful !== false,
-  )
+  const successful = outcome?.successful !== false
+  // Under Intercept, durable acceptance waits for the response the operator
+  // lets through: a dropped or edited response must not pin later turns.
+  if (
+    response.ok
+    && deferUntilResponseDecided(
+      attempt,
+      async (decided) =>
+        await acceptModelFallbackResponse(attempt, decided, successful),
+    )
+  ) {
+    return response
+  }
+  return await acceptModelFallbackResponse(attempt, response, successful)
 }
 
 /**

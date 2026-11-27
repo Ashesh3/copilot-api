@@ -331,7 +331,8 @@ function buildSystem(
 /**
  * Re-inserts messages that produced no items (e.g. `content: []`) verbatim,
  * each right after the output of the nearest earlier original message that
- * survived the edit, or first when none did.
+ * survived the edit, or first when none did. An item whose kind changed is
+ * rebuilt as a new node but still counts for the message it came from.
  */
 function withEmptyMessages(
   messages: ReadonlyArray<unknown>,
@@ -339,11 +340,15 @@ function withEmptyMessages(
   segments: ReadonlyArray<Segment>,
   built: Array<unknown>,
 ): Array<unknown> {
-  const withItems = new Set(parsed.map((p) => p.container))
+  const containerById = new Map(parsed.map((p) => [p.item.id, p.container]))
   const lastSegment = new Map<string, number>()
   for (const [s, segment] of segments.entries()) {
-    if (segment.key !== undefined) lastSegment.set(segment.key, s)
+    for (const e of segment.entries) {
+      const key = e.orig?.container ?? containerById.get(e.item.id)
+      if (key !== undefined) lastSegment.set(key, s)
+    }
   }
+  const withItems = new Set(containerById.values())
   const after = new Map<number, Array<unknown>>()
   let anchor = -1
   for (const [i, msg] of messages.entries()) {

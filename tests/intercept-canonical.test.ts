@@ -529,6 +529,67 @@ describe("Anthropic Messages requests", () => {
       { role: "user", content: [{ type: "text", text: "More" }] },
     ])
   })
+
+  test("an empty turn stays after a neighbour whose kind changed", () => {
+    const original: Json = {
+      model: "claude-sonnet-4",
+      messages: [
+        { role: "user", content: "A" },
+        { role: "assistant", content: [] },
+        { role: "user", content: "B" },
+      ],
+    }
+    const raw = JSON.stringify(original)
+    const emptyView = view("/v1/messages", "request", raw)
+    expect(emptyView.items.map((i) => i.id)).toEqual(["msg-0", "msg-2"])
+    const empty = JSON.stringify(original.messages[1])
+    const last = JSON.stringify(original.messages[2])
+
+    const retyped = JSON.parse(
+      serializeCanonicalItemsToBody({
+        originalBody: raw,
+        canonical: emptyView,
+        items: emptyView.items.map((item) =>
+          item.id === "msg-0" ?
+            { ...item, kind: "assistant", role: "assistant" }
+          : item,
+        ),
+      }),
+    ) as Json
+    expect(retyped.messages).toHaveLength(3)
+    expect(retyped.messages[0]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "A" }],
+    })
+    expect(JSON.stringify(retyped.messages[1])).toBe(empty)
+    expect(JSON.stringify(retyped.messages[2])).toBe(last)
+
+    const inserted = JSON.parse(
+      edit(emptyView, raw, [
+        {
+          op: "insert_after",
+          afterId: "msg-0",
+          kind: "assistant",
+          content: "Hmm",
+        },
+      ]),
+    ) as Json
+    expect(inserted.messages).toEqual([
+      original.messages[0],
+      original.messages[1],
+      { role: "assistant", content: [{ type: "text", text: "Hmm" }] },
+      original.messages[2],
+    ])
+
+    const withoutFirst = JSON.parse(
+      edit(emptyView, raw, [{ op: "delete", id: "msg-0" }]),
+    ) as Json
+    expect(withoutFirst.messages).toEqual(original.messages.slice(1))
+    const withoutLast = JSON.parse(
+      edit(emptyView, raw, [{ op: "delete", id: "msg-2" }]),
+    ) as Json
+    expect(withoutLast.messages).toEqual(original.messages.slice(0, 2))
+  })
 })
 
 describe("Responses requests", () => {

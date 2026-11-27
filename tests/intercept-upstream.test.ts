@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test"
 
 import { LocalHTTPError } from "~/lib/error"
 import { interceptEngine } from "~/lib/intercept/engine"
+import { deferUntilResponseDecided } from "~/lib/intercept/send-owner"
 import {
   interceptLogicalSend,
   interceptUpstreamSend,
@@ -305,6 +306,90 @@ test("a conflicting retry is not sent once Intercept is off", async () => {
     expect(failure.response.status).toBe(409)
   }
   expect(sent).toEqual([chatBody("approved")])
+})
+
+test("a conflicting retry that is no longer held is not sent", async () => {
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  const { sent, send } = recorder()
+  let failure: unknown
+
+  await logicalSend(async () => {
+    await holdAndApprove(chatBody("original"), chatBody("approved"), send)
+    // Still on, but the filters no longer match, so nobody reviews the retry.
+    interceptEngine.updateConfig({
+      filters: {
+        enabled: true,
+        matchMode: "all",
+        conditions: [
+          {
+            id: "only-original",
+            enabled: true,
+            field: "requestBody",
+            operator: "contains",
+            value: "original",
+          },
+        ],
+      },
+    })
+    failure = await interceptUpstreamSend(
+      { ...SEND, body: chatBody("rewritten"), reason: "compatibility_retry" },
+      send,
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+  })
+
+  expect(failure).toBeInstanceOf(LocalHTTPError)
+  expect(sent).toEqual([chatBody("approved")])
+})
+
+test("a response is held when Intercept turns on during its send", async () => {
+  interceptEngine.updateConfig({ enabled: false, direction: "response" })
+  const statuses: Array<number> = []
+  const unsubscribe = holdEachResponse(statuses)
+
+  await interceptLogicalSend(async () => ({
+    response: await interceptUpstreamSend(
+      { ...SEND, body: chatBody("hi") },
+      () => {
+        interceptEngine.updateConfig({ enabled: true })
+        return Promise.resolve(Response.json({ ok: true }))
+      },
+    ),
+  }))
+  unsubscribe()
+
+  expect(statuses).toEqual([200])
+})
+
+test("deferred bookkeeping sees only the response the operator lets through", async () => {
+  interceptEngine.updateConfig({ enabled: true, direction: "response" })
+  const settled: Array<string> = []
+  const loop = () =>
+    interceptLogicalSend(async () => {
+      const response = await interceptUpstreamSend(
+        { ...SEND, body: chatBody("hi") },
+        () => Promise.resolve(Response.json({ ok: true })),
+      )
+      deferUntilResponseDecided(settled, async (decided) => {
+        settled.push(await decided.clone().text())
+        return decided
+      })
+      return { response }
+    })
+
+  const unsubscribe = interceptEngine.subscribe((event) => {
+    if (event.type !== "queued") return
+    if (settled.length === 0) interceptEngine.dropItem(event.item.id)
+    else interceptEngine.forwardItem(event.item.id, { body: '{"ok":"edited"}' })
+  })
+  await loop().catch(() => undefined)
+  settled.push("after drop")
+  await loop()
+  unsubscribe()
+
+  expect(settled).toEqual(["after drop", '{"ok":"edited"}'])
 })
 
 test("responses to multipart requests are held with their routed model", async () => {

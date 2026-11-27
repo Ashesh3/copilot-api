@@ -1,7 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks"
-import { createHash } from "node:crypto"
-import { isDeepStrictEqual } from "node:util"
-
 import type { UpstreamSendReason } from "~/lib/routing-telemetry"
 
 import {
@@ -12,8 +8,16 @@ import { replaceModelFallbackResponse } from "~/lib/model-fallback"
 import { getClientSessionId } from "~/lib/request-session"
 
 import { isInterceptBypassed } from "./assistant"
+import { extractModelFromBody } from "./canonical"
 import { type InterceptRequestSnapshot, interceptEngine } from "./engine"
 import { replayConflictError } from "./items"
+import { applyEdits, computeEdits, digestText } from "./json-edits"
+import {
+  type Decision,
+  ownerStorage,
+  type SendOwner,
+  type SentRequest,
+} from "./send-owner"
 
 /**
  * Intercept sees individual upstream sends, but one logical request can be
@@ -24,167 +28,11 @@ import { replayConflictError } from "./items"
  * - The first send is held (or passed through) and its decision recorded.
  *   Resends of that request, to the same destination, replay the decision
  *   instead of being held again, even if Intercept was turned off meanwhile.
+ *   A resend that no longer fits the approved edits is held again, or, when
+ *   it cannot be, refused rather than sent without them.
  * - Sends never hold their own responses; the owner holds only the response
- *   the loop settles on.
+ *   the loop settles on, then runs bookkeeping deferred until that decision.
  */
-
-type JsonPath = Array<string | number>
-
-/** One change from the original to the approved body, with its precondition. */
-interface JsonChange {
-  path: JsonPath
-  before?: { value: unknown }
-  after?: { value: unknown }
-}
-
-/**
- * An array on the path to an edit, by digest: index-based edits replay only
- * while that array is unchanged, so an index still names the same element.
- */
-interface ArrayGuard {
-  path: JsonPath
-  digest: string
-}
-
-/** The decision on the first send of a logical request. */
-interface Decision {
-  path: string
-  upstream: "copilot" | "custom"
-  providerId?: string
-  original: string
-  /** The body sent; the original when the request passed through unheld. */
-  approved: string
-  snapshot: InterceptRequestSnapshot
-  /** Undefined when either body is not JSON: only exact resends replay. */
-  edits?: { changes: Array<JsonChange>; guards: Array<ArrayGuard> }
-}
-
-type Replay =
-  | { kind: "replay"; body: string; snapshot: InterceptRequestSnapshot }
-  /** The resend differs where the operator edited; it needs a new review. */
-  | { kind: "conflict" }
-
-interface SentRequest {
-  method: string
-  path: string
-  url: string
-  upstream: "copilot" | "custom"
-  providerId?: string
-  snapshot: InterceptRequestSnapshot
-  signal?: AbortSignal | null
-}
-
-interface SendOwner {
-  decision?: Decision
-  /** Capture memory held for the decision until the logical send ends. */
-  reservedBytes: number
-  last?: SentRequest
-}
-
-const ownerStorage = new AsyncLocalStorage<SendOwner>()
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function parseJson(text: string): { value: unknown } | undefined {
-  try {
-    return { value: JSON.parse(text) as unknown }
-  } catch {
-    return undefined
-  }
-}
-
-function diffJson(original: unknown, approved: unknown): Array<JsonChange> {
-  const changes: Array<JsonChange> = []
-  const walk = (before: unknown, after: unknown, path: JsonPath): void => {
-    if (isDeepStrictEqual(before, after)) return
-    if (isRecord(before) && isRecord(after)) {
-      for (const key of new Set([
-        ...Object.keys(before),
-        ...Object.keys(after),
-      ])) {
-        if (!Object.hasOwn(after, key)) {
-          changes.push({ path: [...path, key], before: { value: before[key] } })
-        } else if (!Object.hasOwn(before, key)) {
-          changes.push({ path: [...path, key], after: { value: after[key] } })
-        } else {
-          walk(before[key], after[key], [...path, key])
-        }
-      }
-      return
-    }
-    if (
-      Array.isArray(before)
-      && Array.isArray(after)
-      && before.length === after.length
-    ) {
-      for (const [index, value] of before.entries()) {
-        walk(value, after[index], [...path, index])
-      }
-      return
-    }
-    changes.push({ path, before: { value: before }, after: { value: after } })
-  }
-  walk(original, approved, [])
-  return changes
-}
-
-/**
- * Apply `changes` to `target` only where it still holds exactly what the
- * operator changed; anything else means the resend differs where the
- * operator edited, and it must be reviewed again.
- */
-function applyChanges(
-  target: unknown,
-  changes: Array<JsonChange>,
-): { value: unknown } | undefined {
-  let root = structuredClone(target)
-  for (const change of changes) {
-    if (change.path.length === 0) {
-      if (!isDeepStrictEqual(root, change.before?.value)) return undefined
-      root = structuredClone(change.after?.value)
-      continue
-    }
-    let parent: unknown = root
-    for (const key of change.path.slice(0, -1)) {
-      parent =
-        (
-          (isRecord(parent) || Array.isArray(parent))
-          && Object.hasOwn(parent, key)
-        ) ?
-          (parent as Record<string | number, unknown>)[key]
-        : undefined
-    }
-    const key = change.path.at(-1) as string | number
-    if (!isRecord(parent) && !Array.isArray(parent)) return undefined
-    const container = parent as Record<string | number, unknown>
-    const present = Object.hasOwn(container, key)
-    if (
-      change.before ?
-        !present || !isDeepStrictEqual(container[key], change.before.value)
-      : present
-    ) {
-      return undefined
-    }
-    if (change.after) {
-      // A plain assignment to a `__proto__` key would replace the prototype.
-      Object.defineProperty(container, key, {
-        value: structuredClone(change.after.value),
-        writable: true,
-        enumerable: true,
-        configurable: true,
-      })
-    } else {
-      Reflect.deleteProperty(container, key)
-    }
-  }
-  return { value: root }
-}
-
-function textBytes(text: string): number {
-  return Buffer.byteLength(text, "utf8")
-}
 
 export interface UpstreamSend {
   method: string
@@ -202,98 +50,55 @@ export interface UpstreamSend {
 
 type TextSend = UpstreamSend & { body: string }
 
-function digestJson(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex")
+/** A resend inherits the decision, or differs where the operator edited. */
+type Replay = { kind: "replay"; body: string } | { kind: "conflict" }
+
+function textBytes(text: string): number {
+  return Buffer.byteLength(text, "utf8")
 }
 
-/** The value at `path`, following own properties only. */
-function valueAt(
-  root: unknown,
-  path: JsonPath,
-): { value: unknown } | undefined {
-  let current: unknown = root
-  for (const key of path) {
-    if (
-      (!isRecord(current) && !Array.isArray(current))
-      || !Object.hasOwn(current, key)
-    ) {
-      return undefined
-    }
-    current = (current as Record<string | number, unknown>)[key]
+/** Swap the owner's decision reservation; false when the new one does not fit. */
+function reserveDecision(owner: SendOwner, bytes: number): boolean {
+  if (bytes > owner.decisionBytes) {
+    if (!reserveDebugCaptureMemory(bytes - owner.decisionBytes)) return false
+  } else {
+    releaseDebugCaptureMemory(owner.decisionBytes - bytes)
   }
-  return { value: current }
-}
-
-function arrayGuards(
-  original: unknown,
-  changes: Array<JsonChange>,
-): Array<ArrayGuard> {
-  const guards = new Map<string, ArrayGuard>()
-  for (const change of changes) {
-    for (const [index, key] of change.path.entries()) {
-      if (typeof key !== "number") continue
-      const path = change.path.slice(0, index)
-      const id = JSON.stringify(path)
-      const array = valueAt(original, path)
-      if (!guards.has(id) && array) {
-        guards.set(id, { path, digest: digestJson(array.value) })
-      }
-    }
-  }
-  return [...guards.values()]
-}
-
-/** Edits from the original to the approved body; undefined when not JSON. */
-function approvalEdits(original: string, approved: string): Decision["edits"] {
-  if (approved === original) return { changes: [], guards: [] }
-  const before = parseJson(original)
-  const after = parseJson(approved)
-  if (!before || !after) return undefined
-  const changes = diffJson(before.value, after.value)
-  return { changes, guards: arrayGuards(before.value, changes) }
+  owner.decisionBytes = bytes
+  return true
 }
 
 function recordDecision(
   owner: SendOwner,
   request: TextSend,
-  outcome: { body: string; requestSnapshot: InterceptRequestSnapshot },
+  outcome: { body: string; held: boolean },
 ): void {
-  const approved = outcome.body
-  let edits = approvalEdits(request.body, approved)
-  // The bodies are shared with the held item and the send; only the edit set
-  // is new. Without room for it, only exact resends replay the approval.
-  const bytes = edits ? textBytes(JSON.stringify(edits)) : 0
-  if (reserveDebugCaptureMemory(bytes)) owner.reservedBytes += bytes
-  else edits = undefined
-  owner.decision = {
+  const decision: Decision = {
     path: request.path,
     upstream: request.upstream,
     providerId: request.providerId,
-    original: request.body,
-    approved,
-    snapshot: outcome.requestSnapshot,
-    edits,
+    passThrough: !outcome.held,
+    originalDigest: digestText(request.body),
   }
-}
-
-/** Apply the operator's edits to a changed resend, or report a conflict. */
-function replayEdits(decision: Decision, body: string): Replay {
-  const parsed = decision.edits && parseJson(body)
-  if (!decision.edits || !parsed) return { kind: "conflict" }
-  for (const guard of decision.edits.guards) {
-    const array = valueAt(parsed.value, guard.path)
-    if (!array || digestJson(array.value) !== guard.digest) {
-      return { kind: "conflict" }
+  if (outcome.held) {
+    // The approval outlives the held item in history, so it is reserved for
+    // as long as the logical send can resend. Without room for the body, the
+    // edit set alone replays it; without room for either, resends are
+    // reviewed again (or refused), never sent without the edits.
+    const edits = computeEdits(request.body, outcome.body)
+    const editBytes = edits ? textBytes(JSON.stringify(edits)) : 0
+    if (reserveDecision(owner, textBytes(outcome.body) + editBytes)) {
+      decision.approved = outcome.body
+      decision.edits = edits
+    } else if (edits && reserveDecision(owner, editBytes)) {
+      decision.edits = edits
+    } else {
+      reserveDecision(owner, 0)
     }
+  } else {
+    reserveDecision(owner, 0)
   }
-  const replayed = applyChanges(parsed.value, decision.edits.changes)
-  if (!replayed) return { kind: "conflict" }
-  const replayedBody = JSON.stringify(replayed.value)
-  return {
-    kind: "replay",
-    body: replayedBody,
-    snapshot: { ...decision.snapshot, body: replayedBody },
-  }
+  owner.decision = decision
 }
 
 /** How a resend inherits the decision, or undefined when none applies. */
@@ -313,30 +118,30 @@ function replayDecision(
   ) {
     return undefined
   }
-  if (request.body === decision.original) {
-    return {
-      kind: "replay",
-      body: decision.approved,
-      snapshot: decision.snapshot,
-    }
+  if (decision.passThrough) return { kind: "replay", body: request.body }
+  if (
+    decision.approved !== undefined
+    && digestText(request.body) === decision.originalDigest
+  ) {
+    return { kind: "replay", body: decision.approved }
   }
-  if (decision.approved === decision.original) {
-    return {
-      kind: "replay",
-      body: request.body,
-      snapshot: { ...decision.snapshot, body: request.body },
-    }
-  }
-  return replayEdits(decision, request.body)
+  const replayed = decision.edits && applyEdits(request.body, decision.edits)
+  return replayed === undefined ?
+      { kind: "conflict" }
+    : { kind: "replay", body: replayed }
 }
 
-async function decideRequest(
-  owner: SendOwner | undefined,
-  request: TextSend,
-): Promise<{ body: string; snapshot: InterceptRequestSnapshot }> {
-  const outcome = await interceptEngine.interceptRequest(request)
-  if (owner) recordDecision(owner, request, outcome)
-  return { body: outcome.body, snapshot: outcome.requestSnapshot }
+function snapshotOf(sent: SentRequest): InterceptRequestSnapshot {
+  if (sent.snapshot) return sent.snapshot
+  const body = typeof sent.body === "string" ? sent.body : ""
+  return {
+    method: sent.method,
+    path: sent.path,
+    model: sent.model ?? (body ? extractModelFromBody(body) : undefined),
+    body,
+    headers: {},
+    sessionId: getClientSessionId(),
+  }
 }
 
 async function holdResponse(
@@ -350,22 +155,29 @@ async function holdResponse(
     upstream: sent.upstream,
     providerId: sent.providerId,
     response,
-    requestSnapshot: sent.snapshot,
+    requestSnapshot: snapshotOf(sent),
     signal: sent.signal,
   })
   if (held !== response) replaceModelFallbackResponse(response, held)
   return held
 }
 
-function binarySnapshot(request: UpstreamSend): InterceptRequestSnapshot {
-  return {
-    method: request.method,
-    path: request.path,
-    model: request.model,
-    body: "",
-    headers: {},
-    sessionId: getClientSessionId(),
+/** The body to send for a request, deciding or replaying as needed. */
+async function bodyToSend(
+  owner: SendOwner | undefined,
+  request: TextSend,
+): Promise<{ body: string; snapshot?: InterceptRequestSnapshot }> {
+  const replay = replayDecision(owner, request)
+  if (replay?.kind === "replay") return { body: replay.body }
+  // An approved request must not go out without the operator's edits: a
+  // conflicting resend needs a fresh hold, or it is not sent at all.
+  if (replay?.kind === "conflict" && !interceptEngine.isEnabled()) {
+    throw replayConflictError()
   }
+  const outcome = await interceptEngine.interceptRequest(request)
+  if (replay?.kind === "conflict" && !outcome.held) throw replayConflictError()
+  if (owner) recordDecision(owner, request, outcome)
+  return { body: outcome.body, snapshot: outcome.requestSnapshot }
 }
 
 /**
@@ -381,29 +193,24 @@ export async function interceptUpstreamSend(
 ): Promise<Response> {
   if (isInterceptBypassed()) return await send(undefined)
   const owner = ownerStorage.getStore()
+  const sent: SentRequest = { ...request }
   const { body: requestBody } = request
-  const textRequest =
-    typeof requestBody === "string" ?
-      { ...request, body: requestBody }
-    : undefined
-  const replay = textRequest && replayDecision(owner, textRequest)
-  if (replay?.kind !== "replay" && !interceptEngine.isEnabled()) {
-    // An approved request must not go out without the operator's edits.
-    if (replay?.kind === "conflict") throw replayConflictError()
-    return await send(undefined)
+  if (
+    typeof requestBody === "string"
+    && (owner?.decision || interceptEngine.isEnabled())
+  ) {
+    const decided = await bodyToSend(owner, { ...request, body: requestBody })
+    sent.body = decided.body
+    sent.snapshot = decided.snapshot
   }
-
-  let decided: { body: string | undefined; snapshot: InterceptRequestSnapshot }
-  if (replay?.kind === "replay") decided = replay
-  else if (textRequest) decided = await decideRequest(owner, textRequest)
-  else decided = { body: undefined, snapshot: binarySnapshot(request) }
-  const body = decided.body === requestBody ? undefined : decided.body
-
-  const sent: SentRequest = { ...request, snapshot: decided.snapshot }
+  const body = sent.body === requestBody ? undefined : (sent.body as string)
   if (owner) {
+    // Recorded even while Intercept is off, so turning it on mid-send still
+    // attributes the settled response to the attempt that produced it.
     owner.last = sent
     return await send(body)
   }
+  if (!interceptEngine.isEnabled()) return await send(body)
   return await holdResponse(sent, await send(body))
 }
 
@@ -411,25 +218,26 @@ export async function interceptUpstreamSend(
  * Own one logical request: sends inside `work` share the first send's
  * decision and never hold their responses, so intermediate ones (failover
  * 429s, compatibility 400s, overloaded streams) reach the retry loop
- * untouched, and only the response `work` finally returns is held. The owner
- * exists even while Intercept is off, so turning it on mid-loop still holds
- * only the settled response. Nested owners defer to the outermost.
+ * untouched, and only the response `work` finally returns is held. Work
+ * deferred with `deferUntilResponseDecided` then runs on the response the
+ * operator let through. The owner exists even while Intercept is off, so
+ * turning it on mid-loop still holds only the settled response. Nested
+ * owners defer to the outermost.
  */
 export async function interceptLogicalSend<T extends { response: Response }>(
   work: () => Promise<T>,
 ): Promise<T> {
   if (ownerStorage.getStore()) return await work()
-  const owner: SendOwner = { reservedBytes: 0 }
+  const owner: SendOwner = { decisionBytes: 0, settle: new Map() }
   let result: T
   try {
     result = await ownerStorage.run(owner, work)
   } finally {
-    releaseDebugCaptureMemory(owner.reservedBytes)
-    owner.reservedBytes = 0
+    releaseDebugCaptureMemory(owner.decisionBytes)
+    owner.decisionBytes = 0
   }
-  if (!owner.last) return result
-  return {
-    ...result,
-    response: await holdResponse(owner.last, result.response),
-  }
+  let { response } = result
+  if (owner.last) response = await holdResponse(owner.last, response)
+  for (const settle of owner.settle.values()) response = await settle(response)
+  return response === result.response ? result : { ...result, response }
 }

@@ -6,6 +6,12 @@ export interface PeekedStreamEvent {
 }
 
 /**
+ * How far to look for the first event. Past this, the stream is delivered
+ * without inspection; a provider error event is far smaller.
+ */
+const FIRST_EVENT_PEEK_BYTES = 64 * 1024
+
+/**
  * The bytes up to the first complete SSE event, read from the response
  * itself. A tee'd copy would lose its queued bytes if upstream failed
  * meanwhile, since erroring a stream discards what it still holds.
@@ -21,19 +27,25 @@ async function readFirstStreamEvent(
   const decoder = new TextDecoder()
   const chunks: Array<Uint8Array> = []
   let text = ""
+  let bytes = 0
+  // Blocks before this offset are complete and held no event (comments).
+  let parsedTo = 0
   try {
     for (;;) {
       const { done, value } = await reader.read()
       if (!done) {
         chunks.push(value)
+        bytes += value.byteLength
         text += decoder.decode(value, { stream: true })
       }
       const normalized = text.replaceAll(/\r\n?/g, "\n")
-      const end = normalized.lastIndexOf("\n\n")
-      const event = parseSseEvents(
-        done || end === -1 ? normalized : normalized.slice(0, end),
-      ).at(0)
-      if (done || (end !== -1 && event)) return { chunks, event, done }
+      const end = done ? normalized.length : normalized.lastIndexOf("\n\n")
+      if (end > parsedTo) {
+        const event = parseSseEvents(normalized.slice(parsedTo, end)).at(0)
+        if (event) return { chunks, event, done }
+        parsedTo = end
+      }
+      if (done || bytes > FIRST_EVENT_PEEK_BYTES) return { chunks, done }
     }
   } catch (error) {
     return { chunks, failure: { error }, done: true }

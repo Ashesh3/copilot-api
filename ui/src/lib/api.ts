@@ -16,14 +16,27 @@ export function onAuthFailure(listener: () => void): () => void {
 }
 /**
  * A 401 from the admin API or the session check means the session is gone.
- * Elsewhere (a wrong current password, a failed login) it rejects only the
- * credential typed into a form, and the session stays valid.
+ * Elsewhere (a wrong current password, a failed login) it may only reject
+ * the credential typed into a form, so the session is checked first.
  */
 function isSessionFailure(path: string): boolean {
   return (
     path.startsWith("/dashboard/api/")
     || path.startsWith("/dashboard/auth/session")
   )
+}
+function notifyAuthFailure(): void {
+  for (const listener of authFailureListeners) listener()
+}
+async function confirmSessionEnded(): Promise<void> {
+  try {
+    const probe = await fetch("/dashboard/auth/session", {
+      credentials: "same-origin",
+    })
+    if (probe.status === 401) notifyAuthFailure()
+  } catch {
+    // Unreachable server: nothing confirms the session ended.
+  }
 }
 async function mutationAttempt(
   method: string,
@@ -166,8 +179,9 @@ export async function api<T>(
 
   if (!response.ok) {
     if (response.status < 500) finishMutation(attempt)
-    if (response.status === 401 && isSessionFailure(path)) {
-      for (const listener of authFailureListeners) listener()
+    if (response.status === 401) {
+      if (isSessionFailure(path)) notifyAuthFailure()
+      else void confirmSessionEnded()
     }
     const message = await extractErrorMessage(
       response,

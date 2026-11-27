@@ -250,6 +250,20 @@ describe("response capture", () => {
       error: { code: "intercept_dropped" },
     })
   })
+
+  test("a BOM-prefixed response is still held for a body-less request", async () => {
+    const engine = newEngine()
+    engine.updateConfig({ enabled: true, direction: "response" })
+    const withBom = new Response(`\uFEFF${JSON.stringify({ data: [] })}`, {
+      headers: { "content-type": "application/json" },
+    })
+
+    const queued = nextQueued(engine)
+    const pending = engine.interceptResponse(responseInput(withBom, ""))
+    expect(engine.getItem(await queued)?.phase).toBe("response")
+    engine.forwardAllPending()
+    await pending
+  })
 })
 
 describe("held request edits", () => {

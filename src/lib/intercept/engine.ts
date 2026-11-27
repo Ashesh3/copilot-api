@@ -166,6 +166,19 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * Move a capture's reservation to the bytes its held item retains. The
+ * decoded text can be shorter than the bytes read (a stripped BOM), so a
+ * shrink is released rather than refused. False when growth does not fit.
+ */
+function resizeCaptureReservation(reserved: number, needed: number): boolean {
+  if (needed < reserved) {
+    releaseDebugCaptureMemory(reserved - needed)
+    return true
+  }
+  return reserveDebugCaptureMemory(needed - reserved)
+}
+
 export class InterceptEngine {
   private config: InterceptConfig = cloneConfig(DEFAULT_INTERCEPT_CONFIG)
   private readonly pending = new Map<string, PendingSlot>()
@@ -738,7 +751,7 @@ export class InterceptEngine {
    */
   private async captureResponse(
     input: InterceptResponseInput,
-    hold: { expiresAtMs: number; matchConfirmed: boolean },
+    hold: { expiresAtMs: number; matchConfirmed: () => boolean },
   ): Promise<{ text: string; reservedBytes: number } | undefined> {
     const turnedOff = this.captureAbort.signal
     // Operator-configured hold deadline for Intercept, not an upstream timeout.
@@ -768,8 +781,8 @@ export class InterceptEngine {
       && deadline.signal.aborted
       && !turnedOff.aborted
       && !input.signal?.aborted
-      && hold.matchConfirmed
       && this.config.timeoutAction === "drop"
+      && hold.matchConfirmed()
     ) {
       void input.response.body?.cancel().catch(() => undefined)
       throw droppedError(
@@ -808,9 +821,13 @@ export class InterceptEngine {
     if (!responseMayMatch(this.config, context)) return input.response
 
     const expiresAtMs = Date.now() + this.config.timeoutSeconds * 1000
+    const confirmedAtStart = responseMatchConfirmed(this.config, context)
     const copy = await this.captureResponse(input, {
       expiresAtMs,
-      matchConfirmed: responseMatchConfirmed(this.config, context),
+      // Both the rules the read began under and the current rules must
+      // confirm the match before a timeout drops the response.
+      matchConfirmed: () =>
+        confirmedAtStart && responseMatchConfirmed(this.config, context),
     })
     if (!copy) return input.response
     if (
@@ -852,7 +869,7 @@ export class InterceptEngine {
     }
     // The request context is retained with the item; reserve it as well.
     const reservedBytes = retainedBytes(item)
-    if (!reserveDebugCaptureMemory(reservedBytes - copy.reservedBytes)) {
+    if (!resizeCaptureReservation(copy.reservedBytes, reservedBytes)) {
       releaseDebugCaptureMemory(copy.reservedBytes)
       warnCaptureBudget(input.path)
       return input.response
