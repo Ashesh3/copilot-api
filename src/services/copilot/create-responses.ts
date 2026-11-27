@@ -7,6 +7,7 @@ import type { RetryBudget } from "~/services/copilot/transport-retry"
 import { getSelectedRoutedAccountId, routedFetch } from "~/lib/account-router"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { HTTPError } from "~/lib/error"
+import { interceptLogicalSend } from "~/lib/intercept/upstream"
 import {
   getModelReasoningConfig,
   usesImplicitReasoningDefault,
@@ -751,44 +752,48 @@ async function sendResponsesWithRecovery(options: {
   retryBudget: RetryBudget
   send: ResponsesSend
 }): Promise<ResponsesAttempt> {
-  // The gateway replays reasoning state, so it owns this recovery whether or
-  // not the caller allows compatibility retries. Copilot checks a reasoning
-  // item's ID before its state, so a resend without refused IDs can reveal
-  // refused state.
-  const resend = async (payload: Record<string, unknown>) =>
-    await options.send(payload, true)
-  const recover = async (attempt: ResponsesAttempt) => {
-    let activeAttempt = attempt
-    const payload = await recoverReasoningItemIds(
-      attempt.payload,
-      attempt.response,
-    )
-    if (payload && consumeExtraSend(options.retryBudget)) {
-      activeAttempt = { payload, ...(await options.send(payload, true)) }
-    }
-    return await resendWithoutRejectedReasoningState({
-      attempt: activeAttempt,
-      retryBudget: options.retryBudget,
-      send: resend,
-    })
-  }
-  const attempt = await recover({
-    payload: options.payload,
-    ...(await options.send(options.payload, false)),
-  })
-  const settled =
-    options.allowCompatibilityRetry === false ?
-      attempt
-    : await retryCompatibility({
-        attempt,
-        recover,
+  // These resends carry one logical request: Intercept replays the operator's
+  // approval on them and holds only the response they settle on.
+  return await interceptLogicalSend(async () => {
+    // The gateway replays reasoning state, so it owns this recovery whether or
+    // not the caller allows compatibility retries. Copilot checks a reasoning
+    // item's ID before its state, so a resend without refused IDs can reveal
+    // refused state.
+    const resend = async (payload: Record<string, unknown>) =>
+      await options.send(payload, true)
+    const recover = async (attempt: ResponsesAttempt) => {
+      let activeAttempt = attempt
+      const payload = await recoverReasoningItemIds(
+        attempt.payload,
+        attempt.response,
+      )
+      if (payload && consumeExtraSend(options.retryBudget)) {
+        activeAttempt = { payload, ...(await options.send(payload, true)) }
+      }
+      return await resendWithoutRejectedReasoningState({
+        attempt: activeAttempt,
         retryBudget: options.retryBudget,
         send: resend,
       })
-  return await resendWithShorterMemoryRollout({
-    attempt: settled,
-    retryBudget: options.retryBudget,
-    send: resend,
+    }
+    const attempt = await recover({
+      payload: options.payload,
+      ...(await options.send(options.payload, false)),
+    })
+    const settled =
+      options.allowCompatibilityRetry === false ?
+        attempt
+      : await retryCompatibility({
+          attempt,
+          recover,
+          retryBudget: options.retryBudget,
+          send: resend,
+        })
+    return await resendWithShorterMemoryRollout({
+      attempt: settled,
+      retryBudget: options.retryBudget,
+      send: resend,
+    })
   })
 }
 

@@ -6,6 +6,41 @@ interface PendingMutation {
 }
 // Only hashes and operation metadata are retained, never request bodies or credentials.
 const pendingMutations = new Map<string, PendingMutation>()
+// Session-scoped state (e.g. unsaved Intercept drafts) registers here to be
+// dropped whenever a dashboard request reports the admin session is gone.
+const authFailureListeners = new Set<() => void>()
+/** Runs `listener` whenever a request fails because the session ended. */
+export function onAuthFailure(listener: () => void): () => void {
+  authFailureListeners.add(listener)
+  return () => authFailureListeners.delete(listener)
+}
+/**
+ * A 401 from a session-authenticated read (the admin API or the session
+ * check) means the session is gone. A mutation's 401 can also reject a stale
+ * anti-forgery token or origin, and a credential form's 401 a mistyped
+ * password, while the session stays valid; those probe the session first.
+ */
+function isSessionFailure(method: string, path: string): boolean {
+  return (
+    method === "GET"
+    && (path.startsWith("/dashboard/api/")
+      || path.startsWith("/dashboard/auth/session"))
+  )
+}
+function notifyAuthFailure(): void {
+  for (const listener of authFailureListeners) listener()
+}
+/** Clear session-scoped state if the admin session has really ended. */
+export async function confirmSessionEnded(): Promise<void> {
+  try {
+    const probe = await fetch("/dashboard/auth/session", {
+      credentials: "same-origin",
+    })
+    if (probe.status === 401) notifyAuthFailure()
+  } catch {
+    // Unreachable server: nothing confirms the session ended.
+  }
+}
 async function mutationAttempt(
   method: string,
   path: string,
@@ -147,6 +182,10 @@ export async function api<T>(
 
   if (!response.ok) {
     if (response.status < 500) finishMutation(attempt)
+    if (response.status === 401) {
+      if (isSessionFailure(method, path)) notifyAuthFailure()
+      else void confirmSessionEnded()
+    }
     const message = await extractErrorMessage(
       response,
       `Request failed with status ${response.status}`,

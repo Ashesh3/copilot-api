@@ -1,3 +1,4 @@
+import { AlertDialog } from "@astryxdesign/core/AlertDialog"
 import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
@@ -20,15 +21,10 @@ import type {
   InterceptConfig,
   InterceptDirection,
   InterceptFilterConfig,
-  InterceptItemSummary,
   InterceptPendingItem,
   InterceptSnapshot,
   InterceptTimeoutAction,
 } from "../../../src/lib/intercept/types"
-import type {
-  InterceptDraft,
-  InterceptDraftUpdate,
-} from "../lib/intercept-view"
 
 import { EmptyState } from "../components/common"
 import { InterceptAssistantPanel } from "../components/InterceptAssistantPanel"
@@ -41,6 +37,12 @@ import {
 import { Page } from "../components/Page"
 import { RadioIcon } from "../icons"
 import { del, get, post, put } from "../lib/api"
+import {
+  beginInterceptDraftSnapshot,
+  retainHeldInterceptDrafts,
+  updateInterceptDraft,
+  useInterceptDrafts,
+} from "../lib/intercept-drafts"
 import { useToast } from "../lib/toast"
 
 const API = "/dashboard/api/intercept"
@@ -83,16 +85,6 @@ function eventItemId(data: string): string | undefined {
   }
 }
 
-/** Drafts only matter while their item is held; resolved items cannot change. */
-function retainHeldDrafts(
-  drafts: ReadonlyMap<string, InterceptDraft>,
-  pending: ReadonlyArray<InterceptItemSummary>,
-): ReadonlyMap<string, InterceptDraft> {
-  const held = new Set(pending.map((item) => item.id))
-  if ([...drafts.keys()].every((id) => held.has(id))) return drafts
-  return new Map([...drafts].filter(([id]) => held.has(id)))
-}
-
 function rulesFromConfig(config: InterceptConfig): RulesDraft {
   return {
     timeoutSeconds: String(config.timeoutSeconds),
@@ -118,29 +110,32 @@ export default function InterceptScreen() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<InterceptPendingItem | null>(null)
   const [detailVersion, setDetailVersion] = useState(0)
-  // Unsaved payload edits per held item; they outlive the inspector, so
-  // switching items, lists, or views never discards them.
-  const [drafts, setDrafts] = useState<ReadonlyMap<string, InterceptDraft>>(
-    () => new Map(),
-  )
+  // Unsaved payload edits per held item. The store outlives this screen, so
+  // switching items, lists, views, or dashboard sections never discards them.
+  const drafts = useInterceptDrafts()
   const [rulesDraft, setRulesDraft] = useState<RulesDraft | null>(null)
   const [assistantDraft, setAssistantDraft] =
     useState<InterceptAssistantConfig | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [isActing, setIsActing] = useState(false)
+  const [isConfirmingDisable, setIsConfirmingDisable] = useState(false)
+  const [isDisabling, setIsDisabling] = useState(false)
   const effectiveIdRef = useRef<string | undefined>(undefined)
   const refreshSeqRef = useRef(0)
   // Bumped whenever an edit response replaces the detail, so a detail GET
   // that started earlier cannot overwrite it with an older body.
   const detailWriteRef = useRef(0)
 
+  // Each state request takes a sequence number; only the newest one, issued
+  // while this screen is mounted, may update state.
   const refresh = useCallback(async () => {
     const seq = ++refreshSeqRef.current
+    const ticket = beginInterceptDraftSnapshot()
     try {
       const next = await get<InterceptStateResponse>(API)
       if (seq !== refreshSeqRef.current) return
       setState(next)
-      setDrafts((prev) => retainHeldDrafts(prev, next.pending))
+      retainHeldInterceptDrafts(ticket, next.pending)
       setLoadError(null)
     } catch (err) {
       if (seq !== refreshSeqRef.current) return
@@ -153,21 +148,6 @@ export default function InterceptScreen() {
     setDetailVersion((version) => version + 1)
     await refresh()
   }, [refresh])
-
-  const updateDraft = useCallback(
-    (id: string, update: InterceptDraftUpdate) => {
-      setDrafts((prev) => {
-        const current = prev.get(id)
-        const next = update(current)
-        if (next === current) return prev
-        const updated = new Map(prev)
-        if (next) updated.set(id, next)
-        else updated.delete(id)
-        return updated
-      })
-    },
-    [],
-  )
 
   /** Edit responses for an item that is no longer selected are dropped. */
   const handleItemChange = useCallback((item: InterceptPendingItem) => {
@@ -202,7 +182,10 @@ export default function InterceptScreen() {
     source.addEventListener("queued", handleStateEvent)
     source.addEventListener("updated", handleItemEvent)
     source.addEventListener("resolved", handleItemEvent)
+    const seqRef = refreshSeqRef
     return () => {
+      // Responses still in flight belong to this mount; ignore them.
+      seqRef.current += 1
       source.removeEventListener("open", handleOpen)
       source.removeEventListener("snapshot", handleStateEvent)
       source.removeEventListener("config", handleStateEvent)
@@ -290,13 +273,21 @@ export default function InterceptScreen() {
     assistantDraft !== null
     && JSON.stringify(assistantDraft) !== JSON.stringify(config.assistant)
 
+  const heldDraftCount = state.pending.filter((item) =>
+    drafts.has(item.id),
+  ).length
+
   const patchConfig = async (
     patch: Partial<InterceptConfig>,
   ): Promise<boolean> => {
+    const seq = ++refreshSeqRef.current
+    const ticket = beginInterceptDraftSnapshot()
     try {
       const res = await put<ConfigUpdateResponse>(`${API}/config`, patch)
-      setState((prev) => (prev ? { ...prev, ...res.snapshot } : prev))
-      setDrafts((prev) => retainHeldDrafts(prev, res.snapshot.pending))
+      if (seq === refreshSeqRef.current) {
+        setState((prev) => (prev ? { ...prev, ...res.snapshot } : prev))
+        retainHeldInterceptDrafts(ticket, res.snapshot.pending)
+      }
       return true
     } catch (err) {
       toast.error(errorMessage(err, "Could not update Intercept"))
@@ -305,16 +296,35 @@ export default function InterceptScreen() {
     }
   }
 
-  const handleEnabledChange = (enabled: boolean) => {
+  const setEnabled = async (enabled: boolean) => {
     const released = state.pending.length
     setState({ ...state, config: { ...config, enabled } })
-    void patchConfig({ enabled }).then((saved) => {
-      if (saved && !enabled && released > 0) {
-        toast.success(
-          `Intercept off. Forwarded ${released} held item${released === 1 ? "" : "s"}.`,
-        )
-      }
-    })
+    const saved = await patchConfig({ enabled })
+    if (saved && !enabled && released > 0) {
+      toast.success(
+        `Intercept off. Forwarded ${released} held item${released === 1 ? "" : "s"}.`,
+      )
+    }
+  }
+
+  // Turning Intercept off forwards every held item as the server has it, so
+  // unsaved edits would be lost silently; confirm first.
+  const handleEnabledChange = (enabled: boolean) => {
+    if (!enabled && heldDraftCount > 0) {
+      setIsConfirmingDisable(true)
+      return
+    }
+    void setEnabled(enabled)
+  }
+
+  const confirmDisable = async () => {
+    setIsDisabling(true)
+    try {
+      await setEnabled(false)
+      setIsConfirmingDisable(false)
+    } finally {
+      setIsDisabling(false)
+    }
   }
 
   const handleDirectionChange = (value: string) => {
@@ -381,8 +391,9 @@ export default function InterceptScreen() {
           item={shownDetail}
           draft={drafts.get(shownDetail.id)}
           timeoutAction={config.timeoutAction}
-          onDraftUpdate={updateDraft}
+          onDraftUpdate={updateInterceptDraft}
           onItemChange={handleItemChange}
+          onReload={refreshAll}
           onResolved={refresh}
         />
       )
@@ -661,6 +672,18 @@ export default function InterceptScreen() {
         </div>
       : null}
       {body}
+      <AlertDialog
+        className="confirm-dialog"
+        isOpen={isConfirmingDisable}
+        onOpenChange={setIsConfirmingDisable}
+        title={`Discard unsaved edits on ${heldDraftCount} item${heldDraftCount === 1 ? "" : "s"}?`}
+        description="Turning Intercept off forwards every held item as the server has it. Your unsaved edits are not included."
+        actionLabel="Turn off"
+        actionVariant="secondary"
+        isActionLoading={isDisabling}
+        onAction={confirmDisable}
+        width="min(400px, calc(100vw - 32px))"
+      />
     </Page>
   )
 }

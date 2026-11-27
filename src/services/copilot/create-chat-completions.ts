@@ -14,6 +14,7 @@ import {
   toDataUri,
 } from "~/lib/attachments"
 import { HTTPError } from "~/lib/error"
+import { interceptLogicalSend } from "~/lib/intercept/upstream"
 import { modelSupportsAssistantPrefill } from "~/lib/model-settings"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
 import { normalizeChatCompletionsRequest } from "~/routes/chat-completions/chat-contract"
@@ -33,6 +34,7 @@ import { runManagedWebRequest } from "~/services/web/tool-loop"
 import { fitChatCompletionsCompactionPayload } from "./compaction-payload"
 import { classifyCompatibilityRetry } from "./compatibility-retry"
 import { normalizeGeminiToolSchemas } from "./gemini-tool-schema"
+import { peekFirstStreamEvent } from "./stream-peek"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -323,30 +325,6 @@ const isOverloadStreamEvent = (event: StreamEvent | undefined): boolean => {
   return false
 }
 
-const createBufferedEventStream = (
-  firstEvent: StreamEvent | undefined,
-  iterator: AsyncIterator<StreamEvent>,
-): AsyncIterable<StreamEvent> => ({
-  async *[Symbol.asyncIterator]() {
-    if (firstEvent) {
-      yield firstEvent
-    }
-    while (true) {
-      const next = await iterator.next()
-      if (next.done) {
-        return
-      }
-      yield next.value
-    }
-  },
-})
-
-interface StreamingRetryOptions {
-  payload: ChatCompletionsPayload
-  retry: () => Promise<Response | undefined>
-  retriesRemaining?: number
-}
-
 export interface ChatCompletionsRequestOptions {
   allowCompatibilityRetry?: boolean
   candidatePrepared?: boolean
@@ -520,39 +498,44 @@ const dispatchWithImageFallback = async (options: {
   }
 }
 
-const handleStreamingResponse = async (
+const handleStreamingResponse = (
   response: Response,
-  options: StreamingRetryOptions,
-): Promise<AsyncIterable<StreamEvent>> => {
-  const { payload, retry, retriesRemaining = 1 } = options
+  payload: ChatCompletionsPayload,
+): AsyncIterable<StreamEvent> => {
   if (!response.ok) {
     throwFailedResponse(response, payload)
   }
+  return events(response) as AsyncIterable<StreamEvent>
+}
 
-  const stream = events(response) as AsyncIterable<StreamEvent>
-  const iterator = stream[Symbol.asyncIterator]()
-  const first = await iterator.next()
-
-  if (first.done) {
-    return createBufferedEventStream(undefined, iterator)
+/**
+ * Resend once when a stream opens with an overload error. This runs inside
+ * the logical send, so Intercept holds only the stream the client receives.
+ */
+const retryOverloadedStream = async (
+  attempt: ChatUpstreamAttempt,
+  options: { operation: ChatOperationState; signal?: AbortSignal },
+): Promise<ChatUpstreamAttempt> => {
+  if (!attempt.response.ok) return attempt
+  const peeked = await peekFirstStreamEvent(attempt.response)
+  if (
+    !isOverloadStreamEvent(peeked.event)
+    || !consumeExtraSend(options.operation.retryBudget)
+  ) {
+    return { ...attempt, response: peeked.response }
   }
-
-  if (!isOverloadStreamEvent(first.value) || retriesRemaining === 0) {
-    return createBufferedEventStream(first.value, iterator)
-  }
-
   consola.warn("Stream overload detected on first event, retrying")
-  await iterator.return?.()
-  const retryResponse = await retry()
-  if (!retryResponse) {
-    return createBufferedEventStream(first.value, {
-      next: () => Promise.resolve({ done: true, value: undefined }),
-    })
+  void peeked.response.body?.cancel().catch(() => undefined)
+  return {
+    ...attempt,
+    response: await dispatchChatCompletions(attempt.payload, {
+      headerOptions: attempt.headerOptions,
+      operation: options.operation,
+      reason: "http_retry",
+      recordSelection: false,
+      signal: options.signal,
+    }),
   }
-  return handleStreamingResponse(retryResponse, {
-    ...options,
-    retriesRemaining: retriesRemaining - 1,
-  })
 }
 
 type ChatCompletionsResult = ChatCompletionResponse | AsyncIterable<StreamEvent>
@@ -658,38 +641,36 @@ async function dispatchChatCompletionsCore(
     retryBudget: options?.retryBudget ?? createRetryBudget(),
   }
 
-  const initialAttempt = await dispatchWithImageFallback({
-    compaction: options?.compaction,
-    headerOptions: headerOpts,
-    outboundPayload,
-    operation,
-    signal: options?.signal,
-    sourcePayload: normalizedPayload,
+  // The image, compatibility, and overload retries resend one logical
+  // request: Intercept holds only the response they settle on.
+  const active = await interceptLogicalSend(async () => {
+    const initialAttempt = await dispatchWithImageFallback({
+      compaction: options?.compaction,
+      headerOptions: headerOpts,
+      outboundPayload,
+      operation,
+      signal: options?.signal,
+      sourcePayload: normalizedPayload,
+    })
+    const settled =
+      options?.allowCompatibilityRetry === false ?
+        initialAttempt
+      : await retryChatCompatibility({
+          attempt: initialAttempt,
+          operation,
+          signal: options?.signal,
+        })
+    return normalizedPayload.stream ?
+        await retryOverloadedStream(settled, {
+          operation,
+          signal: options?.signal,
+        })
+      : settled
   })
-  const active =
-    options?.allowCompatibilityRetry === false ?
-      initialAttempt
-    : await retryChatCompatibility({
-        attempt: initialAttempt,
-        operation,
-        signal: options?.signal,
-      })
   if (normalizedPayload.stream) {
     return {
       processedPayload: active.payload,
-      response: await handleStreamingResponse(active.response, {
-        payload: active.payload,
-        retry: async () => {
-          if (!consumeExtraSend(operation.retryBudget)) return undefined
-          return await dispatchChatCompletions(active.payload, {
-            headerOptions: active.headerOptions,
-            operation,
-            reason: "http_retry",
-            recordSelection: false,
-            signal: options?.signal,
-          })
-        },
-      }),
+      response: handleStreamingResponse(active.response, active.payload),
     }
   }
 

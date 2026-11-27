@@ -7,6 +7,7 @@ import { TextInput } from "@astryxdesign/core/TextInput"
 import { useEffect, useRef, useState } from "react"
 
 import { DownloadIcon } from "../icons"
+import { confirmSessionEnded } from "../lib/api"
 import { useToast } from "../lib/toast"
 
 async function exportError(response: Response): Promise<string> {
@@ -79,7 +80,11 @@ export function DatabaseExport() {
         },
         body: JSON.stringify({ currentPassword }),
       })
-      if (!response.ok) throw new Error(await exportError(response))
+      if (!response.ok) {
+        // A wrong password also returns 401; the probe tells them apart.
+        if (response.status === 401) void confirmSessionEnded()
+        throw new Error(await exportError(response))
+      }
       await downloadResponse(response)
       setCurrentPassword("")
       toast.success("Database download started")

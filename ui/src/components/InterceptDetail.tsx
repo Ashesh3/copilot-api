@@ -12,14 +12,13 @@ import { Text } from "@astryxdesign/core/Text"
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import type {
-  AssistantDiffOp,
   CanonicalItem,
   InterceptPendingItem,
   InterceptTimeoutAction,
 } from "../../../src/lib/intercept/types"
 
 import { PlayIcon, RefreshCwIcon, SparklesIcon, XIcon } from "../icons"
-import { post, put } from "../lib/api"
+import { ApiError, post, put } from "../lib/api"
 import {
   formatCountdown,
   type InterceptDraft,
@@ -33,14 +32,19 @@ import { validateReplayDocument } from "../lib/json-document"
 import { useToast } from "../lib/toast"
 import { CodeMirrorDocument } from "./CodeMirrorDocument"
 import { DataTable } from "./common"
-import { InterceptDiffViewer } from "./InterceptDiffViewer"
+import {
+  type AssistantApplyRequest,
+  InterceptDiffViewer,
+} from "./InterceptDiffViewer"
 import { JsonCodeEditor } from "./JsonCodeEditor"
 import { StructuredMessageEditor } from "./StructuredMessageEditor"
 
 type DetailTab = "suggestion" | "messages" | "raw" | "headers" | "context"
+// `baseRevision` makes the server refuse (409) an edit written against an
+// older revision instead of silently overwriting newer changes.
 type DraftPayload =
   | { canonicalItems: Array<CanonicalItem>; baseRevision: number }
-  | { body: string }
+  | { body: string; baseRevision: number }
 
 const CONFLICT_MESSAGE =
   "This item changed on the server. Resolve the notice above your edits first."
@@ -69,10 +73,6 @@ function itemPath(id: string, suffix = ""): string {
   return `/dashboard/api/intercept/items/${encodeURIComponent(id)}${suffix}`
 }
 
-function errorMessage(err: unknown, fallback: string): string {
-  return err instanceof Error ? err.message : fallback
-}
-
 function HoldCountdown({
   expiresAtMs,
   timeoutAction,
@@ -98,6 +98,8 @@ export interface InterceptDetailProps {
   timeoutAction: InterceptTimeoutAction
   onDraftUpdate: (id: string, update: InterceptDraftUpdate) => void
   onItemChange: (item: InterceptPendingItem) => void
+  /** Refetches this item (and the queue) after the server reported it stale. */
+  onReload: () => Promise<void>
   onResolved: () => Promise<void>
 }
 
@@ -107,6 +109,7 @@ export function InterceptDetail({
   timeoutAction,
   onDraftUpdate,
   onItemChange,
+  onReload,
   onResolved,
 }: InterceptDetailProps) {
   const toast = useToast()
@@ -168,6 +171,15 @@ export function InterceptDetail({
   const updateDraft = (update: InterceptDraftUpdate) =>
     onDraftUpdate(item.id, update)
 
+  /**
+   * 409: the item moved on (new revision or suggestion); refetch so the
+   * operator sees the current state. A 401 already cleared every draft in `api`.
+   */
+  function reportError(err: unknown, fallback: string) {
+    if (err instanceof ApiError && err.status === 409) void onReload()
+    toast.error(err instanceof Error ? err.message : fallback)
+  }
+
   function editStructured(items: Array<CanonicalItem>) {
     updateDraft((prev) => ({
       source: "structured",
@@ -204,7 +216,7 @@ export function InterceptDetail({
     const payload: DraftPayload =
       draft.source === "structured" ?
         { canonicalItems: draft.items, baseRevision: draft.baseRevision }
-      : { body: draft.body }
+      : { body: draft.body, baseRevision: draft.baseRevision }
     updateDraft((prev) => prev && { ...prev, savingEdits: sentEdits })
     try {
       const updated = await put<InterceptPendingItem>(
@@ -225,7 +237,7 @@ export function InterceptDetail({
       return true
     } catch (err) {
       updateDraft((prev) => prev && { ...prev, savingEdits: undefined })
-      toast.error(errorMessage(err, "Could not save your edits"))
+      reportError(err, "Could not save your edits")
       return false
     }
   }
@@ -234,7 +246,10 @@ export function InterceptDetail({
     updateDraft(() => undefined)
   }
 
-  /** Raw drafts only: a raw body is a full replacement, so it may overwrite. */
+  /**
+   * Raw drafts only: a raw body is a full replacement, so it may overwrite.
+   * Rebasing onto the current revision makes the next save that overwrite.
+   */
   function keepDraft() {
     updateDraft((prev) =>
       prev?.source === "raw" ? { ...prev, baseRevision: item.revision } : prev,
@@ -250,7 +265,7 @@ export function InterceptDetail({
         }),
       )
     } catch (err) {
-      toast.error(errorMessage(err, "Could not revert"))
+      reportError(err, "Could not revert")
     } finally {
       setIsActing(false)
     }
@@ -273,7 +288,7 @@ export function InterceptDetail({
         baseRevision: draft.baseRevision,
       }
     } else if (draft?.source === "raw") {
-      payload = { body: draft.body }
+      payload = { body: draft.body, baseRevision: draft.baseRevision }
     }
     setIsActing(true)
     try {
@@ -287,7 +302,7 @@ export function InterceptDetail({
       await onResolved()
     } catch (err) {
       // The draft stays dirty so the operator can fix it and try again.
-      toast.error(errorMessage(err, "Could not forward"))
+      reportError(err, "Could not forward")
     } finally {
       setIsActing(false)
     }
@@ -306,7 +321,7 @@ export function InterceptDetail({
       )
       await onResolved()
     } catch (err) {
-      toast.error(errorMessage(err, "Could not drop"))
+      reportError(err, "Could not drop")
     } finally {
       setIsActing(false)
     }
@@ -326,27 +341,28 @@ export function InterceptDetail({
         setTab("suggestion")
       }
     } catch (err) {
-      toast.error(errorMessage(err, "AI Assist failed"))
+      reportError(err, "AI Assist failed")
     } finally {
       setIsRunningAssistant(false)
     }
   }
 
-  async function applySuggestion(operations: Array<AssistantDiffOp>) {
+  async function applySuggestion(request: AssistantApplyRequest) {
     setIsActing(true)
     try {
       onItemChange(
         await post<InterceptPendingItem>(
           itemPath(item.id, "/assistant/apply"),
-          { operations },
+          request,
         ),
       )
       setTab("messages")
+      const count = request.operations.length
       toast.success(
-        `Applied ${operations.length} change${operations.length === 1 ? "" : "s"}. Review, then forward.`,
+        `Applied ${count} change${count === 1 ? "" : "s"}. Review, then forward.`,
       )
     } catch (err) {
-      toast.error(errorMessage(err, "Could not apply the suggestion"))
+      reportError(err, "Could not apply the suggestion")
     } finally {
       setIsActing(false)
     }
@@ -360,7 +376,7 @@ export function InterceptDetail({
         ),
       )
     } catch (err) {
-      toast.error(errorMessage(err, "Could not dismiss the suggestion"))
+      reportError(err, "Could not dismiss the suggestion")
     }
   }
 
@@ -389,18 +405,27 @@ export function InterceptDetail({
 
   useEffect(() => {
     if (!isPending) return
+    // Capture phase on the window runs before CodeMirror's keymap, which
+    // would otherwise turn Mod-Enter into a newline while Raw has focus.
     const handleKeyDown = (event: KeyboardEvent) => {
+      if ((!event.ctrlKey && !event.metaKey) || event.key !== "Enter") return
+      // Dialogs own their keyboard; Mod-Enter there must not forward.
       if (
-        (event.ctrlKey || event.metaKey)
-        && event.key === "Enter"
-        && !event.defaultPrevented
+        event.target instanceof Element
+        && event.target.closest("dialog, [role='dialog'], [role='alertdialog']")
       ) {
-        event.preventDefault()
-        void forwardRef.current()
+        return
       }
+      event.preventDefault()
+      event.stopPropagation()
+      // A held key repeats; forward once.
+      if (!event.repeat) void forwardRef.current()
     }
-    globalThis.addEventListener("keydown", handleKeyDown)
-    return () => globalThis.removeEventListener("keydown", handleKeyDown)
+    globalThis.addEventListener("keydown", handleKeyDown, { capture: true })
+    return () =>
+      globalThis.removeEventListener("keydown", handleKeyDown, {
+        capture: true,
+      })
   }, [isPending])
 
   let revertAction = null
@@ -438,7 +463,7 @@ export function InterceptDetail({
               readOnly={!isPending}
               canApply={draft === undefined}
               isApplying={isActing}
-              onApply={(ops) => void applySuggestion(ops)}
+              onApply={(request) => void applySuggestion(request)}
               onReject={() => void rejectSuggestion()}
             />
           : null
@@ -503,6 +528,7 @@ export function InterceptDetail({
             )}
             <StructuredMessageEditor
               items={structuredItems}
+              originalItems={item.canonical.items}
               readOnly={!isPending}
               editable={item.canonical.editable}
               isDisabled={isSaving || isActing}

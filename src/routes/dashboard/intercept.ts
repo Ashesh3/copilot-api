@@ -3,14 +3,18 @@ import type { Context } from "hono"
 import { streamSSE } from "hono/streaming"
 import { z } from "zod"
 
-import { authenticateAdminRequest } from "~/lib/admin-auth"
+import { isAdminSessionActive } from "~/lib/admin-auth"
 import {
   AssistantDiffError,
   assistantDiffOpsSchema,
   listAssistantModels,
 } from "~/lib/intercept/assistant"
 import { CanonicalEditError } from "~/lib/intercept/canonical"
-import { interceptEngine, StaleRevisionError } from "~/lib/intercept/engine"
+import {
+  CaptureBudgetError,
+  interceptEngine,
+  StaleRevisionError,
+} from "~/lib/intercept/engine"
 import { validateFilterRegex } from "~/lib/intercept/filters"
 
 const filterConditionSchema = z
@@ -115,6 +119,8 @@ const triggerAssistantSchema = z.object({
 })
 
 const applyAssistantSchema = z.object({
+  suggestionId: z.string().min(1),
+  revision: z.number().int().min(0),
   operations: assistantDiffOpsSchema.optional(),
 })
 
@@ -151,10 +157,16 @@ async function readJsonBody<T>(
     : { ok: false, error: firstIssue(parsed.error, "Invalid request body") }
 }
 
-/** 409: the item changed underneath. 422: the edit cannot be written back. */
+/**
+ * 409: the item changed underneath. 413: capture memory cannot hold the edit.
+ * 422: the edit cannot be written back.
+ */
 function editFailure(c: Context, error: unknown) {
   if (error instanceof StaleRevisionError) {
     return c.json({ error: error.message }, 409)
+  }
+  if (error instanceof CaptureBudgetError) {
+    return c.json({ error: error.message }, 413)
   }
   if (
     error instanceof CanonicalEditError
@@ -265,12 +277,19 @@ export async function handleTriggerInterceptAssistant(c: Context) {
 }
 
 export async function handleApplyInterceptAssistant(c: Context) {
-  const body = await readJsonBody(c, applyAssistantSchema, { optional: true })
-  if (!body.ok) return c.json({ error: body.error }, 400)
+  const body = await readJsonBody(c, applyAssistantSchema, { optional: false })
+  if (!body.ok || !body.value) {
+    return c.json(
+      { error: body.ok ? "A JSON body is required" : body.error },
+      400,
+    )
+  }
+  const { suggestionId, revision, operations } = body.value
   try {
     const updated = interceptEngine.applyAssistantDiff(
       c.req.param("id") ?? "",
-      body.value?.operations,
+      { suggestionId, revision },
+      operations,
     )
     return updated ? c.json(updated) : notHeld(c)
   } catch (error) {
@@ -286,8 +305,6 @@ export function handleRejectInterceptAssistant(c: Context) {
 }
 
 const HEARTBEAT_MS = 15_000
-/** Events are delivered only while the admin session that opened the stream is valid. */
-const SESSION_RECHECK_MS = 5_000
 /** A client this far behind reconnects and starts again from a snapshot. */
 const MAX_QUEUED_EVENTS = 500
 
@@ -298,7 +315,6 @@ export function handleInterceptEvents(c: Context) {
     let closed = false
     let queued = 0
     let delivery = Promise.resolve()
-    let verifiedAt = Date.now()
 
     const close = () => {
       if (closed) return
@@ -308,22 +324,12 @@ export function handleInterceptEvents(c: Context) {
       finish(null)
     }
 
-    const markVerified = () => {
-      verifiedAt = Date.now()
-    }
-
-    // Delivery stops for good once the session that opened the stream is
-    // logged out, expires, or is replaced by a password change.
-    const sessionValid = async () => {
-      if (Date.now() - verifiedAt < SESSION_RECHECK_MS) return true
-      if (!(await authenticateAdminRequest(c.req.raw))) return false
-      markVerified()
-      return true
-    }
-
+    // Every event is delivered only while the session that opened the stream
+    // is current: logout, a password change, or expiry ends it at once. The
+    // check never extends the session, so an open stream cannot keep it alive.
     const deliver = async (message: { event: string; data: string }) => {
       if (closed) return
-      if (!(await sessionValid())) {
+      if (!(await isAdminSessionActive(c.req.raw))) {
         close()
         return
       }

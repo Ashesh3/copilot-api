@@ -39,6 +39,7 @@ import {
   createModelNotFoundError,
   LocalHTTPError,
 } from "~/lib/error"
+import { interceptLogicalSend } from "~/lib/intercept/upstream"
 import { recordModelFallbackResponse } from "~/lib/model-fallback"
 import {
   getClientSessionId,
@@ -1028,37 +1029,39 @@ async function routedControlPlaneFetchInner(
  * construction in all modes to avoid double-advancing the round-robin.
  */
 // Keep selection, failover, and the shared logical-call budget together.
-
+// Intercept holds only the response this returns, never a failover attempt's.
 export async function routedFetch(
   path: string,
   init: RequestInit | undefined,
   options: RoutedFetchOptions,
 ): Promise<{ response: Response; account: Account | undefined }> {
-  if (peekStorageRuntime() && !getRequestSnapshot())
-    await getAccountsService().refreshRuntime()
-  const result = await withAccountLeases(init?.signal, async () => {
-    const single =
-      getTurnAccount(options.modelId)?.single ?? !usesPooledAccounts()
-    const result = await routedFetchInner(path, init, options)
+  return await interceptLogicalSend(async () => {
+    if (peekStorageRuntime() && !getRequestSnapshot())
+      await getAccountsService().refreshRuntime()
+    const result = await withAccountLeases(init?.signal, async () => {
+      const single =
+        getTurnAccount(options.modelId)?.single ?? !usesPooledAccounts()
+      const result = await routedFetchInner(path, init, options)
+      if (
+        result.account
+        && path !== "/v1/messages/count_tokens"
+        && path !== "/responses/input_tokens"
+      )
+        retainTurnAccount(options.modelId, result.account, single)
+      return result
+    })
     if (
-      result.account
-      && path !== "/v1/messages/count_tokens"
-      && path !== "/responses/input_tokens"
-    )
-      retainTurnAccount(options.modelId, result.account, single)
+      path === "/chat/completions"
+      || path === "/responses"
+      || path === "/v1/messages"
+    ) {
+      result.response = await recordModelFallbackResponse(result.response, {
+        endpoint: path,
+        signal: init?.signal,
+      })
+    }
     return result
   })
-  if (
-    path === "/chat/completions"
-    || path === "/responses"
-    || path === "/v1/messages"
-  ) {
-    result.response = await recordModelFallbackResponse(result.response, {
-      endpoint: path,
-      signal: init?.signal,
-    })
-  }
-  return result
 }
 
 // eslint-disable-next-line complexity, max-lines-per-function -- Keep single-account compatibility, pooled selection, and retry attribution in one transport decision.

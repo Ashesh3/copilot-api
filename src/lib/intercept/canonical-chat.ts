@@ -503,11 +503,20 @@ export function patchChatResponse(
     ...body,
     choices: choices.map((choice, c) => {
       if (!isRecord(choice)) return choice
+      const own = byChoice.get(c) ?? []
+      const before = parsed.filter((p) => p.container === `c${c}`)
+      // An untouched choice stays verbatim, whatever shape its message has.
+      if (
+        own.length === before.length
+        && own.every((e, k) => e.orig === before[k] && !e.changed)
+      ) {
+        return choice
+      }
       const origMsg = isRecord(choice.message) ? choice.message : undefined
       const message = buildChatMessage(
         origMsg ?? { role: "assistant" },
         "assistant",
-        byChoice.get(c) ?? [],
+        own,
         refs.get(`c${c}`) ?? NO_REFS,
         reasoningField,
       )

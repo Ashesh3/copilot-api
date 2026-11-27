@@ -183,6 +183,31 @@ export function responseMayMatch(
   return known.every((condition) => evaluateFilterCondition(condition, ctx))
 }
 
+/**
+ * Whether metadata alone already confirms a response match, so its body
+ * cannot change the outcome. False while a body condition is undecided.
+ */
+export function responseMatchConfirmed(
+  config: InterceptConfig,
+  ctx: InterceptMatchContext,
+): boolean {
+  if (!config.enabled || !directionMatchesPhase(config.direction, ctx.phase)) {
+    return false
+  }
+  const { filters } = config
+  if (!filters.enabled) return true
+  const active = filters.conditions.filter((condition) => condition.enabled)
+  if (active.length === 0) return true
+  const known = active.filter((condition) => condition.field !== "responseBody")
+  if (filters.matchMode === "any") {
+    return known.some((condition) => evaluateFilterCondition(condition, ctx))
+  }
+  return (
+    known.length === active.length
+    && known.every((condition) => evaluateFilterCondition(condition, ctx))
+  )
+}
+
 export function validateFilterRegex(pattern: string): string | null {
   if (!pattern) return null
   try {

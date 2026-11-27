@@ -335,6 +335,21 @@ export async function authenticateAdminRequest(
       { tokenHash, csrfToken, expiresAt }
     : null
 }
+
+/**
+ * Whether the request's admin session is still current: not logged out,
+ * revoked by a password change, or expired. Unlike `authenticateAdminRequest`
+ * it never extends the session, so a long-lived stream cannot keep it alive.
+ */
+export async function isAdminSessionActive(request: Request): Promise<boolean> {
+  const clientIp = extractClientIpFromHeaders(request.headers)
+  if (clientIp !== null && isIpBlocked(clientIp)) return false
+  const token = parseCookieHeader(request.headers.get("cookie"))[
+    ADMIN_SESSION_COOKIE
+  ]
+  if (!token) return false
+  return (await repository().session(digest(token), now())) !== null
+}
 export function isAllowedAdminOrigin(origin: string | null): boolean {
   if (!origin) return false
   const configured = process.env.COPILOT_ADMIN_ORIGIN?.trim()

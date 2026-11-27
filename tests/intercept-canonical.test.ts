@@ -311,6 +311,26 @@ describe("Chat Completions requests", () => {
       function: { name: "more", arguments: '{"b":true}' },
     })
   })
+
+  test("messages with empty content survive edits elsewhere", () => {
+    const original: Json = {
+      model: "gpt-4o",
+      messages: [
+        { role: "user", content: "Hi" },
+        { role: "assistant", content: null },
+        { role: "assistant", content: [] },
+        { role: "user", content: "" },
+        { role: "user", content: "Go" },
+      ],
+    }
+    const raw = JSON.stringify(original)
+    const emptyView = view("/chat/completions", "request", raw)
+    const expected = structuredClone(original)
+    expected.messages[4].content = "Go on"
+    expect(
+      edit(emptyView, raw, [{ op: "replace", id: "msg-4", content: "Go on" }]),
+    ).toBe(JSON.stringify(expected))
+  })
 })
 
 describe("Anthropic Messages requests", () => {
@@ -457,6 +477,119 @@ describe("Anthropic Messages requests", () => {
     })
     expect(out.messages[2]).toEqual(original.messages[2])
   })
+
+  test("messages with empty content survive edits elsewhere, in order", () => {
+    const original: Json = {
+      model: "claude-sonnet-4",
+      system: [],
+      messages: [
+        { role: "user", content: "Hi" },
+        { role: "assistant", content: [] },
+        { role: "user", content: [{ type: "text", text: "Go" }] },
+        { role: "assistant", content: "" },
+        { role: "user", content: [{ type: "text", text: "Again" }] },
+        { role: "assistant", content: [] },
+      ],
+    }
+    const raw = JSON.stringify(original)
+    const emptyView = view("/v1/messages", "request", raw)
+    expect(emptyView.items.map((i) => i.id)).toEqual([
+      "msg-0",
+      "msg-2-blk-0",
+      "msg-3",
+      "msg-4-blk-0",
+    ])
+
+    const expected = structuredClone(original)
+    expected.messages[2].content[0].text = "Go on"
+    expect(
+      edit(emptyView, raw, [
+        { op: "replace", id: "msg-2-blk-0", content: "Go on" },
+      ]),
+    ).toBe(JSON.stringify(expected))
+
+    const deleted = JSON.parse(
+      edit(emptyView, raw, [{ op: "delete", id: "msg-0" }]),
+    ) as Json
+    expect(deleted.messages).toEqual(original.messages.slice(1))
+    expect(deleted.system).toEqual([])
+
+    const appended = JSON.parse(
+      edit(emptyView, raw, [
+        {
+          op: "insert_after",
+          afterId: "msg-4-blk-0",
+          kind: "user",
+          content: "More",
+        },
+      ]),
+    ) as Json
+    expect(appended.messages).toEqual([
+      ...(original.messages as Array<Json>),
+      { role: "user", content: [{ type: "text", text: "More" }] },
+    ])
+  })
+
+  test("an empty turn stays after a neighbour whose kind changed", () => {
+    const original: Json = {
+      model: "claude-sonnet-4",
+      messages: [
+        { role: "user", content: "A" },
+        { role: "assistant", content: [] },
+        { role: "user", content: "B" },
+      ],
+    }
+    const raw = JSON.stringify(original)
+    const emptyView = view("/v1/messages", "request", raw)
+    expect(emptyView.items.map((i) => i.id)).toEqual(["msg-0", "msg-2"])
+    const empty = JSON.stringify(original.messages[1])
+    const last = JSON.stringify(original.messages[2])
+
+    const retyped = JSON.parse(
+      serializeCanonicalItemsToBody({
+        originalBody: raw,
+        canonical: emptyView,
+        items: emptyView.items.map((item) =>
+          item.id === "msg-0" ?
+            { ...item, kind: "assistant", role: "assistant" }
+          : item,
+        ),
+      }),
+    ) as Json
+    expect(retyped.messages).toHaveLength(3)
+    expect(retyped.messages[0]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "A" }],
+    })
+    expect(JSON.stringify(retyped.messages[1])).toBe(empty)
+    expect(JSON.stringify(retyped.messages[2])).toBe(last)
+
+    const inserted = JSON.parse(
+      edit(emptyView, raw, [
+        {
+          op: "insert_after",
+          afterId: "msg-0",
+          kind: "assistant",
+          content: "Hmm",
+        },
+      ]),
+    ) as Json
+    expect(inserted.messages).toEqual([
+      original.messages[0],
+      original.messages[1],
+      { role: "assistant", content: [{ type: "text", text: "Hmm" }] },
+      original.messages[2],
+    ])
+
+    const withoutFirst = JSON.parse(
+      edit(emptyView, raw, [{ op: "delete", id: "msg-0" }]),
+    ) as Json
+    expect(withoutFirst.messages).toEqual(original.messages.slice(1))
+    const withoutLast = JSON.parse(
+      edit(emptyView, raw, [{ op: "delete", id: "msg-2" }]),
+    ) as Json
+    expect(withoutLast.messages).toEqual(original.messages.slice(0, 2))
+  })
 })
 
 describe("Responses requests", () => {
@@ -560,6 +693,31 @@ describe("Responses requests", () => {
     ) as Json
     expect(out.input).toBe("hello")
   })
+
+  test("empty messages and reasoning survive edits elsewhere", () => {
+    const original: Json = {
+      model: "gpt-5",
+      input: [
+        { type: "message", role: "user", content: [] },
+        { type: "reasoning", id: "rs_1", summary: [] },
+        { type: "message", role: "assistant", content: "" },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Go" }],
+        },
+      ],
+    }
+    const raw = JSON.stringify(original)
+    const emptyView = view("/responses", "request", raw)
+    const expected = structuredClone(original)
+    expected.input[3].content[0].text = "Go on"
+    expect(
+      edit(emptyView, raw, [
+        { op: "replace", id: "in-3-p-0", content: "Go on" },
+      ]),
+    ).toBe(JSON.stringify(expected))
+  })
 })
 
 describe("JSON responses", () => {
@@ -654,6 +812,27 @@ describe("JSON responses", () => {
     ) as Json
     expect(removed.choices[0].finish_reason).toBe("stop")
     expect(removed.choices[0].message.tool_calls).toBeUndefined()
+  })
+
+  test("Chat keeps an untouched choice verbatim, even without a message", () => {
+    const original = {
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "A" },
+          finish_reason: "stop",
+        },
+        { index: 1, message: null, finish_reason: "length" },
+      ],
+    }
+    const body = JSON.stringify(original)
+    const parsed = view("/chat/completions", "response", body)
+    expect(parsed.items.map((i) => i.id)).toEqual(["out-0", "out-1"])
+    const out = JSON.parse(
+      edit(parsed, body, [{ op: "replace", id: "out-0", content: "A2" }]),
+    ) as Json
+    expect(out.choices[0].message.content).toBe("A2")
+    expect(out.choices[1]).toEqual(original.choices[1])
   })
 
   test("Anthropic keeps signature, ids, usage and reconciles stop_reason", () => {

@@ -4,6 +4,7 @@ import type { ResponsesWebSocketData } from "~/routes/responses/websocket"
 import type { Model } from "~/services/copilot/get-models"
 
 import { setConfigForTest } from "~/lib/config"
+import { interceptEngine } from "~/lib/intercept/engine"
 import { getLlmDebugLog, listLlmDebugLogs } from "~/lib/llm-debug-log"
 import {
   getLoadedModelFallbackConfig,
@@ -456,6 +457,67 @@ test.each(transports)(
       ).toBe(false)
   },
 )
+
+function holdResponses(
+  decide: (model: string | undefined, id: string) => void,
+) {
+  interceptEngine.updateConfig({ enabled: true, direction: "response" })
+  return interceptEngine.subscribe((event) => {
+    if (event.type === "queued") decide(event.item.model, event.item.id)
+  })
+}
+
+test("an Intercept edit that turns the source reply into a refusal still falls back", async () => {
+  upstreamReply = (body, index) => completedResponse(String(body.model), index)
+  const refusal = await refusedResponse(sourceModel, 1).text()
+  const unsubscribe = holdResponses((held, id) => {
+    interceptEngine.forwardItem(
+      id,
+      held === sourceModel ? { body: refusal } : undefined,
+    )
+  })
+  try {
+    const client = await createClient("HTTP")
+    const response = await client.send({ input: reasoningInput() })
+
+    expect(calls.map((call) => call.model)).toEqual([sourceModel, targetModel])
+    expect(response.frames.at(-1)).toMatchObject({
+      type: "response.completed",
+      response: { output_text: "fallback answer" },
+    })
+  } finally {
+    unsubscribe()
+    interceptEngine.resetForTest()
+  }
+})
+
+test("a fallback reply dropped in Intercept is never remembered for later turns", async () => {
+  let dropped = false
+  const unsubscribe = holdResponses((held, id) => {
+    if (held === targetModel && !dropped) {
+      dropped = true
+      interceptEngine.dropItem(id)
+    } else {
+      interceptEngine.forwardItem(id)
+    }
+  })
+  try {
+    const client = await createClient("HTTP")
+    await client.send({ input: reasoningInput() })
+    await client.send({ input: reasoningInput() })
+
+    // Remembered, the second turn would go straight to the fallback model.
+    expect(calls.map((call) => call.model)).toEqual([
+      sourceModel,
+      targetModel,
+      sourceModel,
+      targetModel,
+    ])
+  } finally {
+    unsubscribe()
+    interceptEngine.resetForTest()
+  }
+})
 
 function model(id: string): Model {
   return {

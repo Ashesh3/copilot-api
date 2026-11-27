@@ -19,6 +19,7 @@ import {
   reconcileStopReason,
   requireToolCallId,
   requireToolName,
+  type Segment,
   type SseEvent,
   sseEvent,
   validatedToolArguments,
@@ -310,8 +311,13 @@ function anthropicRole(item: CanonicalItem): string {
     : "assistant"
 }
 
-function buildSystem(orig: unknown, entries: ReadonlyArray<Entry>): unknown {
-  if (entries.length === 0) return undefined
+function buildSystem(
+  orig: unknown,
+  entries: ReadonlyArray<Entry>,
+  hadItems: boolean,
+): unknown {
+  // A system that produced no items (`[]`, `null`) is kept as-is.
+  if (entries.length === 0) return hadItems ? undefined : orig
   const [first] = entries
   if (
     entries.length === 1
@@ -320,6 +326,47 @@ function buildSystem(orig: unknown, entries: ReadonlyArray<Entry>): unknown {
     return first.orig && !first.changed ? orig : first.item.content
   }
   return entries.map((e) => blockFor(e, asArray(orig)))
+}
+
+/**
+ * Re-inserts messages that produced no items (e.g. `content: []`) verbatim,
+ * each right after the output of the nearest earlier original message that
+ * survived the edit, or first when none did. An item whose kind changed is
+ * rebuilt as a new node but still counts for the message it came from.
+ */
+function withEmptyMessages(
+  messages: ReadonlyArray<unknown>,
+  parsed: ReadonlyArray<ParsedItem>,
+  segments: ReadonlyArray<Segment>,
+  built: Array<unknown>,
+): Array<unknown> {
+  const containerById = new Map(parsed.map((p) => [p.item.id, p.container]))
+  const lastSegment = new Map<string, number>()
+  for (const [s, segment] of segments.entries()) {
+    for (const e of segment.entries) {
+      const key = e.orig?.container ?? containerById.get(e.item.id)
+      if (key !== undefined) lastSegment.set(key, s)
+    }
+  }
+  const withItems = new Set(containerById.values())
+  const after = new Map<number, Array<unknown>>()
+  let anchor = -1
+  for (const [i, msg] of messages.entries()) {
+    const key = `m${i}`
+    const at = lastSegment.get(key)
+    if (at !== undefined) anchor = at
+    else if (!withItems.has(key)) {
+      const list = after.get(anchor) ?? []
+      list.push(msg)
+      after.set(anchor, list)
+    }
+  }
+  if (after.size === 0) return built
+  const out = [...(after.get(-1) ?? [])]
+  for (const [s, msg] of built.entries()) {
+    out.push(msg, ...(after.get(s) ?? []))
+  }
+  return out
 }
 
 function isSystemEntry(e: Entry): boolean {
@@ -333,7 +380,8 @@ export function patchAnthropicRequest(
   edited: ReadonlyArray<CanonicalItem>,
 ): JsonRecord | undefined {
   const messages = asArray(body.messages)
-  const { entries, unchanged } = classifyEdits(parseRequestItems(body), edited)
+  const parsed = parseRequestItems(body)
+  const { entries, unchanged } = classifyEdits(parsed, edited)
   if (unchanged) return undefined
 
   for (const e of entries) {
@@ -378,10 +426,14 @@ export function patchAnthropicRequest(
     return msg
   })
 
-  const next: JsonRecord = { ...body, messages: nextMessages }
+  const next: JsonRecord = {
+    ...body,
+    messages: withEmptyMessages(messages, parsed, segments, nextMessages),
+  }
   const system = buildSystem(
     body.system,
     entries.filter((e) => isSystemEntry(e)),
+    parsed.some((p) => p.container === "sys"),
   )
   if (system === undefined) Reflect.deleteProperty(next, "system")
   else next.system = system
