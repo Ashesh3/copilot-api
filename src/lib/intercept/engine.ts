@@ -629,7 +629,8 @@ export class InterceptEngine {
     }
 
     // Operator-configured hold deadline for Intercept, not an upstream timeout.
-    const holdMs = this.config.timeoutSeconds * 1000
+    // A response's deadline started when its capture began.
+    const holdMs = Math.max(0, item.expiresAtMs - Date.now())
     const timer = setTimeout(() => this.resolveOnTimeout(item.id), holdMs)
     const onAbort = () => {
       this.finalizeSlot(item.id, "aborted", {
@@ -703,7 +704,7 @@ export class InterceptEngine {
       model: requestSnapshot.model ?? canonical.model,
       sessionId: requestSnapshot.sessionId,
       canonical,
-      holdSeconds: this.config.timeoutSeconds,
+      expiresAtMs: Date.now() + this.config.timeoutSeconds * 1000,
     })
 
     consola.info(
@@ -730,20 +731,24 @@ export class InterceptEngine {
   /**
    * Read a response that may be held. Undefined means pass it through: it
    * cannot be held, Intercept turned off, or the client left while it was
-   * read. A read that outlasts the hold deadline follows `timeoutAction`, but
-   * only when the filters already match without the body: a response whose
-   * body might not match is passed through rather than dropped.
+   * read. Reading counts against the same hold deadline as the decision that
+   * follows; a read that outlasts it follows `timeoutAction`, but only when
+   * the filters already match without the body: a response whose body might
+   * not match is passed through rather than dropped.
    */
   private async captureResponse(
     input: InterceptResponseInput,
-    matchConfirmed: boolean,
+    hold: { expiresAtMs: number; matchConfirmed: boolean },
   ): Promise<{ text: string; reservedBytes: number } | undefined> {
     const turnedOff = this.captureAbort.signal
     // Operator-configured hold deadline for Intercept, not an upstream timeout.
     const deadline = new AbortController()
-    const timer = setTimeout(() => {
-      deadline.abort()
-    }, this.config.timeoutSeconds * 1000)
+    const timer = setTimeout(
+      () => {
+        deadline.abort()
+      },
+      Math.max(0, hold.expiresAtMs - Date.now()),
+    )
     let copy: Awaited<ReturnType<typeof readResponseCopy>>
     try {
       copy = await readResponseCopy(
@@ -763,7 +768,7 @@ export class InterceptEngine {
       && deadline.signal.aborted
       && !turnedOff.aborted
       && !input.signal?.aborted
-      && matchConfirmed
+      && hold.matchConfirmed
       && this.config.timeoutAction === "drop"
     ) {
       void input.response.body?.cancel().catch(() => undefined)
@@ -802,10 +807,11 @@ export class InterceptEngine {
     }
     if (!responseMayMatch(this.config, context)) return input.response
 
-    const copy = await this.captureResponse(
-      input,
-      responseMatchConfirmed(this.config, context),
-    )
+    const expiresAtMs = Date.now() + this.config.timeoutSeconds * 1000
+    const copy = await this.captureResponse(input, {
+      expiresAtMs,
+      matchConfirmed: responseMatchConfirmed(this.config, context),
+    })
     if (!copy) return input.response
     if (
       !shouldIntercept(this.config, { ...context, responseBody: copy.text })
@@ -828,7 +834,7 @@ export class InterceptEngine {
       model: snapshot.model ?? canonical.model,
       sessionId: snapshot.sessionId,
       canonical,
-      holdSeconds: this.config.timeoutSeconds,
+      expiresAtMs,
     })
     item.responseStatus = input.response.status
     item.responseStatusText = input.response.statusText

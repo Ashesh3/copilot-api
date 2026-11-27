@@ -161,6 +161,52 @@ test("a new request in the same logical send is reviewed again", async () => {
   expect(interceptEngine.getSnapshot().recent).toHaveLength(2)
 })
 
+test("replay never writes through an inherited __proto__", async () => {
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  const { send } = recorder()
+  const original = '{"__proto__":{"polluted":1},"model":"gpt-4o","x":"a"}'
+  const approved = '{"__proto__":{"polluted":2},"model":"gpt-4o","x":"a"}'
+
+  await logicalSend(async () => {
+    await holdAndApprove(original, approved, send)
+    // The retry body has no own __proto__ to edit, so it is reviewed again.
+    const queued = nextQueued()
+    const resend = interceptUpstreamSend(
+      {
+        ...SEND,
+        body: '{"model":"gpt-4o","x":"a"}',
+        reason: "compatibility_retry",
+      },
+      send,
+    )
+    interceptEngine.forwardItem(await queued)
+    await resend
+  })
+
+  expect(Object.hasOwn(Object.prototype, "polluted")).toBe(false)
+  expect(interceptEngine.getSnapshot().recent).toHaveLength(2)
+})
+
+test("an approved __proto__ key is replayed as an own property", async () => {
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  const { sent, send } = recorder()
+
+  await logicalSend(async () => {
+    await holdAndApprove(
+      '{"model":"gpt-4o","drop":1}',
+      '{"model":"gpt-4o","drop":1,"__proto__":{"polluted":true}}',
+      send,
+    )
+    await interceptUpstreamSend(
+      { ...SEND, body: '{"model":"gpt-4o"}', reason: "compatibility_retry" },
+      send,
+    )
+  })
+
+  expect(Object.hasOwn(Object.prototype, "polluted")).toBe(false)
+  expect(sent.at(-1)).toBe('{"model":"gpt-4o","__proto__":{"polluted":true}}')
+})
+
 test("a retry loop holds only the response it settles on", async () => {
   interceptEngine.updateConfig({ enabled: true, direction: "response" })
   const statuses: Array<number> = []

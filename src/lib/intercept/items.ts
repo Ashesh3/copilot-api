@@ -145,7 +145,8 @@ export function buildItem(options: {
   model?: string
   sessionId?: string
   canonical: CanonicalView
-  holdSeconds: number
+  /** Absolute hold deadline; a response's began when its capture started. */
+  expiresAtMs: number
 }): InterceptPendingItem {
   const now = Date.now()
   return {
@@ -154,7 +155,7 @@ export function buildItem(options: {
     status: "pending",
     createdAt: new Date(now).toISOString(),
     createdAtMs: now,
-    expiresAtMs: now + options.holdSeconds * 1000,
+    expiresAtMs: options.expiresAtMs,
     modified: false,
     revision: 0,
     method: options.method,

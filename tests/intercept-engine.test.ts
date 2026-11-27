@@ -198,6 +198,38 @@ describe("response capture", () => {
     expect(result).toBe(stalled)
   })
 
+  test("reading a response counts against its hold time", async () => {
+    const engine = newEngine()
+    engine.updateConfig({
+      enabled: true,
+      direction: "response",
+      timeoutSeconds: 15,
+    })
+    const body = JSON.stringify({ choices: [] })
+    const slow = new Response(
+      new ReadableStream<Uint8Array>({
+        async start(controller) {
+          await Bun.sleep(50)
+          controller.enqueue(new TextEncoder().encode(body))
+          controller.close()
+        },
+      }),
+      { headers: { "content-type": "application/json" } },
+    )
+    const startedAt = Date.now()
+
+    const queued = nextQueued(engine)
+    const pending = engine.interceptResponse(
+      responseInput(slow, chatRequest("hi").body),
+    )
+    const item = engine.getItem(await queued)
+
+    expect(item?.expiresAtMs).toBeLessThanOrEqual(startedAt + 15_000 + 5)
+    expect(item?.expiresAtMs).toBeLessThan((item?.createdAtMs ?? 0) + 15_000)
+    engine.forwardAllPending()
+    await pending
+  })
+
   test("a dropped response is a local error, not an upstream response", async () => {
     const engine = newEngine()
     engine.updateConfig({ enabled: true, direction: "response" })

@@ -151,8 +151,17 @@ function applyChanges(
     ) {
       return undefined
     }
-    if (change.after) container[key] = structuredClone(change.after.value)
-    else Reflect.deleteProperty(container, key)
+    if (change.after) {
+      // A plain assignment to a `__proto__` key would replace the prototype.
+      Object.defineProperty(container, key, {
+        value: structuredClone(change.after.value),
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      })
+    } else {
+      Reflect.deleteProperty(container, key)
+    }
   }
   return { value: root }
 }
