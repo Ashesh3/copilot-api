@@ -36,8 +36,8 @@ function textBytes(text: string): number {
 /**
  * Capture memory an item holds: its original body, the current body and the
  * view parsed from it, the request context of a response with its view, and
- * a suggestion's preview body with its view. Parsed views are counted at the
- * size of the text they came from.
+ * a suggestion's summary, operations, and preview body with its view. Parsed
+ * views are counted at the size of the text they came from.
  */
 export function retainedBytes(
   item: Pick<
@@ -45,12 +45,18 @@ export function retainedBytes(
     "originalBody" | "currentBody" | "requestContext" | "assistantSuggestion"
   >,
 ): number {
-  const preview = item.assistantSuggestion?.previewBody
+  const suggestion = item.assistantSuggestion
+  const suggestionBytes =
+    suggestion ?
+      textBytes(suggestion.summary)
+      + textBytes(JSON.stringify(suggestion.operations))
+      + (suggestion.previewBody ? 2 * textBytes(suggestion.previewBody) : 0)
+    : 0
   return (
     textBytes(item.originalBody)
     + 2 * textBytes(item.currentBody)
     + (item.requestContext ? 2 * textBytes(item.requestContext.body) : 0)
-    + (preview ? 2 * textBytes(preview) : 0)
+    + suggestionBytes
   )
 }
 
@@ -66,6 +72,10 @@ export async function readResponseCopy(
   path: string,
   signal: AbortSignal,
 ): Promise<{ text: string; reservedBytes: number } | undefined> {
+  // Read through a function: the signal can abort during any await below.
+  const aborted = () => signal.aborted
+  // An abort listener never fires for a signal that is already aborted.
+  if (aborted()) return undefined
   const body = response.clone().body
   if (!body) return { text: "", reservedBytes: 0 }
   const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>
@@ -78,7 +88,7 @@ export async function readResponseCopy(
   try {
     for (;;) {
       const { done, value } = await reader.read()
-      if (signal.aborted) {
+      if (aborted()) {
         releaseDebugCaptureMemory(reservedBytes)
         return undefined
       }

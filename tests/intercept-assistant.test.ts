@@ -304,6 +304,33 @@ describe("assistant prompt", () => {
     ).not.toThrow()
   })
 
+  test("refuses raw-only payloads before calling a model", async () => {
+    const item = heldItem([], {
+      canonical: {
+        protocol: "generic_json",
+        phase: "request",
+        items: [],
+        editable: false,
+        readOnlyReason: "Embeddings requests are edited as raw JSON.",
+      },
+    })
+
+    const failure: unknown = await runInterceptAssistant({
+      item,
+      config: ASSISTANT,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(Error)
+    expect(String(failure)).toContain(
+      "Embeddings requests are edited as raw JSON.",
+    )
+  })
+})
+
+describe("assistant prompt budget", () => {
   test("keeps instructions first but within the total budget", () => {
     const instructions = (prefix: string): Array<CanonicalItem> =>
       Array.from({ length: 12 }, (_, index) => ({
@@ -335,7 +362,7 @@ describe("assistant prompt", () => {
     })
 
     const shownChars = [...prompt.targets.values()].reduce(
-      (total, entry) => total + entry.text.length,
+      (total, entry) => total + entry.rendered.length,
       0,
     )
     expect(shownChars).toBeLessThanOrEqual(120_000)
@@ -354,29 +381,39 @@ describe("assistant prompt", () => {
     ).toThrow("Unknown item id sys-11")
   })
 
-  test("refuses raw-only payloads before calling a model", async () => {
-    const item = heldItem([], {
-      canonical: {
-        protocol: "generic_json",
-        phase: "request",
-        items: [],
-        editable: false,
-        readOnlyReason: "Embeddings requests are edited as raw JSON.",
-      },
+  test("charges item headers so many empty instructions stay within the budget", () => {
+    const items: Array<CanonicalItem> = Array.from(
+      { length: 5000 },
+      (_, index) => ({
+        id: `sys-${index}`,
+        kind: "system" as const,
+        label: "System",
+        content: "",
+      }),
+    )
+    const prompt = buildAssistantPrompt({
+      item: heldItem(items),
+      instruction: "Change nothing",
     })
 
-    const failure: unknown = await runInterceptAssistant({
-      item,
-      config: ASSISTANT,
-    }).then(
-      () => undefined,
-      (error: unknown) => error,
+    const header = "# TARGET ITEMS (the request you are editing)\n"
+    const section = prompt.user.slice(
+      prompt.user.indexOf(header) + header.length,
     )
-
-    expect(failure).toBeInstanceOf(Error)
-    expect(String(failure)).toContain(
-      "Embeddings requests are edited as raw JSON.",
+    expect(section.length).toBeLessThanOrEqual(120_000)
+    expect(section).toStartWith(
+      `(${5000 - prompt.targets.size} system or developer items are not shown`,
     )
+    expect(prompt.targets.has("sys-0")).toBe(true)
+    expect(prompt.targets.has("sys-4999")).toBe(false)
+    expect(section).not.toContain("id=sys-4999 ")
+    expect(() =>
+      validateDiffOps(
+        items,
+        [{ op: "delete", id: "sys-4999" }],
+        prompt.targets,
+      ),
+    ).toThrow("Unknown item id sys-4999")
   })
 })
 

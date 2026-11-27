@@ -34,7 +34,11 @@ import {
   parseCanonicalView,
   serializeCanonicalItemsToBody,
 } from "./canonical"
-import { responseMayMatch, shouldIntercept } from "./filters"
+import {
+  responseMatchConfirmed,
+  responseMayMatch,
+  shouldIntercept,
+} from "./filters"
 import {
   HELD_BODY_COPIES,
   readResponseCopy,
@@ -726,10 +730,13 @@ export class InterceptEngine {
   /**
    * Read a response that may be held. Undefined means pass it through: it
    * cannot be held, Intercept turned off, or the client left while it was
-   * read. A read that outlasts the hold deadline follows `timeoutAction`.
+   * read. A read that outlasts the hold deadline follows `timeoutAction`, but
+   * only when the filters already match without the body: a response whose
+   * body might not match is passed through rather than dropped.
    */
   private async captureResponse(
     input: InterceptResponseInput,
+    matchConfirmed: boolean,
   ): Promise<{ text: string; reservedBytes: number } | undefined> {
     const turnedOff = this.captureAbort.signal
     // Operator-configured hold deadline for Intercept, not an upstream timeout.
@@ -756,6 +763,7 @@ export class InterceptEngine {
       && deadline.signal.aborted
       && !turnedOff.aborted
       && !input.signal?.aborted
+      && matchConfirmed
       && this.config.timeoutAction === "drop"
     ) {
       void input.response.body?.cancel().catch(() => undefined)
@@ -794,7 +802,10 @@ export class InterceptEngine {
     }
     if (!responseMayMatch(this.config, context)) return input.response
 
-    const copy = await this.captureResponse(input)
+    const copy = await this.captureResponse(
+      input,
+      responseMatchConfirmed(this.config, context),
+    )
     if (!copy) return input.response
     if (
       !shouldIntercept(this.config, { ...context, responseBody: copy.text })

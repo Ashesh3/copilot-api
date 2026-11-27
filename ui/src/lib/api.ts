@@ -6,6 +6,14 @@ interface PendingMutation {
 }
 // Only hashes and operation metadata are retained, never request bodies or credentials.
 const pendingMutations = new Map<string, PendingMutation>()
+// Session-scoped state (e.g. unsaved Intercept drafts) registers here to be
+// dropped whenever any dashboard request reports the admin session is gone.
+const authFailureListeners = new Set<() => void>()
+/** Runs `listener` on every 401 from `api`; returns an unsubscribe function. */
+export function onAuthFailure(listener: () => void): () => void {
+  authFailureListeners.add(listener)
+  return () => authFailureListeners.delete(listener)
+}
 async function mutationAttempt(
   method: string,
   path: string,
@@ -147,6 +155,9 @@ export async function api<T>(
 
   if (!response.ok) {
     if (response.status < 500) finishMutation(attempt)
+    if (response.status === 401) {
+      for (const listener of authFailureListeners) listener()
+    }
     const message = await extractErrorMessage(
       response,
       `Request failed with status ${response.status}`,

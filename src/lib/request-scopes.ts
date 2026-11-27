@@ -6,7 +6,6 @@ import {
   type CopilotRequestAttribution,
   runWithCopilotRequestAttribution,
 } from "~/lib/copilot-request-context"
-import { runWithInterceptApprovals } from "~/lib/intercept/approvals"
 import {
   copilotResponseHeadersStorage,
   createRoutingTelemetryRequestState,
@@ -28,10 +27,7 @@ export async function runWithRequestRoutingScopes<T>(
 ): Promise<T> {
   const runWithDiagnostics = async () =>
     await runWithRequestDiagnostics(
-      async () =>
-        await runWithCopilotContractObservabilityScope(
-          async () => await runWithInterceptApprovals(callback),
-        ),
+      async () => await runWithCopilotContractObservabilityScope(callback),
     )
   return await runWithCopilotRequestAttribution(
     attribution,

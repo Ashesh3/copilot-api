@@ -3,28 +3,50 @@ import { isDeepStrictEqual } from "node:util"
 
 import type { UpstreamSendReason } from "~/lib/routing-telemetry"
 
+import {
+  releaseDebugCaptureMemory,
+  reserveDebugCaptureMemory,
+} from "~/lib/debug-capture"
+import { replaceModelFallbackResponse } from "~/lib/model-fallback"
 import { getClientSessionId } from "~/lib/request-session"
 
-import {
-  approvalStorage,
-  type JsonChange,
-  type JsonPath,
-  runWithInterceptApprovals,
-} from "./approvals"
 import { isInterceptBypassed } from "./assistant"
 import { type InterceptRequestSnapshot, interceptEngine } from "./engine"
 
 /**
- * Intercept at the upstream boundary sees individual sends, but one logical
- * request can be sent several times: transport retries, account failover,
- * compatibility and payload retries. Two scopes keep the operator's view to
- * one decision per logical request:
+ * Intercept sees individual upstream sends, but one logical request can be
+ * sent several times: account failover, compatibility, payload, and HTTP
+ * retries. The layer that owns such a retry loop runs it inside
+ * `interceptLogicalSend`, which keeps the operator's view to one decision:
  *
- * - Approvals (per inbound request): a held request's decision is replayed on
- *   its resends instead of holding it again.
- * - Send owners (per retry loop): sends inside an owner never hold their
- *   response; the owner holds only the final one it returns.
+ * - The first send is held (or passed through) and its decision recorded.
+ *   Resends of that request, to the same destination, replay the decision
+ *   instead of being held again, even if Intercept was turned off meanwhile.
+ * - Sends never hold their own responses; the owner holds only the response
+ *   the loop settles on.
  */
+
+type JsonPath = Array<string | number>
+
+/** One change from the original to the approved body, with its precondition. */
+interface JsonChange {
+  path: JsonPath
+  before?: { value: unknown }
+  after?: { value: unknown }
+}
+
+/** The decision on the first send of a logical request. */
+interface Decision {
+  path: string
+  upstream: "copilot" | "custom"
+  providerId?: string
+  original: string
+  /** The body sent; the original when the request passed through unheld. */
+  approved: string
+  snapshot: InterceptRequestSnapshot
+  /** Undefined when either body is not JSON: only exact resends replay. */
+  changes?: Array<JsonChange>
+}
 
 interface SentRequest {
   method: string
@@ -37,6 +59,9 @@ interface SentRequest {
 }
 
 interface SendOwner {
+  decision?: Decision
+  /** Capture memory held for the decision until the logical send ends. */
+  reservedBytes: number
   last?: SentRequest
 }
 
@@ -63,9 +88,9 @@ function diffJson(original: unknown, approved: unknown): Array<JsonChange> {
         ...Object.keys(before),
         ...Object.keys(after),
       ])) {
-        if (!(key in after)) {
+        if (!Object.hasOwn(after, key)) {
           changes.push({ path: [...path, key], before: { value: before[key] } })
-        } else if (!(key in before)) {
+        } else if (!Object.hasOwn(before, key)) {
           changes.push({ path: [...path, key], after: { value: after[key] } })
         } else {
           walk(before[key], after[key], [...path, key])
@@ -108,14 +133,17 @@ function applyChanges(
     let parent: unknown = root
     for (const key of change.path.slice(0, -1)) {
       parent =
-        isRecord(parent) || Array.isArray(parent) ?
+        (
+          (isRecord(parent) || Array.isArray(parent))
+          && Object.hasOwn(parent, key)
+        ) ?
           (parent as Record<string | number, unknown>)[key]
         : undefined
     }
     const key = change.path.at(-1) as string | number
     if (!isRecord(parent) && !Array.isArray(parent)) return undefined
     const container = parent as Record<string | number, unknown>
-    const present = key in container
+    const present = Object.hasOwn(container, key)
     if (
       change.before ?
         !present || !isDeepStrictEqual(container[key], change.before.value)
@@ -129,48 +157,8 @@ function applyChanges(
   return { value: root }
 }
 
-function recordApproval(
-  request: { path: string; body: string },
-  approved: string,
-  snapshot: InterceptRequestSnapshot,
-): void {
-  const approvals = approvalStorage.getStore()
-  if (!approvals) return
-  const before = parseJson(request.body)
-  const after = parseJson(approved)
-  approvals.push({
-    path: request.path,
-    original: request.body,
-    approved,
-    snapshot,
-    changes: before && after ? diffJson(before.value, after.value) : undefined,
-  })
-}
-
-/** The approved body for a resend, or undefined when it needs a new review. */
-function replayApproval(request: {
-  path: string
-  body: string
-  reason?: UpstreamSendReason
-}): { body: string; snapshot: InterceptRequestSnapshot } | undefined {
-  const approvals = approvalStorage.getStore() ?? []
-  const exact = approvals.findLast(
-    (approval) =>
-      approval.path === request.path && approval.original === request.body,
-  )
-  if (exact) return { body: exact.approved, snapshot: exact.snapshot }
-  // Only a resend of the same logical request inherits its approval; a new
-  // request (another tool-loop round, a fallback model) is reviewed anew.
-  if (!request.reason || request.reason === "initial") return undefined
-  const latest = approvals.findLast(
-    (approval) => approval.path === request.path,
-  )
-  const parsed = latest?.changes && parseJson(request.body)
-  if (!latest?.changes || !parsed) return undefined
-  const replayed = applyChanges(parsed.value, latest.changes)
-  if (!replayed) return undefined
-  const body = JSON.stringify(replayed.value)
-  return { body, snapshot: { ...latest.snapshot, body } }
+function textBytes(text: string): number {
+  return Buffer.byteLength(text, "utf8")
 }
 
 export interface UpstreamSend {
@@ -181,35 +169,99 @@ export interface UpstreamSend {
   providerId?: string
   headers: Record<string, string>
   body: unknown
+  /** The routed model, for requests whose body is not text. */
+  model?: string
   signal?: AbortSignal | null
   reason?: UpstreamSendReason
 }
 
-async function decideRequest(
-  request: UpstreamSend & { body: string },
-): Promise<{ body: string | undefined; snapshot: InterceptRequestSnapshot }> {
-  const replayed = replayApproval(request)
-  if (replayed) {
+type TextSend = UpstreamSend & { body: string }
+
+/** Edits from the original to the approved body; undefined when not JSON. */
+function approvalChanges(
+  original: string,
+  approved: string,
+): Array<JsonChange> | undefined {
+  if (approved === original) return []
+  const before = parseJson(original)
+  const after = parseJson(approved)
+  return before && after ? diffJson(before.value, after.value) : undefined
+}
+
+function recordDecision(
+  owner: SendOwner,
+  request: TextSend,
+  outcome: { body: string; requestSnapshot: InterceptRequestSnapshot },
+): void {
+  const approved = outcome.body
+  const changes = approvalChanges(request.body, approved)
+  // The approved body and its edits stay alive until the logical send ends;
+  // a request that passed through retains nothing beyond the send itself.
+  const bytes =
+    approved === request.body ?
+      0
+    : textBytes(approved) + textBytes(JSON.stringify(changes ?? []))
+  if (!reserveDebugCaptureMemory(bytes)) return
+  owner.reservedBytes += bytes
+  owner.decision = {
+    path: request.path,
+    upstream: request.upstream,
+    providerId: request.providerId,
+    original: request.body,
+    approved,
+    snapshot: outcome.requestSnapshot,
+    changes,
+  }
+}
+
+/** The decision a resend inherits, or undefined when it needs its own. */
+function replayDecision(
+  owner: SendOwner | undefined,
+  request: TextSend,
+): { body: string; snapshot: InterceptRequestSnapshot } | undefined {
+  const decision = owner?.decision
+  // A new request is always decided on its own, even with an identical body.
+  if (!decision || !request.reason || request.reason === "initial") {
+    return undefined
+  }
+  if (
+    decision.path !== request.path
+    || decision.upstream !== request.upstream
+    || decision.providerId !== request.providerId
+  ) {
+    return undefined
+  }
+  if (request.body === decision.original) {
+    return { body: decision.approved, snapshot: decision.snapshot }
+  }
+  if (decision.approved === decision.original) {
     return {
-      body: replayed.body === request.body ? undefined : replayed.body,
-      snapshot: replayed.snapshot,
+      body: request.body,
+      snapshot: { ...decision.snapshot, body: request.body },
     }
   }
+  const parsed = decision.changes && parseJson(request.body)
+  if (!decision.changes || !parsed) return undefined
+  const replayed = applyChanges(parsed.value, decision.changes)
+  if (!replayed) return undefined
+  const body = JSON.stringify(replayed.value)
+  return { body, snapshot: { ...decision.snapshot, body } }
+}
+
+async function decideRequest(
+  owner: SendOwner | undefined,
+  request: TextSend,
+): Promise<{ body: string; snapshot: InterceptRequestSnapshot }> {
   const outcome = await interceptEngine.interceptRequest(request)
-  if (outcome.held) {
-    recordApproval(request, outcome.body, outcome.requestSnapshot)
-  }
-  return {
-    body: outcome.modified ? outcome.body : undefined,
-    snapshot: outcome.requestSnapshot,
-  }
+  if (owner) recordDecision(owner, request, outcome)
+  return { body: outcome.body, snapshot: outcome.requestSnapshot }
 }
 
 async function holdResponse(
   sent: SentRequest,
   response: Response,
 ): Promise<Response> {
-  return await interceptEngine.interceptResponse({
+  const held = await interceptEngine.interceptResponse({
     method: sent.method,
     path: sent.path,
     url: sent.url,
@@ -219,51 +271,62 @@ async function holdResponse(
     requestSnapshot: sent.snapshot,
     signal: sent.signal,
   })
+  if (held !== response) replaceModelFallbackResponse(response, held)
+  return held
+}
+
+function binarySnapshot(request: UpstreamSend): InterceptRequestSnapshot {
+  return {
+    method: request.method,
+    path: request.path,
+    model: request.model,
+    body: "",
+    headers: {},
+    sessionId: getClientSessionId(),
+  }
 }
 
 /**
- * Hold or replay one upstream request, send it, and hold its response unless
- * an enclosing `interceptLogicalSend` owns the response. `send` receives the
- * body to send instead of the original, or undefined to send it unchanged.
- * Request bodies that are not text (multipart uploads) are never edited, but
- * their responses are still held.
+ * Hold, pass through, or replay one upstream request, send it, and hold its
+ * response unless an enclosing `interceptLogicalSend` owns the response.
+ * `send` receives the body to send instead of the original, or undefined to
+ * send it unchanged. Request bodies that are not text (multipart uploads) are
+ * never edited, but their responses are still held.
  */
 export async function interceptUpstreamSend(
   request: UpstreamSend,
   send: (body: string | undefined) => Promise<Response>,
 ): Promise<Response> {
-  if (!interceptEngine.isEnabled() || isInterceptBypassed()) {
-    return await send(undefined)
-  }
-  const { body: requestBody } = request
-  const decided =
-    typeof requestBody === "string" ?
-      await decideRequest({ ...request, body: requestBody })
-    : {
-        body: undefined,
-        snapshot: {
-          method: request.method,
-          path: request.path,
-          body: "",
-          headers: {},
-          sessionId: getClientSessionId(),
-        },
-      }
-  const sent: SentRequest = { ...request, snapshot: decided.snapshot }
+  if (isInterceptBypassed()) return await send(undefined)
   const owner = ownerStorage.getStore()
+  const { body: requestBody } = request
+  const textRequest =
+    typeof requestBody === "string" ?
+      { ...request, body: requestBody }
+    : undefined
+  const replayed = textRequest && replayDecision(owner, textRequest)
+  if (!replayed && !interceptEngine.isEnabled()) return await send(undefined)
+
+  let decided: { body: string | undefined; snapshot: InterceptRequestSnapshot }
+  if (replayed) decided = replayed
+  else if (textRequest) decided = await decideRequest(owner, textRequest)
+  else decided = { body: undefined, snapshot: binarySnapshot(request) }
+  const body = decided.body === requestBody ? undefined : decided.body
+
+  const sent: SentRequest = { ...request, snapshot: decided.snapshot }
   if (owner) {
     owner.last = sent
-    return await send(decided.body)
+    return await send(body)
   }
-  return await holdResponse(sent, await send(decided.body))
+  return await holdResponse(sent, await send(body))
 }
 
 /**
- * Own the responses of a retry loop: sends inside `work` never hold their
- * responses, so intermediate ones (failover 429s, compatibility 400s) reach
- * the loop untouched, and only the response `work` finally returns is held.
- * Nested owners defer to the outermost. Outside an inbound request (direct
- * service calls) the owner also scopes approvals, so its resends replay.
+ * Own one logical request: sends inside `work` share the first send's
+ * decision and never hold their responses, so intermediate ones (failover
+ * 429s, compatibility 400s, overloaded streams) reach the retry loop
+ * untouched, and only the response `work` finally returns is held. Nested
+ * owners defer to the outermost.
  */
 export async function interceptLogicalSend<T extends { response: Response }>(
   work: () => Promise<T>,
@@ -271,12 +334,14 @@ export async function interceptLogicalSend<T extends { response: Response }>(
   if (!interceptEngine.isEnabled() || ownerStorage.getStore()) {
     return await work()
   }
-  const owner: SendOwner = {}
-  const ownedWork = async () => await ownerStorage.run(owner, work)
-  const result =
-    approvalStorage.getStore() ?
-      await ownedWork()
-    : await runWithInterceptApprovals(ownedWork)
+  const owner: SendOwner = { reservedBytes: 0 }
+  let result: T
+  try {
+    result = await ownerStorage.run(owner, work)
+  } finally {
+    releaseDebugCaptureMemory(owner.reservedBytes)
+    owner.reservedBytes = 0
+  }
   if (!owner.last) return result
   return {
     ...result,

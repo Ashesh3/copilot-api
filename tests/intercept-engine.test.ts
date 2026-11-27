@@ -15,6 +15,7 @@ import {
   InterceptEngine,
   StaleRevisionError,
 } from "~/lib/intercept/engine"
+import { retainedBytes } from "~/lib/intercept/held-body"
 
 const engines: Array<InterceptEngine> = []
 
@@ -134,20 +135,46 @@ describe("capture memory", () => {
     engine.clearRecent()
     expect(debugCaptureMemoryUsage()).toBe(before)
   })
+
+  test("a suggestion without a preview still reserves its summary and operations", () => {
+    const item = { originalBody: "{}", currentBody: "{}" }
+    const summary = "s".repeat(10_000)
+
+    const withSuggestion = retainedBytes({
+      ...item,
+      assistantSuggestion: {
+        id: "suggestion",
+        createdAt: new Date(0).toISOString(),
+        model: "test-model",
+        summary,
+        operations: [{ op: "delete", id: "msg-0", reason: "r".repeat(5000) }],
+        previewBody: null,
+        previewCanonical: null,
+        durationMs: 0,
+        revision: 0,
+      },
+    })
+
+    expect(withSuggestion - retainedBytes(item)).toBeGreaterThan(15_000)
+  })
 })
+
+function stalledResponse(): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: {}\n\n"))
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
 
 describe("response capture", () => {
   test("turning Intercept off releases a response that never finishes", async () => {
     const engine = newEngine()
     engine.updateConfig({ enabled: true, direction: "response" })
-    const stalled = new Response(
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode("data: {}\n\n"))
-        },
-      }),
-      { headers: { "content-type": "text/event-stream" } },
-    )
+    const stalled = stalledResponse()
 
     const pending = engine.interceptResponse(
       responseInput(stalled, chatRequest("hi", true).body),
@@ -156,6 +183,19 @@ describe("response capture", () => {
     engine.updateConfig({ enabled: false })
 
     expect(await pending).toBe(stalled)
+  })
+
+  test("a client gone before capture starts passes a stalled response through", async () => {
+    const engine = newEngine()
+    engine.updateConfig({ enabled: true, direction: "response" })
+    const stalled = stalledResponse()
+
+    const result = await engine.interceptResponse({
+      ...responseInput(stalled, chatRequest("hi", true).body),
+      signal: AbortSignal.abort(),
+    })
+
+    expect(result).toBe(stalled)
   })
 
   test("a dropped response is a local error, not an upstream response", async () => {

@@ -257,6 +257,19 @@ export async function recordModelFallbackResponse(
   )
 }
 
+/**
+ * Intercept replaced a recorded upstream response with the operator's version.
+ * Keep the replacement recognised as this attempt's response, so an edited
+ * fallback-eligible 422 still triggers the configured fallback.
+ */
+export function replaceModelFallbackResponse(
+  original: Response,
+  replacement: Response,
+): void {
+  const attempt = attemptStorage.getStore()
+  if (attempt?.firstResponse === original) attempt.firstResponse = replacement
+}
+
 async function acceptModelFallbackResponse(
   attempt: FallbackAttempt,
   response: Response,

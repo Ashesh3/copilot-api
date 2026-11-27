@@ -1,6 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
 
-import { runWithInterceptApprovals } from "~/lib/intercept/approvals"
 import { interceptEngine } from "~/lib/intercept/engine"
 import {
   interceptLogicalSend,
@@ -58,13 +57,20 @@ async function holdAndApprove(
   await first
 }
 
+async function logicalSend(work: () => Promise<void>): Promise<void> {
+  await interceptLogicalSend(async () => {
+    await work()
+    return { response: Response.json({ ok: true }) }
+  })
+}
+
 test("resends carry the operator's approval instead of being held again", async () => {
   interceptEngine.updateConfig({ enabled: true, direction: "request" })
   const { sent, send } = recorder()
   const original = chatBody("original", { reasoning_effort: "high" })
   const approved = chatBody("approved", { reasoning_effort: "high" })
 
-  await runWithInterceptApprovals(async () => {
+  await logicalSend(async () => {
     await holdAndApprove(original, approved, send)
     // Account failover resends the same body.
     await interceptUpstreamSend(
@@ -82,11 +88,48 @@ test("resends carry the operator's approval instead of being held again", async 
   expect(interceptEngine.getSnapshot().recent).toHaveLength(1)
 })
 
+test("approvals keep replaying after Intercept is turned off", async () => {
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  const { sent, send } = recorder()
+  const approved = chatBody("approved")
+
+  await logicalSend(async () => {
+    await holdAndApprove(chatBody("original"), approved, send)
+    interceptEngine.updateConfig({ enabled: false })
+    await interceptUpstreamSend(
+      { ...SEND, body: chatBody("original"), reason: "failover" },
+      send,
+    )
+  })
+
+  expect(sent).toEqual([approved, approved])
+})
+
+test("another logical request never inherits an approval", async () => {
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  const { send } = recorder()
+
+  await logicalSend(async () => {
+    await holdAndApprove(chatBody("original"), chatBody("approved"), send)
+  })
+  await logicalSend(async () => {
+    const queued = nextQueued()
+    const resend = interceptUpstreamSend(
+      { ...SEND, body: chatBody("original"), reason: "failover" },
+      send,
+    )
+    interceptEngine.forwardItem(await queued)
+    await resend
+  })
+
+  expect(interceptEngine.getSnapshot().recent).toHaveLength(2)
+})
+
 test("a resend that changed what the operator edited is reviewed again", async () => {
   interceptEngine.updateConfig({ enabled: true, direction: "request" })
   const { send } = recorder()
 
-  await runWithInterceptApprovals(async () => {
+  await logicalSend(async () => {
     await holdAndApprove(chatBody("original"), chatBody("approved"), send)
     const queued = nextQueued()
     const resend = interceptUpstreamSend(
@@ -100,15 +143,15 @@ test("a resend that changed what the operator edited is reviewed again", async (
   expect(interceptEngine.getSnapshot().recent).toHaveLength(2)
 })
 
-test("a new request in the same client request is reviewed again", async () => {
+test("a new request in the same logical send is reviewed again", async () => {
   interceptEngine.updateConfig({ enabled: true, direction: "request" })
   const { send } = recorder()
 
-  await runWithInterceptApprovals(async () => {
+  await logicalSend(async () => {
     await holdAndApprove(chatBody("round 1"), chatBody("edited"), send)
     const queued = nextQueued()
     const next = interceptUpstreamSend(
-      { ...SEND, body: chatBody("round 2") },
+      { ...SEND, body: chatBody("round 1") },
       send,
     )
     interceptEngine.forwardItem(await queued)
@@ -143,16 +186,22 @@ test("a retry loop holds only the response it settles on", async () => {
   expect(statuses).toEqual([200])
 })
 
-test("responses to multipart requests are still held", async () => {
+test("responses to multipart requests are held with their routed model", async () => {
   interceptEngine.updateConfig({ enabled: true, direction: "response" })
   const queued = nextQueued()
   const pending = interceptUpstreamSend(
-    { ...SEND, path: "/v1/images/edits", body: new FormData() },
+    {
+      ...SEND,
+      path: "/v1/images/edits",
+      body: new Uint8Array([1, 2, 3]),
+      model: "gpt-image-1",
+    },
     () => Promise.resolve(Response.json({ data: [] })),
   )
 
   const item = interceptEngine.getItem(await queued)
   expect(item?.phase).toBe("response")
+  expect(item?.model).toBe("gpt-image-1")
   interceptEngine.forwardAllPending()
   expect((await pending).status).toBe(200)
 })

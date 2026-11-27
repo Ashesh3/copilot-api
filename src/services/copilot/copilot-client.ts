@@ -754,6 +754,7 @@ export async function copilotFetch(
       upstream: "copilot",
       headers: filterCopilotRequestHeaders(init?.headers),
       body: init?.body,
+      model: fetchOptions?.telemetry?.model,
       signal: init?.signal,
       reason: fetchOptions?.telemetry?.reason,
     },

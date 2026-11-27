@@ -38,7 +38,7 @@ import { Page } from "../components/Page"
 import { RadioIcon } from "../icons"
 import { del, get, post, put } from "../lib/api"
 import {
-  clearInterceptDraftsOnAuthError,
+  beginInterceptDraftSnapshot,
   retainHeldInterceptDrafts,
   updateInterceptDraft,
   useInterceptDrafts,
@@ -126,16 +126,18 @@ export default function InterceptScreen() {
   // that started earlier cannot overwrite it with an older body.
   const detailWriteRef = useRef(0)
 
+  // Each state request takes a sequence number; only the newest one, issued
+  // while this screen is mounted, may update state.
   const refresh = useCallback(async () => {
     const seq = ++refreshSeqRef.current
+    const ticket = beginInterceptDraftSnapshot()
     try {
       const next = await get<InterceptStateResponse>(API)
       if (seq !== refreshSeqRef.current) return
       setState(next)
-      retainHeldInterceptDrafts(next.pending)
+      retainHeldInterceptDrafts(ticket, next.pending)
       setLoadError(null)
     } catch (err) {
-      clearInterceptDraftsOnAuthError(err)
       if (seq !== refreshSeqRef.current) return
       setLoadError(errorMessage(err, "Could not load intercept state"))
     }
@@ -180,7 +182,10 @@ export default function InterceptScreen() {
     source.addEventListener("queued", handleStateEvent)
     source.addEventListener("updated", handleItemEvent)
     source.addEventListener("resolved", handleItemEvent)
+    const seqRef = refreshSeqRef
     return () => {
+      // Responses still in flight belong to this mount; ignore them.
+      seqRef.current += 1
       source.removeEventListener("open", handleOpen)
       source.removeEventListener("snapshot", handleStateEvent)
       source.removeEventListener("config", handleStateEvent)
@@ -212,8 +217,7 @@ export default function InterceptScreen() {
           setDetail(item)
         }
       })
-      .catch((err: unknown) => {
-        clearInterceptDraftsOnAuthError(err)
+      .catch(() => {
         // Keep what is shown for this item; the next event or Refresh retries.
         if (isCurrent) {
           setDetail((prev) => (prev?.id === effectiveId ? prev : null))
@@ -276,13 +280,16 @@ export default function InterceptScreen() {
   const patchConfig = async (
     patch: Partial<InterceptConfig>,
   ): Promise<boolean> => {
+    const seq = ++refreshSeqRef.current
+    const ticket = beginInterceptDraftSnapshot()
     try {
       const res = await put<ConfigUpdateResponse>(`${API}/config`, patch)
-      setState((prev) => (prev ? { ...prev, ...res.snapshot } : prev))
-      retainHeldInterceptDrafts(res.snapshot.pending)
+      if (seq === refreshSeqRef.current) {
+        setState((prev) => (prev ? { ...prev, ...res.snapshot } : prev))
+        retainHeldInterceptDrafts(ticket, res.snapshot.pending)
+      }
       return true
     } catch (err) {
-      clearInterceptDraftsOnAuthError(err)
       toast.error(errorMessage(err, "Could not update Intercept"))
       void refresh()
       return false
@@ -361,7 +368,6 @@ export default function InterceptScreen() {
       )
       await refresh()
     } catch (err) {
-      clearInterceptDraftsOnAuthError(err)
       toast.error(errorMessage(err, "Could not update the queue"))
     } finally {
       setIsActing(false)
@@ -373,7 +379,6 @@ export default function InterceptScreen() {
       await del(`${API}/recent`)
       await refresh()
     } catch (err) {
-      clearInterceptDraftsOnAuthError(err)
       toast.error(errorMessage(err, "Could not clear history"))
     }
   }

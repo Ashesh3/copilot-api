@@ -103,6 +103,8 @@ interface ProjectedItem {
   item: CanonicalItem
   text: string
   truncated: boolean
+  /** The item exactly as the prompt shows it; the budget charges this. */
+  rendered: string
 }
 
 /** Items shown in the target section; operations may address only these. */
@@ -112,25 +114,35 @@ function isInstruction(item: CanonicalItem): boolean {
   return item.kind === "system" || item.kind === "developer"
 }
 
+function renderItem(
+  item: CanonicalItem,
+  text: string,
+  truncated: boolean,
+): ProjectedItem {
+  const meta = [`id=${item.id}`, `kind=${item.kind}`]
+  if (item.toolName) meta.push(`tool=${item.toolName}`)
+  if (item.toolCallId) meta.push(`call_id=${item.toolCallId}`)
+  if (item.opaque) meta.push("read-only")
+  if (truncated) meta.push("truncated")
+  const rendered = `### [${meta.join(" | ")}]\n${text}\n\n`
+  return { item, text, truncated, rendered }
+}
+
 function projectItem(item: CanonicalItem): ProjectedItem {
   if (item.opaque) {
-    return {
-      item,
-      text: `(${item.label}: content not shown)`,
-      truncated: false,
-    }
+    return renderItem(item, `(${item.label}: content not shown)`, false)
   }
   const text =
     item.kind === "tool_call" ?
       (item.toolArguments ?? item.content)
     : item.content
   const limit = isInstruction(item) ? INSTRUCTION_CHAR_LIMIT : ITEM_CHAR_LIMIT
-  if (text.length <= limit) return { item, text, truncated: false }
-  return {
+  if (text.length <= limit) return renderItem(item, text, false)
+  return renderItem(
     item,
-    text: `${text.slice(0, limit)}\n[${text.length - limit} more characters not shown]`,
-    truncated: true,
-  }
+    `${text.slice(0, limit)}\n[${text.length - limit} more characters not shown]`,
+    true,
+  )
 }
 
 interface ItemSelection {
@@ -141,9 +153,24 @@ interface ItemSelection {
   omittedOlder: number
 }
 
+function omissionNotes(
+  omittedInstructions: number,
+  omittedOlder: number,
+): string {
+  let notes = ""
+  if (omittedInstructions > 0) {
+    notes += `(${omittedInstructions} system or developer items are not shown: they exceed the size limit.)\n`
+  }
+  if (omittedOlder > 0) {
+    notes += `(${omittedOlder} older items are not shown.)\n`
+  }
+  return notes && `${notes}\n`
+}
+
 /**
  * Instructions first, in order, while they fit; then the newest other items
- * that fit. Everything shown stays within `budget` and keeps its order.
+ * that fit. The rendered section, omission notes included, stays within
+ * `budget` and keeps the original order.
  */
 function selectItems(
   items: ReadonlyArray<CanonicalItem>,
@@ -151,20 +178,21 @@ function selectItems(
 ): ItemSelection {
   const projected = items.map((item) => projectItem(item))
   const keep = new Set<number>()
-  let used = 0
+  // Room for the notes at their longest: no count exceeds the item count.
+  let used = omissionNotes(items.length, items.length).length
   let instructionsFit = true
   for (const [index, entry] of projected.entries()) {
     if (!isInstruction(entry.item)) continue
-    if (instructionsFit && used + entry.text.length <= budget) {
+    if (instructionsFit && used + entry.rendered.length <= budget) {
       keep.add(index)
-      used += entry.text.length
+      used += entry.rendered.length
     } else {
       instructionsFit = false
     }
   }
   for (let index = projected.length - 1; index >= 0; index -= 1) {
     if (isInstruction(projected[index].item)) continue
-    used += projected[index].text.length
+    used += projected[index].rendered.length
     if (used > budget) break
     keep.add(index)
   }
@@ -181,25 +209,9 @@ function selectItems(
 
 function formatItems(selection: ItemSelection): string {
   const { shown, omittedInstructions, omittedOlder } = selection
-  const lines: Array<string> = []
-  if (omittedInstructions > 0) {
-    lines.push(
-      `(${omittedInstructions} system or developer items are not shown: they exceed the size limit.)`,
-    )
-  }
-  if (omittedOlder > 0) {
-    lines.push(`(${omittedOlder} older items are not shown.)`)
-  }
-  if (lines.length > 0) lines.push("")
-  for (const { item, text, truncated } of shown) {
-    const meta = [`id=${item.id}`, `kind=${item.kind}`]
-    if (item.toolName) meta.push(`tool=${item.toolName}`)
-    if (item.toolCallId) meta.push(`call_id=${item.toolCallId}`)
-    if (item.opaque) meta.push("read-only")
-    if (truncated) meta.push("truncated")
-    lines.push(`### [${meta.join(" | ")}]`, text, "")
-  }
-  return lines.join("\n").trim() || "(no items)"
+  const notes = omissionNotes(omittedInstructions, omittedOlder)
+  const section = notes + shown.map((entry) => entry.rendered).join("")
+  return section.trim() || "(no items)"
 }
 
 const SYSTEM_PROMPT = [

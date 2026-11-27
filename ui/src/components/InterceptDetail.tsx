@@ -19,7 +19,6 @@ import type {
 
 import { PlayIcon, RefreshCwIcon, SparklesIcon, XIcon } from "../icons"
 import { ApiError, post, put } from "../lib/api"
-import { clearInterceptDraftsOnAuthError } from "../lib/intercept-drafts"
 import {
   formatCountdown,
   type InterceptDraft,
@@ -173,11 +172,10 @@ export function InterceptDetail({
     onDraftUpdate(item.id, update)
 
   /**
-   * 401: the admin session ended, so every draft goes. 409: the item moved on
-   * (new revision or suggestion); refetch so the operator sees the current state.
+   * 409: the item moved on (new revision or suggestion); refetch so the
+   * operator sees the current state. A 401 already cleared every draft in `api`.
    */
   function reportError(err: unknown, fallback: string) {
-    clearInterceptDraftsOnAuthError(err)
     if (err instanceof ApiError && err.status === 409) void onReload()
     toast.error(err instanceof Error ? err.message : fallback)
   }

@@ -14,6 +14,7 @@ import {
   toDataUri,
 } from "~/lib/attachments"
 import { HTTPError } from "~/lib/error"
+import { parseSseEvents } from "~/lib/intercept/canonical"
 import { interceptLogicalSend } from "~/lib/intercept/upstream"
 import { modelSupportsAssistantPrefill } from "~/lib/model-settings"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
@@ -324,30 +325,6 @@ const isOverloadStreamEvent = (event: StreamEvent | undefined): boolean => {
   return false
 }
 
-const createBufferedEventStream = (
-  firstEvent: StreamEvent | undefined,
-  iterator: AsyncIterator<StreamEvent>,
-): AsyncIterable<StreamEvent> => ({
-  async *[Symbol.asyncIterator]() {
-    if (firstEvent) {
-      yield firstEvent
-    }
-    while (true) {
-      const next = await iterator.next()
-      if (next.done) {
-        return
-      }
-      yield next.value
-    }
-  },
-})
-
-interface StreamingRetryOptions {
-  payload: ChatCompletionsPayload
-  retry: () => Promise<Response | undefined>
-  retriesRemaining?: number
-}
-
 export interface ChatCompletionsRequestOptions {
   allowCompatibilityRetry?: boolean
   candidatePrepared?: boolean
@@ -521,39 +498,68 @@ const dispatchWithImageFallback = async (options: {
   }
 }
 
-const handleStreamingResponse = async (
+const handleStreamingResponse = (
   response: Response,
-  options: StreamingRetryOptions,
-): Promise<AsyncIterable<StreamEvent>> => {
-  const { payload, retry, retriesRemaining = 1 } = options
+  payload: ChatCompletionsPayload,
+): AsyncIterable<StreamEvent> => {
   if (!response.ok) {
     throwFailedResponse(response, payload)
   }
+  return events(response) as AsyncIterable<StreamEvent>
+}
 
-  const stream = events(response) as AsyncIterable<StreamEvent>
-  const iterator = stream[Symbol.asyncIterator]()
-  const first = await iterator.next()
-
-  if (first.done) {
-    return createBufferedEventStream(undefined, iterator)
+/** The first SSE event, read from a copy so the response stays untouched. */
+const peekFirstStreamEvent = async (
+  response: Response,
+): Promise<StreamEvent | undefined> => {
+  const body = response.clone().body
+  if (!body) return undefined
+  const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>
+  const decoder = new TextDecoder()
+  let text = ""
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (!done) text += decoder.decode(value, { stream: true })
+      const normalized = text.replaceAll("\r\n", "\n")
+      const complete =
+        done ? normalized : normalized.slice(0, normalized.lastIndexOf("\n\n"))
+      const first = parseSseEvents(complete).at(0)
+      if (first || done) return first
+    }
+  } finally {
+    // Cancelling the copy never blocks the response itself.
+    void reader.cancel().catch(() => undefined)
   }
+}
 
-  if (!isOverloadStreamEvent(first.value) || retriesRemaining === 0) {
-    return createBufferedEventStream(first.value, iterator)
+/**
+ * Resend once when a stream opens with an overload error. This runs inside
+ * the logical send, so Intercept holds only the stream the client receives.
+ */
+const retryOverloadedStream = async (
+  attempt: ChatUpstreamAttempt,
+  options: { operation: ChatOperationState; signal?: AbortSignal },
+): Promise<ChatUpstreamAttempt> => {
+  if (
+    !attempt.response.ok
+    || !isOverloadStreamEvent(await peekFirstStreamEvent(attempt.response))
+    || !consumeExtraSend(options.operation.retryBudget)
+  ) {
+    return attempt
   }
-
   consola.warn("Stream overload detected on first event, retrying")
-  await iterator.return?.()
-  const retryResponse = await retry()
-  if (!retryResponse) {
-    return createBufferedEventStream(first.value, {
-      next: () => Promise.resolve({ done: true, value: undefined }),
-    })
+  void attempt.response.body?.cancel().catch(() => undefined)
+  return {
+    ...attempt,
+    response: await dispatchChatCompletions(attempt.payload, {
+      headerOptions: attempt.headerOptions,
+      operation: options.operation,
+      reason: "http_retry",
+      recordSelection: false,
+      signal: options.signal,
+    }),
   }
-  return handleStreamingResponse(retryResponse, {
-    ...options,
-    retriesRemaining: retriesRemaining - 1,
-  })
 }
 
 type ChatCompletionsResult = ChatCompletionResponse | AsyncIterable<StreamEvent>
@@ -659,8 +665,8 @@ async function dispatchChatCompletionsCore(
     retryBudget: options?.retryBudget ?? createRetryBudget(),
   }
 
-  // The image and compatibility retries resend one logical request:
-  // Intercept holds only the response they settle on.
+  // The image, compatibility, and overload retries resend one logical
+  // request: Intercept holds only the response they settle on.
   const active = await interceptLogicalSend(async () => {
     const initialAttempt = await dispatchWithImageFallback({
       compaction: options?.compaction,
@@ -670,30 +676,25 @@ async function dispatchChatCompletionsCore(
       signal: options?.signal,
       sourcePayload: normalizedPayload,
     })
-    return options?.allowCompatibilityRetry === false ?
+    const settled =
+      options?.allowCompatibilityRetry === false ?
         initialAttempt
       : await retryChatCompatibility({
           attempt: initialAttempt,
           operation,
           signal: options?.signal,
         })
+    return normalizedPayload.stream ?
+        await retryOverloadedStream(settled, {
+          operation,
+          signal: options?.signal,
+        })
+      : settled
   })
   if (normalizedPayload.stream) {
     return {
       processedPayload: active.payload,
-      response: await handleStreamingResponse(active.response, {
-        payload: active.payload,
-        retry: async () => {
-          if (!consumeExtraSend(operation.retryBudget)) return undefined
-          return await dispatchChatCompletions(active.payload, {
-            headerOptions: active.headerOptions,
-            operation,
-            reason: "http_retry",
-            recordSelection: false,
-            signal: options?.signal,
-          })
-        },
-      }),
+      response: handleStreamingResponse(active.response, active.payload),
     }
   }
 
