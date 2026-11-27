@@ -1,4 +1,3 @@
-/* eslint-disable max-lines, no-nested-ternary */
 import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
@@ -14,938 +13,571 @@ import { Switch } from "@astryxdesign/core/Switch"
 import { Tab, TabList } from "@astryxdesign/core/TabList"
 import { Heading, Text } from "@astryxdesign/core/Text"
 import { TextInput } from "@astryxdesign/core/TextInput"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import type {
-  AssistantDiffOp,
-  CanonicalItem,
+  InterceptAssistantConfig,
   InterceptConfig,
   InterceptDirection,
-  InterceptItemSummary,
+  InterceptFilterConfig,
   InterceptPendingItem,
   InterceptSnapshot,
+  InterceptTimeoutAction,
 } from "../../../src/lib/intercept/types"
-import type { CodeMirrorDocumentHandle } from "../components/CodeMirrorDocument"
 
-import { CodeMirrorDocument } from "../components/CodeMirrorDocument"
-import { EmptyState, MonoText, RelTime } from "../components/common"
+import { EmptyState } from "../components/common"
 import { InterceptAssistantPanel } from "../components/InterceptAssistantPanel"
-import { InterceptDiffViewer } from "../components/InterceptDiffViewer"
+import { InterceptDetail } from "../components/InterceptDetail"
 import { InterceptFiltersPanel } from "../components/InterceptFiltersPanel"
-import { JsonCodeEditor } from "../components/JsonCodeEditor"
-import { Page } from "../components/Page"
-import { StructuredMessageEditor } from "../components/StructuredMessageEditor"
 import {
-  ArrowRightLeftIcon,
-  FilterIcon,
-  PlayIcon,
-  RefreshCwIcon,
-  ShieldAlertIcon,
-  SparklesIcon,
-  Trash2Icon,
-  XIcon,
-} from "../icons"
-import { ApiError, del, get, post, put } from "../lib/api"
-import { validateReplayDocument } from "../lib/json-document"
+  InterceptQueueRail,
+  type QueueView,
+} from "../components/InterceptQueueRail"
+import { Page } from "../components/Page"
+import { RadioIcon } from "../icons"
+import { del, get, post, put } from "../lib/api"
 import { useToast } from "../lib/toast"
+
+const API = "/dashboard/api/intercept"
 
 interface InterceptStateResponse extends InterceptSnapshot {
   availableModels: Array<string>
 }
 
-type EditorTab = "structured" | "raw" | "headers" | "context"
-type QueueTab = "pending" | "recent"
-type DrawerTab = "none" | "filters" | "assistant"
-
-function fmtBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+interface ConfigUpdateResponse {
+  config: InterceptConfig
+  snapshot: InterceptSnapshot
 }
 
-function statusDotVariant(
-  status: InterceptItemSummary["status"],
-): "success" | "warning" | "error" | "neutral" {
-  switch (status) {
-    case "pending": {
-      return "warning"
-    }
-    case "forwarded": {
-      return "success"
-    }
-    case "dropped":
-    case "aborted":
-    case "timed_out": {
-      return "error"
-    }
-    default: {
-      return "neutral"
-    }
+type ScreenView = "traffic" | "rules" | "assistant"
+
+interface RulesDraft {
+  timeoutSeconds: string
+  timeoutAction: InterceptTimeoutAction
+  filters: InterceptFilterConfig
+}
+
+const DIRECTION_TEXT: Record<InterceptDirection, string> = {
+  both: "requests and responses",
+  request: "requests",
+  response: "responses",
+}
+
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error ? err.message : fallback
+}
+
+/** Item id carried by `queued` / `updated` (item.id) and `resolved` (id) events. */
+function eventItemId(data: string): string | undefined {
+  try {
+    const parsed = JSON.parse(data) as { id?: unknown; item?: { id?: unknown } }
+    const id = parsed.item?.id ?? parsed.id
+    return typeof id === "string" ? id : undefined
+  } catch {
+    return undefined
   }
+}
+
+function rulesFromConfig(config: InterceptConfig): RulesDraft {
+  return {
+    timeoutSeconds: String(config.timeoutSeconds),
+    timeoutAction: config.timeoutAction,
+    filters: config.filters,
+  }
+}
+
+function timeoutError(value: string): string | undefined {
+  const seconds = Number(value)
+  return Number.isInteger(seconds) && seconds >= 15 && seconds <= 3600 ?
+      undefined
+    : "Enter a whole number from 15 to 3600."
 }
 
 export default function InterceptScreen() {
   const toast = useToast()
-  const rawEditorRef = useRef<CodeMirrorDocumentHandle>(null)
-
-  const [snapshot, setSnapshot] = useState<InterceptSnapshot | null>(null)
-  const [availableModels, setAvailableModels] = useState<Array<string>>([])
-  const [draftConfig, setDraftConfig] = useState<InterceptConfig | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-
-  const [queueTab, setQueueTab] = useState<QueueTab>("pending")
+  const [state, setState] = useState<InterceptStateResponse | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [view, setView] = useState<ScreenView>("traffic")
+  const [queueView, setQueueView] = useState<QueueView>("pending")
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [selectedDetail, setSelectedDetail] =
-    useState<InterceptPendingItem | null>(null)
-  const [loadingDetail, setLoadingDetail] = useState(false)
-
-  const [editorTab, setEditorTab] = useState<EditorTab>("structured")
-  const [drawerTab, setDrawerTab] = useState<DrawerTab>("none")
-  const [wrapRaw, setWrapRaw] = useState(true)
-
-  // Local editable buffer for the currently selected pending item
-  const [draftBody, setDraftBody] = useState("")
-  const [draftItems, setDraftItems] = useState<Array<CanonicalItem>>([])
-  const [dirtySource, setDirtySource] = useState<"none" | "structured" | "raw">(
-    "none",
-  )
-
-  const [isSavingConfig, setIsSavingConfig] = useState(false)
+  const [detail, setDetail] = useState<InterceptPendingItem | null>(null)
+  const [detailVersion, setDetailVersion] = useState(0)
+  const [rulesDraft, setRulesDraft] = useState<RulesDraft | null>(null)
+  const [assistantDraft, setAssistantDraft] =
+    useState<InterceptAssistantConfig | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
   const [isActing, setIsActing] = useState(false)
-  const [isRunningAssistant, setIsRunningAssistant] = useState(false)
-  const [nowMs, setNowMs] = useState(() => Date.now())
+  const effectiveIdRef = useRef<string | undefined>(undefined)
 
-  const refreshSnapshot = useCallback(async () => {
+  const refresh = useCallback(async () => {
     try {
-      const data = await get<InterceptStateResponse>("/dashboard/api/intercept")
-      setSnapshot(data)
-      setAvailableModels(data.availableModels)
-      setDraftConfig((prev) => prev ?? data.config)
-      setError(null)
+      setState(await get<InterceptStateResponse>(API))
+      setLoadError(null)
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load intercept state",
-      )
-    } finally {
-      setLoading(false)
+      setLoadError(errorMessage(err, "Could not load intercept state"))
     }
   }, [])
 
-  const loadItemDetail = useCallback(async (id: string) => {
-    setLoadingDetail(true)
-    try {
-      const detail = await get<InterceptPendingItem>(
-        `/dashboard/api/intercept/items/${encodeURIComponent(id)}`,
-      )
-      setSelectedDetail(detail)
-      setDraftBody(detail.currentBody)
-      setDraftItems(detail.canonical.items)
-      setDirtySource("none")
-    } catch {
-      setSelectedDetail(null)
-    } finally {
-      setLoadingDetail(false)
-    }
-  }, [])
-
-  // Initial load + SSE live updates + fallback poll
   useEffect(() => {
-    void refreshSnapshot()
-
-    const es = new EventSource("/dashboard/api/intercept/events")
-    const onEvent = () => {
-      void refreshSnapshot()
+    void refresh()
+    const source = new EventSource(`${API}/events`)
+    const handleStateEvent = () => {
+      void refresh()
     }
-    es.addEventListener("snapshot", onEvent)
-    es.addEventListener("config", onEvent)
-    es.addEventListener("queued", onEvent)
-    es.addEventListener("updated", (ev) => {
-      void refreshSnapshot()
-      try {
-        const parsed = JSON.parse((ev as MessageEvent<string>).data) as {
-          item?: { id?: string }
-        }
-        if (parsed.item?.id && parsed.item.id === selectedId) {
-          void loadItemDetail(parsed.item.id)
-        }
-      } catch {
-        // ignore parse error
+    const handleItemEvent = (event: MessageEvent<string>) => {
+      void refresh()
+      const id = eventItemId(event.data)
+      if (id !== undefined && id === effectiveIdRef.current) {
+        setDetailVersion((version) => version + 1)
       }
-    })
-    es.addEventListener("resolved", (ev) => {
-      void refreshSnapshot()
-      try {
-        const parsed = JSON.parse((ev as MessageEvent<string>).data) as {
-          id?: string
-        }
-        if (parsed.id && parsed.id === selectedId) {
-          void loadItemDetail(parsed.id)
-        }
-      } catch {
-        // ignore
-      }
-    })
-
-    const timer = setInterval(() => setNowMs(Date.now()), 1000)
-
+    }
+    source.addEventListener("snapshot", handleStateEvent)
+    source.addEventListener("config", handleStateEvent)
+    source.addEventListener("queued", handleStateEvent)
+    source.addEventListener("updated", handleItemEvent)
+    source.addEventListener("resolved", handleItemEvent)
     return () => {
-      es.close()
-      clearInterval(timer)
+      source.removeEventListener("snapshot", handleStateEvent)
+      source.removeEventListener("config", handleStateEvent)
+      source.removeEventListener("queued", handleStateEvent)
+      source.removeEventListener("updated", handleItemEvent)
+      source.removeEventListener("resolved", handleItemEvent)
+      source.close()
     }
-  }, [refreshSnapshot, loadItemDetail, selectedId])
+  }, [refresh])
 
-  // Auto-select first pending item when queue gets populated
+  const listItems =
+    queueView === "pending" ? (state?.pending ?? []) : (state?.recent ?? [])
+  const effectiveId =
+    selectedId !== null && listItems.some((item) => item.id === selectedId) ?
+      selectedId
+    : listItems.at(0)?.id
+
   useEffect(() => {
-    if (!snapshot) return
-    const list = queueTab === "pending" ? snapshot.pending : snapshot.recent
-    if (list.length === 0) return
-    if (!selectedId || !list.some((item) => item.id === selectedId)) {
-      const firstId = list[0].id
-      setSelectedId(firstId)
-      void loadItemDetail(firstId)
-    }
-  }, [snapshot, queueTab, selectedId, loadItemDetail])
+    effectiveIdRef.current = effectiveId
+  }, [effectiveId])
 
-  const persistConfig = useCallback(
-    async (next: InterceptConfig, toastMsg?: string) => {
-      setIsSavingConfig(true)
-      try {
-        const res = await put<{
-          config: InterceptConfig
-          snapshot: InterceptSnapshot
-        }>("/dashboard/api/intercept/config", next)
-        setDraftConfig(res.config)
-        setSnapshot(res.snapshot)
-        if (toastMsg) toast.success(toastMsg)
-      } catch (err) {
-        toast.error(
-          err instanceof ApiError ? err.message : "Failed to save config",
-        )
-      } finally {
-        setIsSavingConfig(false)
-      }
-    },
-    [toast],
-  )
-
-  const handleToggleEnabled = (enabled: boolean) => {
-    if (!draftConfig) return
-    const next = { ...draftConfig, enabled }
-    setDraftConfig(next)
-    void persistConfig(
-      next,
-      enabled ? "Interception enabled" : "Interception paused (queue released)",
-    )
-  }
-
-  const handleDirectionChange = (direction: string) => {
-    if (!draftConfig) return
-    const next = { ...draftConfig, direction: direction as InterceptDirection }
-    setDraftConfig(next)
-    void persistConfig(next)
-  }
-
-  const handleSelectQueueItem = (id: string) => {
-    setSelectedId(id)
-    void loadItemDetail(id)
-  }
-
-  const handleForward = useCallback(async () => {
-    if (!selectedDetail || selectedDetail.status !== "pending") return
-    setIsActing(true)
-    try {
-      const payload =
-        dirtySource === "structured" ? { canonicalItems: draftItems }
-        : dirtySource === "raw" ? { body: draftBody }
-        : undefined
-      await post(
-        `/dashboard/api/intercept/items/${encodeURIComponent(selectedDetail.id)}/forward`,
-        payload,
-      )
-      toast.success(`Forwarded ${selectedDetail.phase}`)
-      setDirtySource("none")
-      await refreshSnapshot()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to forward")
-    } finally {
-      setIsActing(false)
-    }
-  }, [
-    selectedDetail,
-    dirtySource,
-    draftItems,
-    draftBody,
-    toast,
-    refreshSnapshot,
-  ])
-
-  const handleDrop = useCallback(async () => {
-    if (!selectedDetail || selectedDetail.status !== "pending") return
-    setIsActing(true)
-    try {
-      await post(
-        `/dashboard/api/intercept/items/${encodeURIComponent(selectedDetail.id)}/drop`,
-        { reason: "Dropped by operator in Intercept tab" },
-      )
-      toast.success(`Dropped ${selectedDetail.phase}`)
-      await refreshSnapshot()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to drop")
-    } finally {
-      setIsActing(false)
-    }
-  }, [selectedDetail, toast, refreshSnapshot])
-
-  const handleForwardAll = async () => {
-    setIsActing(true)
-    try {
-      const res = await post<{ count: number }>(
-        "/dashboard/api/intercept/forward-all",
-      )
-      toast.success(`Forwarded ${res.count} queued item(s)`)
-      await refreshSnapshot()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to forward all")
-    } finally {
-      setIsActing(false)
-    }
-  }
-
-  const handleDropAll = async () => {
-    setIsActing(true)
-    try {
-      const res = await post<{ count: number }>(
-        "/dashboard/api/intercept/drop-all",
-      )
-      toast.success(`Dropped ${res.count} queued item(s)`)
-      await refreshSnapshot()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to drop all")
-    } finally {
-      setIsActing(false)
-    }
-  }
-
-  const handleRunAssistant = async () => {
-    if (!selectedDetail || selectedDetail.status !== "pending") return
-    setIsRunningAssistant(true)
-    try {
-      // Save unsaved edits first so assistant sees current draft
-      if (dirtySource !== "none") {
-        await put(
-          `/dashboard/api/intercept/items/${encodeURIComponent(selectedDetail.id)}`,
-          dirtySource === "structured" ?
-            { canonicalItems: draftItems }
-          : { body: draftBody },
-        )
-        setDirtySource("none")
-      }
-      const updated = await post<InterceptPendingItem>(
-        `/dashboard/api/intercept/items/${encodeURIComponent(selectedDetail.id)}/assistant`,
-      )
-      setSelectedDetail(updated)
-      if (updated.assistantError) {
-        toast.error(updated.assistantError)
-      } else {
-        toast.success("AI diff ready for review")
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Assistant run failed")
-    } finally {
-      setIsRunningAssistant(false)
-    }
-  }
-
-  const handleAcceptAssistantDiff = async (ops: Array<AssistantDiffOp>) => {
-    if (!selectedDetail) return
-    setIsActing(true)
-    try {
-      const updated = await post<InterceptPendingItem>(
-        `/dashboard/api/intercept/items/${encodeURIComponent(selectedDetail.id)}/assistant/apply`,
-        { operations: ops },
-      )
-      setSelectedDetail(updated)
-      setDraftBody(updated.currentBody)
-      setDraftItems(updated.canonical.items)
-      setDirtySource("none")
-      toast.success(
-        `Applied ${ops.length} AI edit(s) — review and click Forward`,
-      )
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to apply diff")
-    } finally {
-      setIsActing(false)
-    }
-  }
-
-  const handleRejectAssistantDiff = async () => {
-    if (!selectedDetail) return
-    try {
-      const updated = await post<InterceptPendingItem>(
-        `/dashboard/api/intercept/items/${encodeURIComponent(selectedDetail.id)}/assistant/reject`,
-      )
-      setSelectedDetail(updated)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to reject")
-    }
-  }
-
-  const handleResetEdits = () => {
-    if (!selectedDetail) return
-    setDraftBody(selectedDetail.originalBody)
-    setDraftItems(selectedDetail.canonical.items)
-    setDirtySource("none")
-  }
-
-  // Keyboard shortcut: Ctrl+Enter / Cmd+Enter to Forward active pending item
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (
-        (e.ctrlKey || e.metaKey)
-        && e.key === "Enter"
-        && selectedDetail?.status === "pending"
-        && !isActing
-      ) {
-        e.preventDefault()
-        void handleForward()
-      }
+    if (effectiveId === undefined) return
+    let isCurrent = true
+    get<InterceptPendingItem>(`${API}/items/${encodeURIComponent(effectiveId)}`)
+      .then((item) => {
+        if (isCurrent) setDetail(item)
+      })
+      .catch(() => {
+        if (isCurrent) setDetail(null)
+      })
+    return () => {
+      isCurrent = false
     }
-    globalThis.addEventListener("keydown", onKeyDown)
-    return () => globalThis.removeEventListener("keydown", onKeyDown)
-  }, [selectedDetail, isActing, handleForward])
+  }, [effectiveId, detailVersion])
 
-  const rawJsonDiagnostic = useMemo(() => {
-    if (!selectedDetail || selectedDetail.stream) return null
-    if (
-      selectedDetail.canonical.protocol === "raw_text"
-      || selectedDetail.responseContentType?.includes("text/event-stream")
-    ) {
-      return null
-    }
-    const validation = validateReplayDocument(draftBody)
-    return validation.ok ? null : validation.diagnostic
-  }, [draftBody, selectedDetail])
-
-  const queueItems =
-    snapshot ?
-      queueTab === "pending" ?
-        snapshot.pending
-      : snapshot.recent
-    : []
-
-  const isPending = selectedDetail?.status === "pending"
-  const activeFilterCount =
-    draftConfig?.filters.enabled ?
-      draftConfig.filters.conditions.filter((c) => c.enabled).length
-    : 0
-
-  if (loading && !snapshot) {
+  if (!state) {
     return (
-      <Page kicker="Control" title="Intercept">
-        <Skeleton height={48} />
-        <Skeleton height={420} />
+      <Page kicker="Control" title="Intercept" fill>
+        {loadError ?
+          <div className="intercept-banner">
+            <Banner
+              status="error"
+              title="Could not load Intercept"
+              description={loadError}
+              endContent={
+                <Button
+                  label="Retry"
+                  variant="secondary"
+                  onClick={() => void refresh()}
+                />
+              }
+            />
+          </div>
+        : <div className="intercept-loading">
+            <Skeleton height={32} />
+            <Skeleton height={420} index={1} />
+          </div>
+        }
       </Page>
     )
+  }
+
+  const { config } = state
+  const shownDetail = detail?.id === effectiveId ? detail : null
+  const activeConditions =
+    config.filters.enabled ?
+      config.filters.conditions.filter((condition) => condition.enabled).length
+    : 0
+
+  const rules = rulesDraft ?? rulesFromConfig(config)
+  const rulesDirty =
+    rulesDraft !== null
+    && JSON.stringify(rulesDraft) !== JSON.stringify(rulesFromConfig(config))
+  const rulesTimeoutError = timeoutError(rules.timeoutSeconds)
+
+  const assistant = assistantDraft ?? config.assistant
+  const assistantDirty =
+    assistantDraft !== null
+    && JSON.stringify(assistantDraft) !== JSON.stringify(config.assistant)
+
+  const patchConfig = async (
+    patch: Partial<InterceptConfig>,
+  ): Promise<boolean> => {
+    try {
+      const res = await put<ConfigUpdateResponse>(`${API}/config`, patch)
+      setState((prev) => (prev ? { ...prev, ...res.snapshot } : prev))
+      return true
+    } catch (err) {
+      toast.error(errorMessage(err, "Could not update Intercept"))
+      void refresh()
+      return false
+    }
+  }
+
+  const handleEnabledChange = (enabled: boolean) => {
+    const released = state.pending.length
+    setState({ ...state, config: { ...config, enabled } })
+    void patchConfig({ enabled }).then((saved) => {
+      if (saved && !enabled && released > 0) {
+        toast.success(
+          `Intercept off. Forwarded ${released} held item${released === 1 ? "" : "s"}.`,
+        )
+      }
+    })
+  }
+
+  const handleDirectionChange = (value: string) => {
+    const direction = value as InterceptDirection
+    setState({ ...state, config: { ...config, direction } })
+    void patchConfig({ direction })
+  }
+
+  const saveRules = async () => {
+    if (rulesTimeoutError) return
+    setIsSaving(true)
+    const saved = await patchConfig({
+      timeoutSeconds: Number(rules.timeoutSeconds),
+      timeoutAction: rules.timeoutAction,
+      filters: rules.filters,
+    })
+    setIsSaving(false)
+    if (saved) {
+      setRulesDraft(null)
+      toast.success("Rules saved")
+    }
+  }
+
+  const saveAssistant = async () => {
+    setIsSaving(true)
+    const saved = await patchConfig({ assistant })
+    setIsSaving(false)
+    if (saved) {
+      setAssistantDraft(null)
+      toast.success("Assistant saved")
+    }
+  }
+
+  const runBulk = async (action: "forward-all" | "drop-all") => {
+    setIsActing(true)
+    try {
+      const res = await post<{ count: number }>(`${API}/${action}`)
+      const verb = action === "forward-all" ? "Forwarded" : "Dropped"
+      toast.success(
+        `${verb} ${res.count} held item${res.count === 1 ? "" : "s"}`,
+      )
+      await refresh()
+    } catch (err) {
+      toast.error(errorMessage(err, "Could not update the queue"))
+    } finally {
+      setIsActing(false)
+    }
+  }
+
+  const clearHistory = async () => {
+    try {
+      await del(`${API}/recent`)
+      await refresh()
+    } catch (err) {
+      toast.error(errorMessage(err, "Could not clear history"))
+    }
+  }
+
+  const renderDetail = () => {
+    if (shownDetail) {
+      return (
+        <InterceptDetail
+          key={shownDetail.id}
+          item={shownDetail}
+          timeoutAction={config.timeoutAction}
+          onItemChange={setDetail}
+          onResolved={refresh}
+        />
+      )
+    }
+    if (effectiveId !== undefined) {
+      return (
+        <section className="intercept-detail is-empty">
+          <VStack gap={3} width="100%">
+            <Skeleton height={56} />
+            <Skeleton height={320} index={1} />
+          </VStack>
+        </section>
+      )
+    }
+    if (queueView === "recent") {
+      return (
+        <section className="intercept-detail is-empty">
+          <EmptyState
+            icon={<RadioIcon />}
+            title="No history yet"
+            description="Forwarded and dropped items appear here, with the edits you made."
+          />
+        </section>
+      )
+    }
+    if (!config.enabled) {
+      return (
+        <section className="intercept-detail is-empty">
+          <EmptyState
+            icon={<RadioIcon />}
+            title="Intercept is off"
+            description="Turn it on to hold matching requests and responses here, so you can read, edit, forward, or drop them before they continue."
+            actions={
+              <Button
+                label="Turn on Intercept"
+                variant="primary"
+                onClick={() => handleEnabledChange(true)}
+              />
+            }
+          />
+        </section>
+      )
+    }
+    const filterText =
+      activeConditions > 0 ?
+        ` that match ${activeConditions} filter${activeConditions === 1 ? "" : "s"}`
+      : ""
+    return (
+      <section className="intercept-detail is-empty">
+        <EmptyState
+          icon={<RadioIcon />}
+          title="Nothing held right now"
+          description={`Holding ${DIRECTION_TEXT[config.direction]}${filterText}. New traffic appears in the queue as it arrives.`}
+        />
+      </section>
+    )
+  }
+
+  const renderRules = () => (
+    <div className="intercept-settings">
+      <div className="intercept-settings-inner">
+        <div className="intercept-settings-bar">
+          <Text type="supporting">
+            Choose what gets held, and what happens when a held item waits too
+            long.
+          </Text>
+          <HStack gap={2}>
+            {rulesDirty ?
+              <Button
+                label="Discard"
+                variant="ghost"
+                onClick={() => setRulesDraft(null)}
+              />
+            : null}
+            <Button
+              label="Save rules"
+              variant="primary"
+              isLoading={isSaving}
+              isDisabled={!rulesDirty || rulesTimeoutError !== undefined}
+              onClick={() => void saveRules()}
+            />
+          </HStack>
+        </div>
+
+        <Card>
+          <VStack gap={3}>
+            <VStack gap={0.5}>
+              <Heading level={3}>Hold timeout</Heading>
+              <Text type="supporting">
+                A held item resolves on its own after this long, so clients
+                never wait forever.
+              </Text>
+            </VStack>
+            <div className="intercept-hold-grid">
+              <TextInput
+                label="Timeout (seconds)"
+                description="15 to 3600"
+                width={200}
+                value={rules.timeoutSeconds}
+                status={
+                  rulesTimeoutError ?
+                    { type: "error", message: rulesTimeoutError }
+                  : undefined
+                }
+                onChange={(timeoutSeconds) =>
+                  setRulesDraft({ ...rules, timeoutSeconds })
+                }
+              />
+              <div className="intercept-field-group">
+                <Text type="label">When time runs out</Text>
+                <Text type="supporting">Applies to every held item</Text>
+                <SegmentedControl
+                  label="When time runs out"
+                  value={rules.timeoutAction}
+                  onChange={(value) =>
+                    setRulesDraft({
+                      ...rules,
+                      timeoutAction: value === "drop" ? "drop" : "forward",
+                    })
+                  }
+                >
+                  <SegmentedControlItem value="forward" label="Forward" />
+                  <SegmentedControlItem value="drop" label="Drop" />
+                </SegmentedControl>
+              </div>
+            </div>
+          </VStack>
+        </Card>
+
+        <InterceptFiltersPanel
+          filters={rules.filters}
+          onChange={(filters) => setRulesDraft({ ...rules, filters })}
+        />
+      </div>
+    </div>
+  )
+
+  const renderAssistant = () => (
+    <div className="intercept-settings">
+      <div className="intercept-settings-inner">
+        <div className="intercept-settings-bar">
+          <Text type="supporting">
+            Describe a scenario once. The assistant proposes matching edits for
+            each held item.
+          </Text>
+          <HStack gap={2}>
+            {assistantDirty ?
+              <Button
+                label="Discard"
+                variant="ghost"
+                onClick={() => setAssistantDraft(null)}
+              />
+            : null}
+            <Button
+              label="Save assistant"
+              variant="primary"
+              isLoading={isSaving}
+              isDisabled={!assistantDirty}
+              onClick={() => void saveAssistant()}
+            />
+          </HStack>
+        </div>
+        <InterceptAssistantPanel
+          assistant={assistant}
+          availableModels={state.availableModels}
+          onChange={setAssistantDraft}
+        />
+      </div>
+    </div>
+  )
+
+  let body = renderAssistant()
+  if (view === "traffic") {
+    body = (
+      <div className="intercept-workbench">
+        <InterceptQueueRail
+          view={queueView}
+          onViewChange={setQueueView}
+          pending={state.pending}
+          recent={state.recent}
+          selectedId={effectiveId}
+          onSelect={setSelectedId}
+          stats={state.stats}
+          isIntercepting={config.enabled}
+          isActing={isActing}
+          onForwardAll={() => runBulk("forward-all")}
+          onDropAll={() => runBulk("drop-all")}
+          onClearHistory={clearHistory}
+        />
+        {renderDetail()}
+      </div>
+    )
+  } else if (view === "rules") {
+    body = renderRules()
   }
 
   return (
     <Page
       kicker="Control"
       title="Intercept"
-      onRefresh={() => void refreshSnapshot()}
+      fill
+      isRefreshing={isRefreshing}
+      onRefresh={() => {
+        setIsRefreshing(true)
+        void refresh().finally(() => setIsRefreshing(false))
+      }}
       actions={
-        draftConfig ?
-          <div
-            className="intercept-master-toggle"
-            data-active={draftConfig.enabled}
-          >
-            <Switch
-              label={draftConfig.enabled ? "Intercept ON" : "Intercept OFF"}
-              value={draftConfig.enabled}
-              onChange={handleToggleEnabled}
-            />
-          </div>
-        : null
-      }
-    >
-      {error ?
-        <Banner status="error" title="Intercept error" description={error} />
-      : null}
-
-      {/* Controls, stats & bulk actions toolbar */}
-      {snapshot && draftConfig ?
-        <div className="intercept-toolbar">
-          <HStack gap={3} vAlign="center" wrap="wrap">
+        <HStack gap={3} vAlign="center" wrap="wrap">
+          <HStack gap={2} vAlign="center">
+            <Text type="supporting">Capture</Text>
             <SegmentedControl
               label="Capture direction"
-              value={draftConfig.direction}
+              size="sm"
+              value={config.direction}
               onChange={handleDirectionChange}
             >
-              <SegmentedControlItem value="both" label="Req & Res" />
-              <SegmentedControlItem value="request" label="Req Only" />
-              <SegmentedControlItem value="response" label="Res Only" />
+              <SegmentedControlItem value="both" label="Both" />
+              <SegmentedControlItem value="request" label="Requests" />
+              <SegmentedControlItem value="response" label="Responses" />
             </SegmentedControl>
-
-            <Button
-              label={
-                activeFilterCount > 0 ?
-                  `Filters (${activeFilterCount})`
-                : "Filters"
-              }
-              size="sm"
-              variant={drawerTab === "filters" ? "primary" : "secondary"}
-              icon={<FilterIcon />}
-              onClick={() =>
-                setDrawerTab((cur) => (cur === "filters" ? "none" : "filters"))
-              }
-            />
-
-            <Button
-              label={
-                draftConfig.assistant.enabled ? "AI Assist (ON)" : "AI Assist"
-              }
-              size="sm"
-              variant={drawerTab === "assistant" ? "primary" : "secondary"}
-              icon={<SparklesIcon />}
-              onClick={() =>
-                setDrawerTab((cur) =>
-                  cur === "assistant" ? "none" : "assistant",
-                )
-              }
-            />
-
-            <div className="intercept-stats">
-              <span className="intercept-stat">
-                <strong>{snapshot.stats.pendingCount}</strong> queued
-              </span>
-              <span className="intercept-stat-sep">·</span>
-              <span className="intercept-stat">
-                <strong>{snapshot.stats.forwardedCount}</strong> forwarded
-              </span>
-              <span className="intercept-stat-sep">·</span>
-              <span className="intercept-stat">
-                <strong>{snapshot.stats.modifiedCount}</strong> modified
-              </span>
-              <span className="intercept-stat-sep">·</span>
-              <span className="intercept-stat">
-                <strong>{snapshot.stats.droppedCount}</strong> dropped
-              </span>
-            </div>
           </HStack>
-
-          <HStack gap={2} vAlign="center" wrap="wrap">
-            <HStack gap={1.5} vAlign="center">
-              <Text type="supporting" color="secondary">
-                Timeout (s)
-              </Text>
-              <div style={{ width: 76 }}>
-                <TextInput
-                  label="Timeout seconds"
-                  isLabelHidden
-                  size="sm"
-                  value={String(draftConfig.timeoutSeconds)}
-                  onChange={(val) => {
-                    const num = Number(val)
-                    if (!Number.isNaN(num)) {
-                      setDraftConfig({ ...draftConfig, timeoutSeconds: num })
-                    }
-                  }}
-                  onBlur={() => void persistConfig(draftConfig)}
-                />
-              </div>
-            </HStack>
-
-            {snapshot.stats.pendingCount > 0 ?
-              <>
-                <Button
-                  label="Forward All"
-                  size="sm"
-                  variant="secondary"
-                  icon={<PlayIcon />}
-                  isDisabled={isActing}
-                  onClick={() => void handleForwardAll()}
-                />
-                <Button
-                  label="Drop All"
-                  size="sm"
-                  variant="destructive"
-                  icon={<XIcon />}
-                  isDisabled={isActing}
-                  onClick={() => void handleDropAll()}
-                />
-              </>
-            : null}
-            {queueTab === "recent" && snapshot.recent.length > 0 ?
-              <Button
-                label="Clear History"
-                size="sm"
-                variant="ghost"
-                icon={<Trash2Icon />}
-                onClick={() => {
-                  void del("/dashboard/api/intercept/recent").then(() =>
-                    refreshSnapshot(),
-                  )
-                }}
-              />
-            : null}
-          </HStack>
+          <Switch
+            label="Intercept"
+            value={config.enabled}
+            onChange={handleEnabledChange}
+          />
+        </HStack>
+      }
+    >
+      <div className="intercept-views">
+        <TabList value={view} onChange={(next) => setView(next as ScreenView)}>
+          <Tab
+            value="traffic"
+            label="Traffic"
+            endContent={
+              state.pending.length > 0 ?
+                <Badge variant="neutral" label={String(state.pending.length)} />
+              : undefined
+            }
+          />
+          <Tab
+            value="rules"
+            label="Rules"
+            endContent={
+              activeConditions > 0 ?
+                <Badge variant="neutral" label={String(activeConditions)} />
+              : undefined
+            }
+          />
+          <Tab
+            value="assistant"
+            label="AI Assist"
+            endContent={
+              config.assistant.enabled ?
+                <StatusDot variant="success" label="Assistant on" />
+              : undefined
+            }
+          />
+        </TabList>
+      </div>
+      {loadError ?
+        <div className="intercept-banner">
+          <Banner
+            status="error"
+            title="Lost connection to Intercept"
+            description={loadError}
+          />
         </div>
       : null}
-
-      {/* Expandable configuration drawers for Filters or AI Assist */}
-      {drawerTab === "filters" && draftConfig ?
-        <InterceptFiltersPanel
-          filters={draftConfig.filters}
-          isSaving={isSavingConfig}
-          onChange={(filters) => setDraftConfig({ ...draftConfig, filters })}
-          onSave={() =>
-            void persistConfig(draftConfig, "Interception filters saved")
-          }
-        />
-      : null}
-
-      {drawerTab === "assistant" && draftConfig ?
-        <InterceptAssistantPanel
-          assistant={draftConfig.assistant}
-          availableModels={availableModels}
-          isSaving={isSavingConfig}
-          onChange={(assistant) =>
-            setDraftConfig({ ...draftConfig, assistant })
-          }
-          onSave={() =>
-            void persistConfig(draftConfig, "AI Assist settings saved")
-          }
-        />
-      : null}
-      {/* Burp-style master-detail split workbench */}
-      <div className="intercept-workbench">
-        {/* Left Queue Sidebar */}
-        <aside className="intercept-queue-pane">
-          <div className="intercept-queue-header">
-            <SegmentedControl
-              label="Queue view"
-              value={queueTab}
-              onChange={(val) => {
-                setQueueTab(val as QueueTab)
-                setSelectedId(null)
-                setSelectedDetail(null)
-              }}
-            >
-              <SegmentedControlItem
-                value="pending"
-                label={`Queue (${snapshot?.pending.length ?? 0})`}
-              />
-              <SegmentedControlItem
-                value="recent"
-                label={`History (${snapshot?.recent.length ?? 0})`}
-              />
-            </SegmentedControl>
-          </div>
-
-          <div className="intercept-queue-list">
-            {queueItems.length === 0 ?
-              <div className="intercept-queue-empty">
-                <Text type="supporting" color="secondary">
-                  {queueTab === "pending" ?
-                    draftConfig?.enabled ?
-                      "Waiting for matching AI traffic…"
-                    : "Turn Intercept ON above to hold and edit live traffic."
-                  : "No intercepted history yet."}
-                </Text>
-              </div>
-            : queueItems.map((item) => {
-                const remainingSec = Math.max(
-                  0,
-                  Math.ceil((item.expiresAtMs - nowMs) / 1000),
-                )
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className="intercept-queue-item"
-                    data-selected={selectedId === item.id}
-                    onClick={() => handleSelectQueueItem(item.id)}
-                  >
-                    <HStack hAlign="between" vAlign="center" gap={1}>
-                      <HStack gap={1.5} vAlign="center">
-                        <Badge
-                          variant="neutral"
-                          label={item.phase === "request" ? "REQ" : "RES"}
-                        />
-                        <StatusDot
-                          variant={statusDotVariant(item.status)}
-                          label={item.status}
-                        />
-                        <Text type="supporting" color="secondary">
-                          {item.status}
-                        </Text>
-                        {item.modified ?
-                          <Badge variant="neutral" label="Edited" />
-                        : null}
-                        {item.assistantStatus === "ready" ?
-                          <Badge variant="neutral" label="AI Diff" />
-                        : item.assistantStatus === "running" ?
-                          <Badge variant="neutral" label="AI…" />
-                        : null}
-                      </HStack>
-                      <Text type="supporting" color="secondary">
-                        {item.status === "pending" ?
-                          `${remainingSec}s`
-                        : <RelTime ts={item.createdAt} />}
-                      </Text>
-                    </HStack>
-
-                    <div className="intercept-queue-model">
-                      {item.model ?? item.path}
-                    </div>
-                    <div className="intercept-queue-meta">
-                      <span>{item.path}</span>
-                      <span>·</span>
-                      <span>{fmtBytes(item.bodyBytes)}</span>
-                    </div>
-                    {item.preview ?
-                      <div className="intercept-queue-preview">
-                        {item.preview}
-                      </div>
-                    : null}
-                  </button>
-                )
-              })
-            }
-          </div>
-        </aside>
-
-        {/* Right Inspector & Editor Pane */}
-        <section className="intercept-editor-pane">
-          {!selectedId || (!selectedDetail && !loadingDetail) ?
-            <Card padding={6}>
-              <EmptyState
-                icon={<ArrowRightLeftIcon />}
-                title="No intercepted item selected"
-                description={
-                  draftConfig?.enabled ?
-                    "Intercept is active. Send an AI request through copilot-api and it will pause here for inspection, editing, or AI-assisted diffing."
-                  : "Enable Intercept in the top bar, choose Request / Response / Both, optionally configure Filters or AI Assist, and inspect live traffic here."
-                }
-              />
-            </Card>
-          : loadingDetail && !selectedDetail ?
-            <Skeleton height={360} />
-          : selectedDetail ?
-            <VStack gap={3}>
-              {/* Action header bar */}
-              <Card padding={3}>
-                <HStack hAlign="between" vAlign="center" wrap="wrap" gap={2}>
-                  <VStack gap={0.5}>
-                    <HStack gap={2} vAlign="center" wrap="wrap">
-                      <Badge
-                        variant="neutral"
-                        label={
-                          selectedDetail.phase === "request" ?
-                            "REQUEST"
-                          : `RESPONSE${selectedDetail.responseStatus ? ` ${selectedDetail.responseStatus}` : ""}`
-                        }
-                      />
-                      <Heading level={3}>
-                        {selectedDetail.model ?? selectedDetail.path}
-                      </Heading>
-                      <HStack gap={1} vAlign="center">
-                        <StatusDot
-                          variant={statusDotVariant(selectedDetail.status)}
-                          label={selectedDetail.status}
-                        />
-                        <Text type="supporting" color="secondary">
-                          {selectedDetail.status}
-                        </Text>
-                      </HStack>
-                      {selectedDetail.stream ?
-                        <Badge variant="neutral" label="SSE" />
-                      : null}
-                    </HStack>
-                    <HStack gap={2} vAlign="center" wrap="wrap">
-                      <MonoText>
-                        {selectedDetail.method} {selectedDetail.path}
-                      </MonoText>
-                      {selectedDetail.sessionId ?
-                        <Text type="supporting" color="secondary">
-                          session:{" "}
-                          <code>{selectedDetail.sessionId.slice(0, 16)}</code>
-                        </Text>
-                      : null}
-                      <Text type="supporting" color="secondary">
-                        protocol:{" "}
-                        <code>{selectedDetail.canonical.protocol}</code>
-                      </Text>
-                    </HStack>
-                  </VStack>
-
-                  {isPending ?
-                    <HStack gap={2} vAlign="center" wrap="wrap">
-                      <Button
-                        label="Run AI Assist"
-                        size="sm"
-                        variant="secondary"
-                        icon={<SparklesIcon />}
-                        isLoading={
-                          isRunningAssistant
-                          || selectedDetail.assistantStatus === "running"
-                        }
-                        onClick={() => void handleRunAssistant()}
-                      />
-                      {dirtySource !== "none" || selectedDetail.modified ?
-                        <Button
-                          label="Reset"
-                          size="sm"
-                          variant="ghost"
-                          icon={<RefreshCwIcon />}
-                          onClick={handleResetEdits}
-                        />
-                      : null}
-                      <Button
-                        label="Drop"
-                        size="sm"
-                        variant="destructive"
-                        icon={<ShieldAlertIcon />}
-                        isLoading={isActing}
-                        onClick={() => void handleDrop()}
-                      />
-                      <Button
-                        label="Forward (Ctrl+Enter)"
-                        size="sm"
-                        variant="primary"
-                        icon={<PlayIcon />}
-                        isLoading={isActing}
-                        onClick={() => void handleForward()}
-                      />
-                    </HStack>
-                  : null}
-                </HStack>
-              </Card>
-
-              {/* Assistant error or suggestion diff */}
-              {selectedDetail.assistantError ?
-                <Banner
-                  status="error"
-                  title="AI Assist failed"
-                  description={selectedDetail.assistantError}
-                />
-              : null}
-
-              {selectedDetail.assistantSuggestion ?
-                <InterceptDiffViewer
-                  suggestion={selectedDetail.assistantSuggestion}
-                  currentItems={draftItems}
-                  readOnly={!isPending}
-                  isApplying={isActing}
-                  onAccept={(ops) => void handleAcceptAssistantDiff(ops)}
-                  onReject={() => void handleRejectAssistantDiff()}
-                />
-              : null}
-
-              {/* Editor mode tabs */}
-              <HStack hAlign="between" vAlign="center" wrap="wrap">
-                <TabList
-                  value={editorTab}
-                  onChange={(key) => setEditorTab(key as EditorTab)}
-                >
-                  <Tab
-                    value="structured"
-                    label={`Structured (${draftItems.length})`}
-                  />
-                  <Tab value="raw" label="Raw Editor" />
-                  <Tab
-                    value="headers"
-                    label={`Headers (${Object.keys(selectedDetail.headers).length})`}
-                  />
-                  {selectedDetail.requestContext ?
-                    <Tab value="context" label="Request Context" />
-                  : null}
-                </TabList>
-
-                {editorTab === "raw" ?
-                  <Switch
-                    label="Wrap lines"
-                    value={wrapRaw}
-                    onChange={setWrapRaw}
-                  />
-                : null}
-              </HStack>
-
-              {editorTab === "structured" ?
-                <StructuredMessageEditor
-                  items={draftItems}
-                  readOnly={!isPending}
-                  editable={selectedDetail.canonical.editable}
-                  note={selectedDetail.canonical.note}
-                  onChange={(nextItems) => {
-                    setDraftItems(nextItems)
-                    setDirtySource("structured")
-                  }}
-                />
-              : editorTab === "raw" ?
-                (
-                  selectedDetail.stream
-                  || selectedDetail.responseContentType?.includes(
-                    "text/event-stream",
-                  )
-                ) ?
-                  <div className="json-code-editor">
-                    <div className="code-document-label">
-                      Raw SSE / Text Body
-                    </div>
-                    <CodeMirrorDocument
-                      ref={rawEditorRef}
-                      ariaLabel="Raw SSE body"
-                      language="text"
-                      readOnly={!isPending}
-                      value={draftBody}
-                      wrap={wrapRaw}
-                      onChange={(val) => {
-                        setDraftBody(val)
-                        setDirtySource("raw")
-                      }}
-                    />
-                  </div>
-                : <JsonCodeEditor
-                    ref={rawEditorRef}
-                    diagnostic={rawJsonDiagnostic}
-                    label="Raw JSON Payload"
-                    value={draftBody}
-                    wrap={wrapRaw}
-                    onChange={(val) => {
-                      if (!isPending) return
-                      setDraftBody(val)
-                      setDirtySource("raw")
-                    }}
-                  />
-
-              : editorTab === "headers" ?
-                <Card padding={3}>
-                  <div className="intercept-headers-table">
-                    {Object.entries(selectedDetail.headers).map(
-                      ([key, value]) => (
-                        <div key={key} className="intercept-header-row">
-                          <code className="intercept-header-key">{key}</code>
-                          <code className="intercept-header-val">{value}</code>
-                        </div>
-                      ),
-                    )}
-                  </div>
-                </Card>
-              : selectedDetail.requestContext ?
-                <StructuredMessageEditor
-                  items={selectedDetail.requestContext.canonical.items}
-                  readOnly
-                  editable={false}
-                  note="Read-only view of the outgoing request that triggered this response."
-                  onChange={() => {}}
-                />
-              : null}
-            </VStack>
-          : null}
-        </section>
-      </div>
+      {body}
     </Page>
   )
 }

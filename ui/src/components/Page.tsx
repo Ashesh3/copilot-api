@@ -13,6 +13,8 @@ export interface PageProps {
   actions?: ReactNode
   onRefresh?: () => void
   isRefreshing?: boolean
+  /** Fill the viewport below the header; children own their scroll regions. */
+  fill?: boolean
   children?: ReactNode
 }
 
@@ -22,6 +24,7 @@ export function Page({
   actions,
   onRefresh,
   isRefreshing,
+  fill = false,
   children,
 }: PageProps) {
   return (
@@ -49,9 +52,12 @@ export function Page({
           </HStack>
         </HStack>
       </Section>
-      <VStack isScrollable padding={4} gap={4} height="100%">
-        {children}
-      </VStack>
+      {fill ?
+        <div className="page-fill-body">{children}</div>
+      : <VStack isScrollable padding={4} gap={4} height="100%">
+          {children}
+        </VStack>
+      }
     </VStack>
   )
 }

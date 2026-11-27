@@ -1,5 +1,3 @@
-/* eslint-disable no-nested-ternary */
-import { Badge } from "@astryxdesign/core/Badge"
 import { Button } from "@astryxdesign/core/Button"
 import { Card } from "@astryxdesign/core/Card"
 import {
@@ -20,23 +18,22 @@ import type {
 } from "../../../src/lib/intercept/types"
 
 import { PlusIcon, Trash2Icon } from "../icons"
+import { IconAction } from "./common"
 
 interface InterceptFiltersPanelProps {
   filters: InterceptFilterConfig
   onChange: (next: InterceptFilterConfig) => void
-  onSave: () => void
-  isSaving: boolean
 }
 
 const FIELD_OPTIONS: Array<{ label: string; value: InterceptFilterField }> = [
   { label: "Session ID", value: "sessionId" },
-  { label: "Model ID", value: "model" },
-  { label: "Request Body", value: "requestBody" },
-  { label: "Response Body", value: "responseBody" },
-  { label: "Endpoint Path", value: "path" },
-  { label: "Upstream Provider", value: "upstream" },
-  { label: "HTTP Header", value: "header" },
-  { label: "Direction (request/response)", value: "direction" },
+  { label: "Model", value: "model" },
+  { label: "Request body", value: "requestBody" },
+  { label: "Response body", value: "responseBody" },
+  { label: "Endpoint path", value: "path" },
+  { label: "Upstream", value: "upstream" },
+  { label: "Header", value: "header" },
+  { label: "Direction", value: "direction" },
 ]
 
 const OPERATOR_OPTIONS: Array<{
@@ -44,144 +41,137 @@ const OPERATOR_OPTIONS: Array<{
   value: InterceptFilterOperator
 }> = [
   { label: "contains", value: "contains" },
-  { label: "not contains", value: "not_contains" },
+  { label: "doesn't contain", value: "not_contains" },
   { label: "equals", value: "equals" },
-  { label: "not equals", value: "not_equals" },
+  { label: "doesn't equal", value: "not_equals" },
   { label: "starts with", value: "starts_with" },
   { label: "matches regex", value: "regex" },
 ]
 
+const VALUE_PLACEHOLDER: Record<InterceptFilterField, string> = {
+  sessionId: "Session ID",
+  model: "claude-sonnet-4",
+  requestBody: "Text in the request",
+  responseBody: "Text in the response",
+  path: "/v1/messages",
+  upstream: "copilot or custom:<provider>",
+  header: "Header value",
+  direction: "request or response",
+}
+
 export function InterceptFiltersPanel({
   filters,
   onChange,
-  onSave,
-  isSaving,
 }: InterceptFiltersPanelProps) {
-  const addCondition = () => {
-    const next: InterceptFilterCondition = {
-      id: `cond-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      enabled: true,
-      field: "model",
-      operator: "contains",
-      value: "",
-      caseSensitive: false,
-    }
-    onChange({
-      ...filters,
-      enabled: true,
-      conditions: [...filters.conditions, next],
-    })
-  }
-
   const updateCondition = (
     id: string,
     patch: Partial<InterceptFilterCondition>,
   ) => {
     onChange({
       ...filters,
-      conditions: filters.conditions.map((c) =>
-        c.id === id ? { ...c, ...patch } : c,
+      conditions: filters.conditions.map((condition) =>
+        condition.id === id ? { ...condition, ...patch } : condition,
       ),
     })
   }
 
-  const removeCondition = (id: string) => {
+  const addCondition = () => {
     onChange({
       ...filters,
-      conditions: filters.conditions.filter((c) => c.id !== id),
+      enabled: true,
+      conditions: [
+        ...filters.conditions,
+        {
+          id: `cond-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          enabled: true,
+          field: "model",
+          operator: "contains",
+          value: "",
+          caseSensitive: false,
+        },
+      ],
     })
   }
 
   return (
-    <Card padding={4}>
+    <Card>
       <VStack gap={3}>
-        <HStack hAlign="between" vAlign="center" wrap="wrap" gap={2}>
+        <div className="intercept-settings-bar">
           <VStack gap={0.5}>
-            <HStack gap={2} vAlign="center">
-              <Heading level={3}>Interception Filters</Heading>
-              <Badge
-                variant="neutral"
-                label={
-                  filters.enabled ?
-                    `${filters.conditions.filter((c) => c.enabled).length} active`
-                  : "All traffic"
-                }
-              />
-            </HStack>
-            <Text type="supporting" color="secondary">
-              Only pause requests/responses matching these conditions. Leave
-              disabled to intercept all matching traffic.
+            <Heading level={3}>Filters</Heading>
+            <Text type="supporting">
+              Hold only traffic that matches. With filters off, everything in
+              the capture direction is held.
             </Text>
           </VStack>
-
-          <HStack gap={3} vAlign="center" wrap="wrap">
+          <HStack gap={3} vAlign="center">
+            <SegmentedControl
+              label="Match mode"
+              size="sm"
+              value={filters.matchMode}
+              onChange={(mode) =>
+                onChange({
+                  ...filters,
+                  matchMode: mode === "any" ? "any" : "all",
+                })
+              }
+            >
+              <SegmentedControlItem value="all" label="Match all" />
+              <SegmentedControlItem value="any" label="Match any" />
+            </SegmentedControl>
             <Switch
-              label="Enable filters"
+              label="Filters on"
               value={filters.enabled}
               onChange={(enabled) => onChange({ ...filters, enabled })}
             />
-            <SegmentedControl
-              label="Filter match mode"
-              value={filters.matchMode}
-              onChange={(mode) =>
-                onChange({ ...filters, matchMode: mode as "all" | "any" })
-              }
-            >
-              <SegmentedControlItem value="all" label="Match ALL" />
-              <SegmentedControlItem value="any" label="Match ANY" />
-            </SegmentedControl>
-            <Button
-              label="Add condition"
-              size="sm"
-              variant="secondary"
-              icon={<PlusIcon />}
-              onClick={addCondition}
-            />
-            <Button
-              label="Save filters"
-              size="sm"
-              variant="primary"
-              isLoading={isSaving}
-              onClick={onSave}
-            />
           </HStack>
-        </HStack>
+        </div>
 
         {filters.conditions.length === 0 ?
-          <Text type="supporting" color="secondary">
-            No conditions yet. Add conditions to filter by session ID, model ID,
-            request/response body, endpoint path, or HTTP header.
+          <Text type="supporting">
+            No conditions yet. Add one to hold, for example, a single session or
+            model.
           </Text>
         : <VStack gap={2}>
-            {filters.conditions.map((cond) => (
-              <div key={cond.id} className="intercept-filter-row">
+            {filters.conditions.map((condition) => (
+              <div
+                key={condition.id}
+                className={
+                  condition.field === "header" ?
+                    "intercept-filter-row has-header"
+                  : "intercept-filter-row"
+                }
+              >
                 <Switch
-                  label="Enabled"
+                  label="Condition on"
                   isLabelHidden
-                  value={cond.enabled}
-                  onChange={(enabled) => updateCondition(cond.id, { enabled })}
+                  value={condition.enabled}
+                  onChange={(enabled) =>
+                    updateCondition(condition.id, { enabled })
+                  }
                 />
                 <Selector
                   label="Field"
                   isLabelHidden
                   size="sm"
-                  value={cond.field}
+                  value={condition.field}
                   options={FIELD_OPTIONS}
-                  onChange={(val) =>
-                    updateCondition(cond.id, {
-                      field: val as InterceptFilterField,
+                  onChange={(value) =>
+                    updateCondition(condition.id, {
+                      field: value as InterceptFilterField,
                     })
                   }
                 />
-                {cond.field === "header" ?
+                {condition.field === "header" ?
                   <TextInput
+                    className="intercept-mono-field"
                     label="Header name"
                     isLabelHidden
                     size="sm"
-                    placeholder="Header name (e.g. x-session-id)"
-                    value={cond.headerName ?? ""}
+                    placeholder="x-session-id"
+                    value={condition.headerName ?? ""}
                     onChange={(headerName) =>
-                      updateCondition(cond.id, { headerName })
+                      updateCondition(condition.id, { headerName })
                     }
                   />
                 : null}
@@ -189,40 +179,49 @@ export function InterceptFiltersPanel({
                   label="Operator"
                   isLabelHidden
                   size="sm"
-                  value={cond.operator}
+                  value={condition.operator}
                   options={OPERATOR_OPTIONS}
-                  onChange={(val) =>
-                    updateCondition(cond.id, {
-                      operator: val as InterceptFilterOperator,
+                  onChange={(value) =>
+                    updateCondition(condition.id, {
+                      operator: value as InterceptFilterOperator,
                     })
                   }
                 />
                 <TextInput
+                  className="intercept-mono-field"
                   label="Value"
                   isLabelHidden
                   size="sm"
-                  placeholder={
-                    cond.field === "model" ? "e.g. claude-sonnet-4"
-                    : cond.field === "sessionId" ?
-                      "Session ID substring or regex"
-                    : cond.field === "requestBody" ?
-                      "Search text or regex in request"
-                    : "Match value..."
-                  }
-                  value={cond.value}
-                  onChange={(value) => updateCondition(cond.id, { value })}
+                  placeholder={VALUE_PLACEHOLDER[condition.field]}
+                  value={condition.value}
+                  onChange={(value) => updateCondition(condition.id, { value })}
                 />
-                <Button
-                  label="Delete"
-                  size="sm"
-                  variant="ghost"
+                <IconAction
+                  label="Remove condition"
                   icon={<Trash2Icon />}
-                  onClick={() => removeCondition(cond.id)}
+                  onClick={() =>
+                    onChange({
+                      ...filters,
+                      conditions: filters.conditions.filter(
+                        (entry) => entry.id !== condition.id,
+                      ),
+                    })
+                  }
                 />
               </div>
             ))}
           </VStack>
         }
+
+        <div>
+          <Button
+            label="Add condition"
+            size="sm"
+            variant="secondary"
+            icon={<PlusIcon />}
+            onClick={addCondition}
+          />
+        </div>
       </VStack>
     </Card>
   )

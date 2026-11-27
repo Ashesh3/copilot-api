@@ -1,9 +1,6 @@
-/* eslint-disable no-nested-ternary */
 import { Badge } from "@astryxdesign/core/Badge"
 import { Button } from "@astryxdesign/core/Button"
-import { Card } from "@astryxdesign/core/Card"
 import { Selector } from "@astryxdesign/core/Selector"
-import { HStack, VStack } from "@astryxdesign/core/Stack"
 import { Text } from "@astryxdesign/core/Text"
 import { TextArea } from "@astryxdesign/core/TextArea"
 import { TextInput } from "@astryxdesign/core/TextInput"
@@ -14,188 +11,199 @@ import type {
 } from "../../../src/lib/intercept/types"
 
 import { PlusIcon, Trash2Icon } from "../icons"
+import { KIND_LABEL } from "../lib/intercept-view"
+import { IconAction, RowActions } from "./common"
 
 interface StructuredMessageEditorProps {
   items: Array<CanonicalItem>
   readOnly: boolean
   editable: boolean
-  note?: string
-  onChange: (next: Array<CanonicalItem>) => void
+  onChange?: (next: Array<CanonicalItem>) => void
 }
 
-const KIND_OPTIONS: Array<{ label: string; value: CanonicalItemKind }> = [
-  { label: "System", value: "system" },
-  { label: "Developer", value: "developer" },
-  { label: "User", value: "user" },
-  { label: "Assistant", value: "assistant" },
-  { label: "Thinking", value: "thinking" },
-  { label: "Tool Call", value: "tool_call" },
-  { label: "Tool Result", value: "tool_result" },
+const EDITABLE_KINDS: Array<Exclude<CanonicalItemKind, "other">> = [
+  "system",
+  "developer",
+  "user",
+  "assistant",
+  "thinking",
+  "tool_call",
+  "tool_result",
 ]
+
+const KIND_OPTIONS = EDITABLE_KINDS.map((kind) => ({
+  label: KIND_LABEL[kind],
+  value: kind,
+}))
+
+function roleForKind(kind: CanonicalItemKind): string {
+  if (kind === "tool_call" || kind === "thinking") return "assistant"
+  if (kind === "tool_result") return "tool"
+  return kind
+}
+
+/** Grow with the content, within a sensible band, so short turns stay compact. */
+function rowsFor(text: string, max: number): number {
+  return Math.min(max, Math.max(2, text.split("\n").length + 1))
+}
+
+function MessageText({ item }: { item: CanonicalItem }) {
+  const isMono = item.kind === "tool_call" || item.kind === "tool_result"
+  const text =
+    item.kind === "tool_call" ?
+      (item.toolArguments ?? item.content)
+    : item.content
+  return (
+    <pre
+      className={
+        isMono ? "intercept-message-text is-mono" : "intercept-message-text"
+      }
+    >
+      {text || "(empty)"}
+    </pre>
+  )
+}
 
 export function StructuredMessageEditor({
   items,
   readOnly,
   editable,
-  note,
   onChange,
 }: StructuredMessageEditorProps) {
-  const canEdit = !readOnly && editable
+  const canEdit = !readOnly && editable && onChange !== undefined
 
-  const updateItem = (index: number, patch: Partial<CanonicalItem>) => {
-    const next = items.map((item, idx) =>
-      idx === index ? { ...item, ...patch } : item,
+  const update = (index: number, patch: Partial<CanonicalItem>) => {
+    onChange?.(
+      items.map((item, i) => (i === index ? { ...item, ...patch } : item)),
     )
-    onChange(next)
   }
 
-  const removeItem = (index: number) => {
-    onChange(items.filter((_, idx) => idx !== index))
-  }
-
-  const insertItem = (afterIndex: number) => {
-    const newItem: CanonicalItem = {
+  const insertAfter = (index: number) => {
+    const next = [...items]
+    next.splice(index + 1, 0, {
       id: `manual-${Date.now()}`,
       kind: "user",
       role: "user",
-      label: "User",
+      label: KIND_LABEL.user,
       content: "",
+    })
+    onChange?.(next)
+  }
+
+  const renderContent = (item: CanonicalItem, index: number) => {
+    if (!canEdit) return <MessageText item={item} />
+    if (item.kind === "tool_call") {
+      return (
+        <>
+          <TextInput
+            className="intercept-mono-field"
+            label="Tool name"
+            size="sm"
+            width={280}
+            value={item.toolName ?? ""}
+            onChange={(toolName) =>
+              update(index, { toolName, label: `Tool call: ${toolName}` })
+            }
+          />
+          <TextArea
+            className="intercept-mono-field"
+            label="Arguments (JSON)"
+            rows={rowsFor(item.toolArguments ?? item.content, 14)}
+            value={item.toolArguments ?? item.content}
+            onChange={(value) =>
+              update(index, { toolArguments: value, content: value })
+            }
+          />
+        </>
+      )
     }
-    const next = [...items]
-    next.splice(afterIndex + 1, 0, newItem)
-    onChange(next)
+    return (
+      <TextArea
+        className={
+          item.kind === "tool_result" ? "intercept-mono-field" : undefined
+        }
+        label={`${KIND_LABEL[item.kind]} content`}
+        isLabelHidden
+        rows={rowsFor(item.content, 18)}
+        value={item.content}
+        onChange={(content) => update(index, { content })}
+      />
+    )
+  }
+
+  if (items.length === 0) {
+    return (
+      <div className="intercept-messages-empty">
+        <Text type="supporting">This payload has no messages.</Text>
+        {canEdit ?
+          <Button
+            label="Add message"
+            size="sm"
+            variant="secondary"
+            icon={<PlusIcon />}
+            onClick={() => insertAfter(-1)}
+          />
+        : null}
+      </div>
+    )
   }
 
   return (
-    <VStack gap={3}>
-      {note ?
-        <Text type="supporting" color="secondary">
-          {note}
-        </Text>
-      : null}
-
-      {items.length === 0 ?
-        <Card padding={4}>
-          <VStack gap={2} hAlign="center">
-            <Text color="secondary">No structured messages parsed.</Text>
-            {canEdit ?
-              <Button
-                label="Add message"
-                icon={<PlusIcon />}
-                size="sm"
-                variant="secondary"
-                onClick={() => insertItem(-1)}
-              />
-            : null}
-          </VStack>
-        </Card>
-      : items.map((item, index) => (
-          <div
-            key={item.id}
-            className="intercept-msg-card"
-            data-kind={item.kind}
-          >
-            <HStack hAlign="between" vAlign="center" wrap="wrap" gap={2}>
-              <HStack gap={2} vAlign="center" wrap="wrap">
-                <Badge
-                  variant="neutral"
-                  label={item.kind.replace("_", " ").toUpperCase()}
-                />
-                <code className="intercept-item-id">{item.id}</code>
-                {item.toolCallId ?
-                  <Text type="supporting" color="secondary">
-                    call_id: <code>{item.toolCallId}</code>
-                  </Text>
-                : null}
-              </HStack>
+    <div className="intercept-messages">
+      {items.map((item, index) => (
+        <div key={item.id} className="intercept-message">
+          <div className="intercept-message-head">
+            <div className="intercept-message-id">
               {canEdit ?
-                <HStack gap={1} vAlign="center">
-                  <Selector
-                    label="Role / Kind"
-                    isLabelHidden
-                    size="sm"
-                    value={item.kind}
-                    options={KIND_OPTIONS}
-                    onChange={(val) => {
-                      const nextKind = val as CanonicalItemKind
-                      updateItem(index, {
-                        kind: nextKind,
-                        role:
-                          nextKind === "tool_call" || nextKind === "thinking" ?
-                            "assistant"
-                          : nextKind === "tool_result" ? "tool"
-                          : nextKind,
-                        label:
-                          nextKind === "tool_call" ?
-                            `Tool Call: ${item.toolName ?? "tool"}`
-                          : nextKind.charAt(0).toUpperCase()
-                            + nextKind.slice(1),
-                      })
-                    }}
-                  />
-                  <Button
-                    label="Insert below"
-                    size="sm"
-                    variant="ghost"
-                    icon={<PlusIcon />}
-                    onClick={() => insertItem(index)}
-                  />
-                  <Button
-                    label="Remove"
-                    size="sm"
-                    variant="ghost"
-                    icon={<Trash2Icon />}
-                    onClick={() => removeItem(index)}
-                  />
-                </HStack>
-              : null}
-            </HStack>
-
-            {item.kind === "tool_call" ?
-              <VStack gap={2}>
-                <TextInput
-                  label="Tool name"
+                <Selector
+                  label="Message kind"
+                  isLabelHidden
                   size="sm"
-                  value={item.toolName ?? ""}
-                  isDisabled={!canEdit}
-                  onChange={(val) =>
-                    updateItem(index, {
-                      toolName: val,
-                      label: `Tool Call: ${val || "tool"}`,
+                  width={140}
+                  value={item.kind}
+                  options={KIND_OPTIONS}
+                  onChange={(value) => {
+                    const kind = value as CanonicalItemKind
+                    update(index, {
+                      kind,
+                      role: roleForKind(kind),
+                      label: KIND_LABEL[kind],
                     })
-                  }
+                  }}
                 />
-                <TextArea
-                  label="Tool arguments (JSON)"
-                  rows={Math.min(
-                    12,
-                    Math.max(
-                      3,
-                      (item.toolArguments ?? item.content).split("\n").length,
-                    ),
-                  )}
-                  value={item.toolArguments ?? item.content}
-                  isDisabled={!canEdit}
-                  onChange={(val) =>
-                    updateItem(index, { toolArguments: val, content: val })
-                  }
+              : <Badge variant="neutral" label={KIND_LABEL[item.kind]} />}
+              {item.kind === "tool_call" && item.toolName ?
+                <code>{item.toolName}</code>
+              : null}
+              <code>{item.id}</code>
+              {item.toolCallId ?
+                <span>
+                  call <code>{item.toolCallId}</code>
+                </span>
+              : null}
+              {item.opaque ?
+                <span>includes non-text parts</span>
+              : null}
+            </div>
+            {canEdit ?
+              <RowActions>
+                <IconAction
+                  label="Insert message below"
+                  icon={<PlusIcon />}
+                  onClick={() => insertAfter(index)}
                 />
-              </VStack>
-            : <TextArea
-                label={item.label}
-                isLabelHidden
-                rows={Math.min(
-                  16,
-                  Math.max(3, item.content.split("\n").length + 1),
-                )}
-                value={item.content}
-                isDisabled={!canEdit}
-                onChange={(val) => updateItem(index, { content: val })}
-              />
-            }
+                <IconAction
+                  label="Remove message"
+                  icon={<Trash2Icon />}
+                  onClick={() => onChange(items.filter((_, i) => i !== index))}
+                />
+              </RowActions>
+            : null}
           </div>
-        ))
-      }
-    </VStack>
+
+          {renderContent(item, index)}
+        </div>
+      ))}
+    </div>
   )
 }

@@ -366,6 +366,9 @@ export class InterceptEngine {
     if (ops.length === 0) return slot.item
 
     const nextItems = applyCanonicalDiffOps(slot.item.canonical.items, ops)
+    // An applied suggestion is consumed: its item IDs address the pre-edit payload.
+    slot.item.assistantSuggestion = undefined
+    slot.item.assistantStatus = "idle"
     return this.editPendingItem(id, { canonicalItems: nextItems })
   }
 
