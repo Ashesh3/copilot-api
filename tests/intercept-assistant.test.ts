@@ -268,6 +268,92 @@ describe("assistant prompt", () => {
     ).not.toThrow()
   })
 
+  test("refuses to replace the arguments of a tool call it could only partly see", () => {
+    const args = JSON.stringify({ path: "a", data: "z".repeat(20_000) })
+    const items: Array<CanonicalItem> = [
+      {
+        id: "tc-0",
+        kind: "tool_call",
+        label: "Tool call",
+        content: args,
+        toolName: "write",
+        toolCallId: "call_1",
+        toolArguments: args,
+      },
+    ]
+    const prompt = buildAssistantPrompt({
+      item: heldItem(items),
+      instruction: "Rename the tool",
+    })
+
+    expect(prompt.targets.get("tc-0")?.truncated).toBe(true)
+    for (const op of [
+      { op: "replace", id: "tc-0", toolArguments: '{"path":"b"}' },
+      { op: "replace", id: "tc-0", content: '{"path":"b"}' },
+    ] as const) {
+      expect(() => validateDiffOps(items, [op], prompt.targets)).toThrow(
+        "truncated",
+      )
+    }
+    expect(() =>
+      validateDiffOps(
+        items,
+        [{ op: "replace", id: "tc-0", toolName: "save" }],
+        prompt.targets,
+      ),
+    ).not.toThrow()
+  })
+
+  test("keeps instructions first but within the total budget", () => {
+    const instructions = (prefix: string): Array<CanonicalItem> =>
+      Array.from({ length: 12 }, (_, index) => ({
+        id: `${prefix}-${index}`,
+        kind: index % 2 === 0 ? ("system" as const) : ("developer" as const),
+        label: "System",
+        content: `${prefix} ${index} ${"s".repeat(30_000)}`,
+      }))
+    const items: Array<CanonicalItem> = [
+      ...instructions("sys"),
+      { id: "msg-0", kind: "assistant", label: "Assistant", content: "hi" },
+    ]
+    const prompt = buildAssistantPrompt({
+      item: heldItem(items, {
+        phase: "response",
+        requestContext: {
+          method: "POST",
+          path: "/chat/completions",
+          body: "{}",
+          canonical: {
+            protocol: "chat_completions",
+            phase: "request",
+            items: instructions("ctx"),
+            editable: true,
+          },
+        },
+      }),
+      instruction: "Change the reply",
+    })
+
+    const shownChars = [...prompt.targets.values()].reduce(
+      (total, entry) => total + entry.text.length,
+      0,
+    )
+    expect(shownChars).toBeLessThanOrEqual(120_000)
+    expect(prompt.targets.has("sys-0")).toBe(true)
+    expect(prompt.targets.has("sys-11")).toBe(false)
+    expect(prompt.targets.has("msg-0")).toBe(true)
+    expect(prompt.user).toContain(
+      "system or developer items are not shown: they exceed the size limit",
+    )
+    expect(prompt.user).toContain("id=ctx-0")
+    expect(prompt.user).not.toContain("id=ctx-11")
+    // 120k target budget, 40k context budget, plus fixed framing.
+    expect(prompt.user.length).toBeLessThan(165_000)
+    expect(() =>
+      validateDiffOps(items, [{ op: "delete", id: "sys-11" }], prompt.targets),
+    ).toThrow("Unknown item id sys-11")
+  })
+
   test("refuses raw-only payloads before calling a model", async () => {
     const item = heldItem([], {
       canonical: {
@@ -339,7 +425,12 @@ describe("suggestions follow the item revision", () => {
     const item = engine.getItem(id)
     expect(item?.revision).toBe(1)
     expect(item?.assistantSuggestion).toBeUndefined()
-    expect(() => engine.applyAssistantDiff(id)).toThrow(StaleRevisionError)
+    expect(() =>
+      engine.applyAssistantDiff(id, {
+        suggestionId: "suggestion",
+        revision: 0,
+      }),
+    ).toThrow(StaleRevisionError)
     engine.forwardAllPending()
     expect((await pending).body).toBe(chatRequest("edited").body)
   })

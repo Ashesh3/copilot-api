@@ -30,6 +30,7 @@ import {
   SunIcon,
 } from "./icons"
 import { post } from "./lib/api"
+import { clearInterceptDrafts } from "./lib/intercept-drafts"
 import { useHashRoute } from "./lib/router"
 import { useThemeMode } from "./lib/theme-mode"
 
@@ -98,6 +99,7 @@ function NavItems({
 }
 
 async function logout(): Promise<void> {
+  clearInterceptDrafts()
   try {
     await post("/dashboard/auth/logout")
   } finally {

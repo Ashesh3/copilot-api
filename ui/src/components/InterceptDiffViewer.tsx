@@ -14,6 +14,16 @@ import type {
 import { CheckIcon, XIcon } from "../icons"
 import { KIND_LABEL } from "../lib/intercept-view"
 
+/**
+ * Body of `POST /items/:id/assistant/apply`. The server refuses (409) unless
+ * the suggestion is still current and the item is still at its revision.
+ */
+export interface AssistantApplyRequest {
+  suggestionId: string
+  revision: number
+  operations: Array<AssistantDiffOp>
+}
+
 interface InterceptDiffViewerProps {
   suggestion: AssistantSuggestion
   currentItems: ReadonlyArray<CanonicalItem>
@@ -21,7 +31,8 @@ interface InterceptDiffViewerProps {
   /** False while the operator has unsaved manual edits the suggestion did not see. */
   canApply: boolean
   isApplying: boolean
-  onApply: (selectedOps: Array<AssistantDiffOp>) => void
+  /** Applies the selected operations of the suggestion this viewer shows. */
+  onApply: (request: AssistantApplyRequest) => void
   onReject: () => void
 }
 
@@ -176,7 +187,13 @@ export function InterceptDiffViewer({
                 icon={<CheckIcon />}
                 isLoading={isApplying}
                 isDisabled={!canApply || selectedOps.length === 0}
-                onClick={() => onApply(selectedOps)}
+                onClick={() =>
+                  onApply({
+                    suggestionId: suggestion.id,
+                    revision: suggestion.revision,
+                    operations: selectedOps,
+                  })
+                }
               />
             : null}
           </HStack>

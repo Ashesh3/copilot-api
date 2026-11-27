@@ -19,6 +19,7 @@ import {
   inspectHttpError,
   LocalHTTPError,
 } from "~/lib/error"
+import { runWithInterceptApprovals } from "~/lib/intercept/approvals"
 import {
   type LogicalRequestLifecycle,
   startLogicalRequestLog,
@@ -273,7 +274,10 @@ export async function runWithWebSocketRequestContext<T>(
           (usage) => {
             if (!turn.lifecycle?.isFinalized()) turn.managedUsage = usage
           },
-          async () => await runWithCopilotContractObservabilityScope(callback),
+          async () =>
+            await runWithCopilotContractObservabilityScope(
+              async () => await runWithInterceptApprovals(callback),
+            ),
         ),
     )
   return await requestIdStorage.run(

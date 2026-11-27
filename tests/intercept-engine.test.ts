@@ -1,0 +1,225 @@
+import { afterEach, describe, expect, test } from "bun:test"
+
+import type { InterceptAssistantResult } from "~/lib/intercept/assistant"
+
+import {
+  DEBUG_CAPTURE_MEMORY_MAX_BYTES,
+  debugCaptureMemoryUsage,
+  releaseDebugCaptureMemory,
+  reserveDebugCaptureMemory,
+} from "~/lib/debug-capture"
+import { LocalHTTPError } from "~/lib/error"
+import { CanonicalEditError } from "~/lib/intercept/canonical"
+import {
+  CaptureBudgetError,
+  InterceptEngine,
+  StaleRevisionError,
+} from "~/lib/intercept/engine"
+
+const engines: Array<InterceptEngine> = []
+
+function newEngine(
+  runner?: ConstructorParameters<typeof InterceptEngine>[0],
+): InterceptEngine {
+  const engine = new InterceptEngine(runner)
+  engines.push(engine)
+  return engine
+}
+
+afterEach(() => {
+  for (const engine of engines.splice(0)) engine.resetForTest()
+})
+
+function chatRequest(content: string, stream = false) {
+  return {
+    method: "POST",
+    path: "/chat/completions",
+    url: "https://api.githubcopilot.com/chat/completions",
+    upstream: "copilot" as const,
+    headers: {},
+    body: JSON.stringify({
+      model: "gpt-4o",
+      stream,
+      messages: [{ role: "user", content }],
+    }),
+  }
+}
+
+function chatResponse(content: string): Response {
+  return Response.json({
+    id: "chatcmpl-1",
+    object: "chat.completion",
+    model: "gpt-4o",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content },
+        finish_reason: "stop",
+      },
+    ],
+  })
+}
+
+function responseInput(response: Response, requestBody: string) {
+  return {
+    method: "POST",
+    path: "/chat/completions",
+    url: "https://api.githubcopilot.com/chat/completions",
+    upstream: "copilot" as const,
+    response,
+    requestSnapshot: {
+      method: "POST",
+      path: "/chat/completions",
+      model: "gpt-4o",
+      body: requestBody,
+      headers: {},
+    },
+  }
+}
+
+function nextQueued(engine: InterceptEngine): Promise<string> {
+  const { promise, resolve } = Promise.withResolvers<string>()
+  const unsubscribe = engine.subscribe((event) => {
+    if (event.type !== "queued") return
+    unsubscribe()
+    resolve(event.item.id)
+  })
+  return promise
+}
+
+describe("capture memory", () => {
+  test("an edit that does not fit is refused and leaves the item unchanged", async () => {
+    const engine = newEngine()
+    engine.updateConfig({ enabled: true, direction: "request" })
+    const queued = nextQueued(engine)
+    const pending = engine.interceptRequest(chatRequest("original"))
+    const id = await queued
+    const filler =
+      DEBUG_CAPTURE_MEMORY_MAX_BYTES - debugCaptureMemoryUsage() - 10
+    reserveDebugCaptureMemory(filler)
+    try {
+      expect(() =>
+        engine.editPendingItem(id, {
+          body: chatRequest("x".repeat(1000)).body,
+        }),
+      ).toThrow(CaptureBudgetError)
+    } finally {
+      releaseDebugCaptureMemory(filler)
+    }
+
+    expect(engine.getItem(id)?.currentBody).toBe(chatRequest("original").body)
+    engine.forwardAllPending()
+    expect((await pending).modified).toBe(false)
+  })
+
+  test("a held response reserves the request it answers", async () => {
+    const engine = newEngine()
+    engine.updateConfig({ enabled: true, direction: "response" })
+    const requestBody = chatRequest("y".repeat(20_000)).body
+    const response = chatResponse("short")
+    const responseBytes = Buffer.byteLength(await response.clone().text())
+    const before = debugCaptureMemoryUsage()
+
+    const queued = nextQueued(engine)
+    const pending = engine.interceptResponse(
+      responseInput(response, requestBody),
+    )
+    await queued
+
+    expect(debugCaptureMemoryUsage() - before).toBe(
+      3 * responseBytes + 2 * Buffer.byteLength(requestBody),
+    )
+    engine.forwardAllPending()
+    await pending
+    engine.clearRecent()
+    expect(debugCaptureMemoryUsage()).toBe(before)
+  })
+})
+
+describe("response capture", () => {
+  test("turning Intercept off releases a response that never finishes", async () => {
+    const engine = newEngine()
+    engine.updateConfig({ enabled: true, direction: "response" })
+    const stalled = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("data: {}\n\n"))
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    )
+
+    const pending = engine.interceptResponse(
+      responseInput(stalled, chatRequest("hi", true).body),
+    )
+    await Bun.sleep(10)
+    engine.updateConfig({ enabled: false })
+
+    expect(await pending).toBe(stalled)
+  })
+
+  test("a dropped response is a local error, not an upstream response", async () => {
+    const engine = newEngine()
+    engine.updateConfig({ enabled: true, direction: "response" })
+    const queued = nextQueued(engine)
+    const pending = engine.interceptResponse(
+      responseInput(chatResponse("hello"), chatRequest("hi").body),
+    )
+    engine.dropItem(await queued, "not this one")
+
+    const failure: unknown = await pending.then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    expect(failure).toBeInstanceOf(LocalHTTPError)
+    if (!(failure instanceof LocalHTTPError)) return
+    expect(failure.response.status).toBe(403)
+    expect(failure.clientBody).toMatchObject({
+      error: { code: "intercept_dropped" },
+    })
+  })
+})
+
+describe("held request edits", () => {
+  test("a raw edit cannot switch between streamed and buffered", async () => {
+    const engine = newEngine()
+    engine.updateConfig({ enabled: true, direction: "request" })
+    const queued = nextQueued(engine)
+    const pending = engine.interceptRequest(chatRequest("hi", true))
+    const id = await queued
+
+    expect(() =>
+      engine.editPendingItem(id, { body: chatRequest("hi", false).body }),
+    ).toThrow(CanonicalEditError)
+    engine.forwardAllPending()
+    await pending
+  })
+
+  test("only the suggestion the operator reviewed can be applied", async () => {
+    const suggestion: InterceptAssistantResult = {
+      id: "reviewed",
+      createdAt: new Date(0).toISOString(),
+      model: "test-model",
+      summary: "test",
+      operations: [{ op: "replace", id: "msg-0", content: "assisted" }],
+      previewBody: null,
+      previewCanonical: null,
+      durationMs: 0,
+    }
+    const engine = newEngine(() => Promise.resolve(suggestion))
+    engine.updateConfig({ enabled: true, direction: "request" })
+    const queued = nextQueued(engine)
+    const pending = engine.interceptRequest(chatRequest("original"))
+    const id = await queued
+    await engine.triggerAssistant(id)
+
+    expect(() =>
+      engine.applyAssistantDiff(id, { suggestionId: "other", revision: 0 }),
+    ).toThrow(StaleRevisionError)
+    expect(engine.getItem(id)?.revision).toBe(0)
+    engine.applyAssistantDiff(id, { suggestionId: "reviewed", revision: 0 })
+    expect(engine.getItem(id)?.currentBody).toContain("assisted")
+    engine.forwardAllPending()
+    await pending
+  })
+})

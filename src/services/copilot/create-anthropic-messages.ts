@@ -14,6 +14,7 @@ import type { ManagedWebRound } from "~/services/web/tool-loop"
 import { getSelectedRoutedAccountId, routedFetch } from "~/lib/account-router"
 import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import { HTTPError } from "~/lib/error"
+import { interceptLogicalSend } from "~/lib/intercept/upstream"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
 import { state } from "~/lib/state"
 import {
@@ -400,10 +401,15 @@ async function dispatchAnthropicMessages(
     })
   }
 
-  const attempt = await retryAnthropicCompatibility(options, {
-    body,
-    ...(await dispatchAnthropicAttempt(options, body, false)),
-  })
+  // A compatibility resend carries the same logical request: Intercept
+  // replays the operator's approval and holds only the settled response.
+  const attempt = await interceptLogicalSend(
+    async () =>
+      await retryAnthropicCompatibility(options, {
+        body,
+        ...(await dispatchAnthropicAttempt(options, body, false)),
+      }),
+  )
   const { body: activeBody, response } = attempt
   const source: ThinkingSource = {
     model: options.modelId,

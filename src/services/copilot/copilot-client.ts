@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- transport retry and intercept lifecycle live in one boundary */
 import * as Sentry from "@sentry/bun"
 import consola from "consola"
 import { randomUUID } from "node:crypto"
@@ -17,7 +16,7 @@ import {
   DebugCaptureError,
 } from "~/lib/debug-capture"
 import { resolveCopilotApiBaseUrl } from "~/lib/github-instance"
-import { interceptEngine } from "~/lib/intercept/engine"
+import { interceptUpstreamSend } from "~/lib/intercept/upstream"
 import {
   abortLlmDebugLog,
   failLlmDebugLog,
@@ -734,47 +733,37 @@ async function applyRetryResponseAction(options: {
 }
 
 /**
- * Intercept holds each logical request once and only the response returned to
- * the caller: automatic resends carry the approved body, and holding happens
- * outside the transport retry boundary.
+ * Intercept holds a request outside the transport retry loop, so transport
+ * resends carry the approved body. Resends from outer layers (failover,
+ * compatibility retries) replay the approval, and an enclosing logical send
+ * owns the response hold; see `~/lib/intercept/upstream`.
  */
 export async function copilotFetch(
   path: string,
   init?: RequestInit,
   fetchOptions?: CopilotFetchOptions,
 ): Promise<Response> {
-  if (
-    !interceptEngine.isEnabled()
-    || !isLlmDebugPath(path)
-    || typeof init?.body !== "string"
-  ) {
+  if (!isLlmDebugPath(path)) {
     return await sendCopilotRequest(path, init, fetchOptions)
   }
-  const method = init.method ?? "POST"
-  const url = `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`
-  const held = await interceptEngine.interceptRequest({
-    method,
-    path,
-    url,
-    upstream: "copilot",
-    headers: filterCopilotRequestHeaders(init.headers),
-    body: init.body,
-    signal: init.signal,
-  })
-  const response = await sendCopilotRequest(
-    path,
-    held.modified ? { ...init, body: held.body } : init,
-    fetchOptions,
+  return await interceptUpstreamSend(
+    {
+      method: init?.method ?? "POST",
+      path,
+      url: `${fetchOptions?.baseUrl ?? copilotBaseUrl()}${path}`,
+      upstream: "copilot",
+      headers: filterCopilotRequestHeaders(init?.headers),
+      body: init?.body,
+      signal: init?.signal,
+      reason: fetchOptions?.telemetry?.reason,
+    },
+    async (body) =>
+      await sendCopilotRequest(
+        path,
+        body === undefined ? init : { ...init, body },
+        fetchOptions,
+      ),
   )
-  return await interceptEngine.interceptResponse({
-    method,
-    path,
-    url,
-    upstream: "copilot",
-    response,
-    requestSnapshot: held.requestSnapshot,
-    signal: init.signal,
-  })
 }
 
 interface CopilotFetchOptions {

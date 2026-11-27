@@ -9,9 +9,16 @@ import {
   resolveCustomProviderModel,
 } from "~/lib/custom-providers"
 import { getModelEndpointSupport } from "~/lib/endpoint-routing"
+import {
+  applyModelFallbackToPayload,
+  getModelFallbackEffort,
+  runWithModelFallback,
+} from "~/lib/model-fallback"
+import { normalizeReasoningEffortForModel } from "~/lib/model-suffix"
 import { runAsIndependentRequest } from "~/lib/request-scopes"
 import { state } from "~/lib/state"
 import {
+  type ChatCompletionResponse,
   type ChatCompletionsPayload,
   createChatCompletions,
 } from "~/services/copilot/create-chat-completions"
@@ -126,34 +133,64 @@ function projectItem(item: CanonicalItem): ProjectedItem {
   }
 }
 
-/** Instructions always, then the newest items that fit, in original order. */
+interface ItemSelection {
+  shown: Array<ProjectedItem>
+  /** Instruction items left out because they do not fit the budget. */
+  omittedInstructions: number
+  /** The oldest non-instruction items, left out to fit the budget. */
+  omittedOlder: number
+}
+
+/**
+ * Instructions first, in order, while they fit; then the newest other items
+ * that fit. Everything shown stays within `budget` and keeps its order.
+ */
 function selectItems(
   items: ReadonlyArray<CanonicalItem>,
   budget: number,
-): { shown: Array<ProjectedItem>; omitted: number } {
+): ItemSelection {
   const projected = items.map((item) => projectItem(item))
   const keep = new Set<number>()
   let used = 0
+  let instructionsFit = true
   for (const [index, entry] of projected.entries()) {
     if (!isInstruction(entry.item)) continue
-    keep.add(index)
-    used += entry.text.length
+    if (instructionsFit && used + entry.text.length <= budget) {
+      keep.add(index)
+      used += entry.text.length
+    } else {
+      instructionsFit = false
+    }
   }
   for (let index = projected.length - 1; index >= 0; index -= 1) {
-    if (keep.has(index)) continue
+    if (isInstruction(projected[index].item)) continue
     used += projected[index].text.length
     if (used > budget) break
     keep.add(index)
   }
   const shown = projected.filter((_, index) => keep.has(index))
-  return { shown, omitted: projected.length - shown.length }
+  const omittedInstructions = projected.filter(
+    (entry, index) => isInstruction(entry.item) && !keep.has(index),
+  ).length
+  return {
+    shown,
+    omittedInstructions,
+    omittedOlder: projected.length - shown.length - omittedInstructions,
+  }
 }
 
-function formatItems(shown: Array<ProjectedItem>, omitted: number): string {
+function formatItems(selection: ItemSelection): string {
+  const { shown, omittedInstructions, omittedOlder } = selection
   const lines: Array<string> = []
-  if (omitted > 0) {
-    lines.push(`(${omitted} older items are not shown.)`, "")
+  if (omittedInstructions > 0) {
+    lines.push(
+      `(${omittedInstructions} system or developer items are not shown: they exceed the size limit.)`,
+    )
   }
+  if (omittedOlder > 0) {
+    lines.push(`(${omittedOlder} older items are not shown.)`)
+  }
+  if (lines.length > 0) lines.push("")
   for (const { item, text, truncated } of shown) {
     const meta = [`id=${item.id}`, `kind=${item.kind}`]
     if (item.toolName) meta.push(`tool=${item.toolName}`)
@@ -162,7 +199,7 @@ function formatItems(shown: Array<ProjectedItem>, omitted: number): string {
     if (truncated) meta.push("truncated")
     lines.push(`### [${meta.join(" | ")}]`, text, "")
   }
-  return lines.join("\n").trim()
+  return lines.join("\n").trim() || "(no items)"
 }
 
 const SYSTEM_PROMPT = [
@@ -183,7 +220,7 @@ const SYSTEM_PROMPT = [
   "- Address only ids listed under TARGET ITEMS. Items under REQUEST CONTEXT are background and cannot be edited.",
   "- Each id may appear in at most one replace or delete. Never insert after an item you delete.",
   "- Items marked read-only can be kept or deleted, never replaced.",
-  "- Items marked truncated show only their beginning: never replace them; delete them or insert new items instead.",
+  "- Items marked truncated show only their beginning: never replace their content or toolArguments; delete them or insert new items instead.",
   "- A replace sets the item's whole content; write the complete new text.",
   "- For tool_call items put the arguments in toolArguments as a JSON object string.",
   "- Make the smallest change that satisfies the scenario. If nothing needs to change, return an empty operations array.",
@@ -212,27 +249,23 @@ export function buildAssistantPrompt(options: {
 
   const context = item.requestContext?.canonical
   if (item.phase === "response" && context && context.items.length > 0) {
-    const { shown, omitted } = selectItems(context.items, CONTEXT_CHAR_BUDGET)
     parts.push(
       "# REQUEST CONTEXT (the request that produced this response; read-only)",
-      formatItems(shown, omitted),
+      formatItems(selectItems(context.items, CONTEXT_CHAR_BUDGET)),
       "",
     )
   }
 
-  const { shown, omitted } = selectItems(
-    item.canonical.items,
-    TARGET_CHAR_BUDGET,
-  )
+  const selection = selectItems(item.canonical.items, TARGET_CHAR_BUDGET)
   parts.push(
     `# TARGET ITEMS (the ${item.phase} you are editing)`,
-    shown.length > 0 ? formatItems(shown, omitted) : "(no items)",
+    formatItems(selection),
   )
 
   return {
     system: SYSTEM_PROMPT,
     user: parts.join("\n"),
-    targets: new Map(shown.map((entry) => [entry.item.id, entry])),
+    targets: new Map(selection.shown.map((entry) => [entry.item.id, entry])),
   }
 }
 
@@ -352,7 +385,10 @@ function checkOperation(
       `Item ${op.id} is read-only; it can be kept or deleted`,
     )
   }
-  if (op.content !== undefined && targets?.get(op.id)?.truncated) {
+  // Tool calls show their arguments, so those are the text a cut view hides.
+  const replacesText =
+    op.content !== undefined || op.toolArguments !== undefined
+  if (replacesText && targets?.get(op.id)?.truncated) {
     throw new AssistantDiffError(
       `Item ${op.id} was shown truncated, so its content cannot be replaced`,
     )
@@ -434,37 +470,9 @@ export function parseAssistantDiffResponse(raw: string): {
 
 // --- Invocation -------------------------------------------------------------
 
-async function invokeAssistantModel(options: {
-  model: string
-  destination: AssistantDestination
-  system: string
-  user: string
-  signal?: AbortSignal
-}): Promise<string> {
-  const { model, destination, signal } = options
-  const payload: ChatCompletionsPayload = {
-    model,
-    stream: false,
-    messages: [
-      { role: "system", content: options.system },
-      { role: "user", content: options.user },
-    ],
-  }
-  // A separate request: the held request's account, fallback, telemetry and
-  // response headers stay untouched, and its own traffic is never intercepted.
-  const result = await runAsIndependentRequest(
-    "Intercept Assistant",
-    async () =>
-      await runBypassingIntercept(async () =>
-        destination.kind === "custom" ?
-          await createCustomProviderChatCompletions(
-            destination.reference,
-            { ...payload, model: destination.reference.upstreamModel },
-            { signal },
-          )
-        : await createChatCompletions(payload, { signal }),
-      ),
-  )
+function assistantReplyText(
+  result: ChatCompletionResponse | AsyncIterable<unknown>,
+): string {
   if (Symbol.asyncIterator in result) {
     throw new Error("The assistant model returned a stream")
   }
@@ -473,6 +481,67 @@ async function invokeAssistantModel(options: {
     throw new Error("The assistant model returned no text")
   }
   return content
+}
+
+/** One attempt; the fallback runner supplies the model for retries. */
+async function sendAssistantAttempt(
+  source: ChatCompletionsPayload,
+  signal: AbortSignal | undefined,
+): Promise<{ model: string; content: string }> {
+  const payload = applyModelFallbackToPayload(structuredClone(source))
+  const { model } = payload
+  const destination = resolveAssistantDestination(model)
+  if (!destination) {
+    throw new Error(
+      `${model} cannot run AI Assist: it is not an available Chat Completions model`,
+    )
+  }
+  const effort = normalizeReasoningEffortForModel(
+    model,
+    getModelFallbackEffort(),
+  )
+  if (destination.kind === "custom") {
+    const result = await createCustomProviderChatCompletions(
+      destination.reference,
+      { ...payload, model: destination.reference.upstreamModel },
+      { signal, reasoningEffort: effort },
+    )
+    return { model, content: assistantReplyText(result) }
+  }
+  if (effort) payload.reasoning_effort = effort
+  const result = await createChatCompletions(payload, { signal })
+  return { model, content: assistantReplyText(result) }
+}
+
+async function invokeAssistantModel(options: {
+  model: string
+  system: string
+  user: string
+  signal?: AbortSignal
+}): Promise<{ model: string; content: string }> {
+  const { signal } = options
+  const payload: ChatCompletionsPayload = {
+    model: options.model,
+    stream: false,
+    messages: [
+      { role: "system", content: options.system },
+      { role: "user", content: options.user },
+    ],
+  }
+  // A separate request: the held request's account, fallback, telemetry and
+  // response headers stay untouched, and its own traffic is never intercepted.
+  // Configured model fallbacks apply as on the Chat Completions route.
+  return await runAsIndependentRequest(
+    "Intercept Assistant",
+    async () =>
+      await runBypassingIntercept(
+        async () =>
+          await runWithModelFallback(
+            { payload, signal },
+            async () => await sendAssistantAttempt(payload, signal),
+          ),
+      ),
+  )
 }
 
 export interface RunInterceptAssistantOptions {
@@ -503,12 +572,6 @@ export async function runInterceptAssistant(
   }
   const model = (options.modelOverride ?? options.config.model).trim()
   if (!model) throw new Error("Select an assistant model in AI Assist settings")
-  const destination = resolveAssistantDestination(model)
-  if (!destination) {
-    throw new Error(
-      `${model} cannot run AI Assist: it is not an available Chat Completions model`,
-    )
-  }
   const instruction =
     options.instructionOverride?.trim()
     || resolveAssistantInstruction(options.config, item.phase)
@@ -519,12 +582,11 @@ export async function runInterceptAssistant(
   const prompt = buildAssistantPrompt({ item, instruction })
   const reply = await invokeAssistantModel({
     model,
-    destination,
     system: prompt.system,
     user: prompt.user,
     signal,
   })
-  const { summary, operations } = parseAssistantDiffResponse(reply)
+  const { summary, operations } = parseAssistantDiffResponse(reply.content)
   validateDiffOps(item.canonical.items, operations, prompt.targets)
 
   let previewBody: string | null = null
@@ -548,7 +610,7 @@ export async function runInterceptAssistant(
   return {
     id: randomUUID(),
     createdAt: new Date().toISOString(),
-    model,
+    model: reply.model,
     summary,
     operations,
     previewBody,

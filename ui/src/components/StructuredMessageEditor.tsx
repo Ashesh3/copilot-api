@@ -1,6 +1,7 @@
 import { Badge } from "@astryxdesign/core/Badge"
 import { Button } from "@astryxdesign/core/Button"
 import { Selector } from "@astryxdesign/core/Selector"
+import { HStack } from "@astryxdesign/core/Stack"
 import { Text } from "@astryxdesign/core/Text"
 import { TextArea } from "@astryxdesign/core/TextArea"
 import { TextInput } from "@astryxdesign/core/TextInput"
@@ -16,6 +17,11 @@ import { IconAction, RowActions } from "./common"
 
 interface StructuredMessageEditorProps {
   items: Array<CanonicalItem>
+  /**
+   * Items as the server holds them. An item whose ID and kind both match one
+   * of these is an original node; anything else is new to the server.
+   */
+  originalItems?: ReadonlyArray<CanonicalItem>
   readOnly: boolean
   editable: boolean
   /** Keeps the fields visible but inert, e.g. while a save is in flight. */
@@ -72,12 +78,16 @@ function MessageText({ item }: { item: CanonicalItem }) {
 
 export function StructuredMessageEditor({
   items,
+  originalItems,
   readOnly,
   editable,
   isDisabled = false,
   onChange,
 }: StructuredMessageEditorProps) {
   const canEdit = !readOnly && editable && onChange !== undefined
+  const originalKinds = new Map(
+    originalItems?.map((item) => [item.id, item.kind]),
+  )
 
   const update = (index: number, patch: Partial<CanonicalItem>) => {
     onChange?.(
@@ -100,20 +110,39 @@ export function StructuredMessageEditor({
   const renderContent = (item: CanonicalItem, index: number) => {
     // Opaque nodes are preserved verbatim; they can be removed, never rewritten.
     if (!canEdit || item.opaque) return <MessageText item={item} />
+    // Original nodes keep the call ID they were sent with. The server writes
+    // inserted ones (and ones whose kind changed) as new nodes, which need it.
+    const isNew = originalKinds.get(item.id) !== item.kind
     if (item.kind === "tool_call") {
       return (
         <>
-          <TextInput
-            className="intercept-mono-field"
-            label="Tool name"
-            size="sm"
-            width={280}
-            isDisabled={isDisabled}
-            value={item.toolName ?? ""}
-            onChange={(toolName) =>
-              update(index, { toolName, label: `Tool call: ${toolName}` })
-            }
-          />
+          <HStack gap={2} wrap="wrap">
+            <TextInput
+              className="intercept-mono-field"
+              label="Tool name"
+              size="sm"
+              width={280}
+              isRequired
+              isDisabled={isDisabled}
+              value={item.toolName ?? ""}
+              onChange={(toolName) =>
+                update(index, { toolName, label: `Tool call: ${toolName}` })
+              }
+            />
+            {isNew ?
+              <TextInput
+                className="intercept-mono-field"
+                label="Call ID"
+                description="Leave empty to generate one."
+                size="sm"
+                width={280}
+                isOptional
+                isDisabled={isDisabled}
+                value={item.toolCallId ?? ""}
+                onChange={(toolCallId) => update(index, { toolCallId })}
+              />
+            : null}
+          </HStack>
           <TextArea
             className="intercept-mono-field"
             label="Arguments (JSON)"
@@ -127,7 +156,7 @@ export function StructuredMessageEditor({
         </>
       )
     }
-    return (
+    const contentField = (
       <TextArea
         className={
           item.kind === "tool_result" ? "intercept-mono-field" : undefined
@@ -139,6 +168,23 @@ export function StructuredMessageEditor({
         value={item.content}
         onChange={(content) => update(index, { content })}
       />
+    )
+    if (item.kind !== "tool_result" || !isNew) return contentField
+    return (
+      <>
+        <TextInput
+          className="intercept-mono-field"
+          label="Tool call ID"
+          description="The ID of the tool call this result answers."
+          size="sm"
+          width={280}
+          isRequired
+          isDisabled={isDisabled}
+          value={item.toolCallId ?? ""}
+          onChange={(toolCallId) => update(index, { toolCallId })}
+        />
+        {contentField}
+      </>
     )
   }
 

@@ -850,11 +850,15 @@ upstream responses, or both, optionally only when filters on session, model,
 path, upstream, headers, or body text match. Each held item can be edited as
 structured messages or raw text, then forwarded or dropped; without a decision
 it is forwarded or dropped when the configured hold time (15–3600 seconds)
-ends. A request is held once: automatic resends carry the approved
-body, and only the final upstream response is held. Held bodies stay in server
+ends. A request is held once: account failover and automatic retries carry the
+approved edits, a retry that changed what was edited is held again for review,
+and only the final upstream response is held. A dropped request or response
+reaches the client as an `intercept_dropped` error. A request's `stream` mode
+cannot be edited. Held bodies, edits, and assistant previews stay in server
 memory and share the LLM Debug memory budget; when it is full, traffic passes
-through unheld. Credential headers are shown redacted. Turning Intercept off
-forwards everything it holds.
+through unheld and edits that would not fit are refused. Credential headers are
+shown redacted. Turning Intercept off forwards everything it holds, including
+responses still being read.
 
 AI Assist sends a selected Chat Completions model the operator's instructions
 and a structured view of the held item: message text, tool calls, and tool
@@ -863,7 +867,7 @@ included. The model replies with edit operations, which are checked against the
 item and shown as a diff to accept in full or in part, or reject. Autopilot
 applies them and forwards without review, but keeps the item held when the
 assistant fails or its changes do not apply. Assistant calls run as separate
-requests and are never intercepted.
+requests with the configured model fallbacks and are never intercepted.
 
 In GitHub Accounts, expand an account's settings to enter an Integration ID.
 Leave it blank to use the hardcoded `copilot-developer-cli` default shown in the

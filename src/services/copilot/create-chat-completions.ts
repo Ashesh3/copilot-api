@@ -14,6 +14,7 @@ import {
   toDataUri,
 } from "~/lib/attachments"
 import { HTTPError } from "~/lib/error"
+import { interceptLogicalSend } from "~/lib/intercept/upstream"
 import { modelSupportsAssistantPrefill } from "~/lib/model-settings"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
 import { normalizeChatCompletionsRequest } from "~/routes/chat-completions/chat-contract"
@@ -658,22 +659,25 @@ async function dispatchChatCompletionsCore(
     retryBudget: options?.retryBudget ?? createRetryBudget(),
   }
 
-  const initialAttempt = await dispatchWithImageFallback({
-    compaction: options?.compaction,
-    headerOptions: headerOpts,
-    outboundPayload,
-    operation,
-    signal: options?.signal,
-    sourcePayload: normalizedPayload,
+  // The image and compatibility retries resend one logical request:
+  // Intercept holds only the response they settle on.
+  const active = await interceptLogicalSend(async () => {
+    const initialAttempt = await dispatchWithImageFallback({
+      compaction: options?.compaction,
+      headerOptions: headerOpts,
+      outboundPayload,
+      operation,
+      signal: options?.signal,
+      sourcePayload: normalizedPayload,
+    })
+    return options?.allowCompatibilityRetry === false ?
+        initialAttempt
+      : await retryChatCompatibility({
+          attempt: initialAttempt,
+          operation,
+          signal: options?.signal,
+        })
   })
-  const active =
-    options?.allowCompatibilityRetry === false ?
-      initialAttempt
-    : await retryChatCompatibility({
-        attempt: initialAttempt,
-        operation,
-        signal: options?.signal,
-      })
   if (normalizedPayload.stream) {
     return {
       processedPayload: active.payload,
