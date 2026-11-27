@@ -6,12 +6,14 @@ import {
   handleApplyInterceptAssistant,
   handleEditInterceptItem,
   handleForwardInterceptItem,
+  handleUpdateInterceptConfig,
 } from "~/routes/dashboard/intercept"
 
 const app = new Hono()
 app.put("/items/:id", handleEditInterceptItem)
 app.post("/items/:id/forward", handleForwardInterceptItem)
 app.post("/items/:id/assistant/apply", handleApplyInterceptAssistant)
+app.put("/config", handleUpdateInterceptConfig)
 
 afterEach(() => {
   interceptEngine.resetForTest()
@@ -96,4 +98,28 @@ test("structured edits must name the revision they were made from", async () => 
   expect(interceptEngine.getItem(id)?.currentBody).toContain("newer")
   interceptEngine.forwardAllPending()
   await outcome
+})
+
+test("a header condition without a header name is refused", async () => {
+  const result = await send(
+    "PUT",
+    "/config",
+    JSON.stringify({
+      filters: {
+        enabled: true,
+        matchMode: "all",
+        conditions: [
+          {
+            field: "header",
+            headerName: " ",
+            operator: "contains",
+            value: "x",
+          },
+        ],
+      },
+    }),
+  )
+
+  expect(result.status).toBe(400)
+  expect(interceptEngine.getConfig().filters.conditions).toEqual([])
 })

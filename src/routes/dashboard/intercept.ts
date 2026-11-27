@@ -13,31 +13,37 @@ import { CanonicalEditError } from "~/lib/intercept/canonical"
 import { interceptEngine, StaleRevisionError } from "~/lib/intercept/engine"
 import { validateFilterRegex } from "~/lib/intercept/filters"
 
-const filterConditionSchema = z.object({
-  id: z.string().max(128).optional().default(""),
-  enabled: z.boolean().optional().default(true),
-  field: z.enum([
-    "sessionId",
-    "model",
-    "path",
-    "upstream",
-    "requestBody",
-    "responseBody",
-    "header",
-    "direction",
-  ]),
-  headerName: z.string().max(128).optional(),
-  operator: z.enum([
-    "equals",
-    "not_equals",
-    "contains",
-    "not_contains",
-    "regex",
-    "starts_with",
-  ]),
-  value: z.string().max(4000).optional().default(""),
-  caseSensitive: z.boolean().optional().default(false),
-})
+const filterConditionSchema = z
+  .object({
+    id: z.string().max(128).optional().default(""),
+    enabled: z.boolean().optional().default(true),
+    field: z.enum([
+      "sessionId",
+      "model",
+      "path",
+      "upstream",
+      "requestBody",
+      "responseBody",
+      "header",
+      "direction",
+    ]),
+    headerName: z.string().trim().max(128).optional(),
+    operator: z.enum([
+      "equals",
+      "not_equals",
+      "contains",
+      "not_contains",
+      "regex",
+      "starts_with",
+    ]),
+    value: z.string().max(4000).optional().default(""),
+    caseSensitive: z.boolean().optional().default(false),
+  })
+  .refine(
+    (condition) =>
+      condition.field !== "header" || Boolean(condition.headerName),
+    { message: "Header conditions need a header name", path: ["headerName"] },
+  )
 
 const configPatchSchema = z.object({
   enabled: z.boolean().optional(),
