@@ -1,3 +1,4 @@
+import { Banner } from "@astryxdesign/core/Banner"
 import { Card } from "@astryxdesign/core/Card"
 import {
   SegmentedControl,
@@ -10,7 +11,44 @@ import { Heading, Text } from "@astryxdesign/core/Text"
 import { TextArea } from "@astryxdesign/core/TextArea"
 import { TextInput } from "@astryxdesign/core/TextInput"
 
-import type { InterceptAssistantConfig } from "../../../src/lib/intercept/types"
+import type {
+  InterceptAssistantConfig,
+  InterceptAutopilot,
+  InterceptPhase,
+} from "../../../src/lib/intercept/types"
+
+const AUTOPILOT_PHASES: Record<InterceptAutopilot, Array<InterceptPhase>> = {
+  off: [],
+  request: ["request"],
+  response: ["response"],
+  both: ["request", "response"],
+}
+
+function instructionFor(
+  assistant: InterceptAssistantConfig,
+  phase: InterceptPhase,
+): string {
+  if (assistant.instructionMode === "shared") return assistant.sharedInstruction
+  return phase === "request" ?
+      assistant.requestInstruction
+    : assistant.responseInstruction
+}
+
+/** What Autopilot still needs before it can act, mirroring the engine's checks. */
+function autopilotGaps(assistant: InterceptAssistantConfig): Array<string> {
+  if (assistant.autopilot === "off") return []
+  const gaps: Array<string> = []
+  if (!assistant.model.trim()) gaps.push("a model")
+  const missing = AUTOPILOT_PHASES[assistant.autopilot].filter(
+    (phase) => !instructionFor(assistant, phase).trim(),
+  )
+  if (missing.length > 0) {
+    gaps.push(
+      `instructions for ${missing.map((phase) => `${phase}s`).join(" and ")}`,
+    )
+  }
+  return gaps
+}
 
 interface InterceptAssistantPanelProps {
   assistant: InterceptAssistantConfig
@@ -30,6 +68,7 @@ export function InterceptAssistantPanel({
   if (assistant.model && !availableModels.includes(assistant.model)) {
     modelOptions.unshift({ label: assistant.model, value: assistant.model })
   }
+  const gaps = assistant.enabled ? autopilotGaps(assistant) : []
 
   return (
     <Card>
@@ -129,6 +168,42 @@ export function InterceptAssistantPanel({
             />
           </div>
         }
+
+        <div className="intercept-autopilot">
+          <div className="intercept-field-group">
+            <Text type="label">Autopilot</Text>
+            <Text type="supporting">
+              In these directions the assistant runs on every newly held item,
+              its changes are applied, and the item is forwarded without waiting
+              for you. Items already in the queue, and any the assistant fails
+              on, stay with you.
+            </Text>
+            <SegmentedControl
+              label="Autopilot"
+              value={assistant.autopilot}
+              isDisabled={!assistant.enabled}
+              disabledMessage="Turn the assistant on to use Autopilot"
+              onChange={(value) =>
+                onChange({
+                  ...assistant,
+                  autopilot: value as InterceptAutopilot,
+                })
+              }
+            >
+              <SegmentedControlItem value="off" label="Off" />
+              <SegmentedControlItem value="request" label="Requests" />
+              <SegmentedControlItem value="response" label="Responses" />
+              <SegmentedControlItem value="both" label="Both" />
+            </SegmentedControl>
+          </div>
+          {gaps.length > 0 ?
+            <Banner
+              status="warning"
+              title="Autopilot can't run yet"
+              description={`Add ${gaps.join(" and ")}. Until then, items stay held for you.`}
+            />
+          : null}
+        </div>
       </VStack>
     </Card>
   )

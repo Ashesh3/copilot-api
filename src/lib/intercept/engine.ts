@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto"
 import { LocalHTTPError } from "~/lib/error"
 import { getClientSessionId, getRequestId } from "~/lib/request-session"
 
+import type { InterceptAssistantRunner } from "./assistant"
 import type {
   AssistantDiffOp,
   CanonicalItem,
@@ -13,6 +14,7 @@ import type {
   InterceptItemStatus,
   InterceptItemSummary,
   InterceptPendingItem,
+  InterceptPhase,
   InterceptSnapshot,
 } from "./types"
 
@@ -138,6 +140,7 @@ function summarizeItem(item: InterceptPendingItem): InterceptItemSummary {
     preview,
     assistantStatus: item.assistantStatus,
     assistantOpCount: item.assistantSuggestion?.operations.length ?? 0,
+    autopilot: item.autopilot === true,
   }
 }
 
@@ -163,6 +166,12 @@ export class InterceptEngine {
     forwardedCount: 0,
     droppedCount: 0,
     modifiedCount: 0,
+  }
+  private readonly runAssistant: InterceptAssistantRunner
+
+  /** `runAssistant` is a test seam; production calls the configured model. */
+  constructor(runAssistant: InterceptAssistantRunner = runInterceptAssistant) {
+    this.runAssistant = runAssistant
   }
 
   getConfig(): InterceptConfig {
@@ -231,6 +240,7 @@ export class InterceptEngine {
     return {
       enabled: assistant.enabled,
       autoRun: assistant.autoRun,
+      autopilot: assistant.autopilot,
       model: assistant.model.trim(),
       instructionMode:
         assistant.instructionMode === "separate" ? "separate" : "shared",
@@ -394,7 +404,7 @@ export class InterceptEngine {
     this.emit({ type: "updated", item: summarizeItem(slot.item) })
 
     try {
-      const suggestion = await runInterceptAssistant({
+      const suggestion = await this.runAssistant({
         item: slot.item,
         config: this.config.assistant,
         instructionOverride: options?.instruction,
@@ -463,12 +473,43 @@ export class InterceptEngine {
     this.emit({ type: "snapshot", snapshot: this.getSnapshot() })
   }
 
+  private autopilotCovers(phase: InterceptPhase): boolean {
+    const { autopilot, enabled } = this.config.assistant
+    return enabled && (autopilot === "both" || autopilot === phase)
+  }
+
   private maybeAutoRunAssistant(item: InterceptPendingItem): void {
     const cfg = this.config.assistant
-    if (!cfg.enabled || !cfg.autoRun || !cfg.model.trim()) return
-    const instruction = resolveAssistantInstruction(cfg, item.phase)
-    if (!instruction) return
-    void this.triggerAssistant(item.id)
+    const autopilot = this.autopilotCovers(item.phase)
+    if (!cfg.enabled || (!cfg.autoRun && !autopilot) || !cfg.model.trim()) {
+      return
+    }
+    if (!resolveAssistantInstruction(cfg, item.phase)) return
+    void this.triggerAssistant(item.id).then(() => {
+      this.completeAutopilot(item.id)
+    })
+  }
+
+  /**
+   * Apply every proposed change and forward. A failed run, or Autopilot being
+   * switched off while the assistant ran, leaves the item held for review.
+   */
+  private completeAutopilot(id: string): void {
+    const slot = this.pending.get(id)
+    const suggestion = slot?.item.assistantSuggestion
+    if (
+      !slot
+      || !suggestion
+      || slot.item.assistantStatus !== "ready"
+      || !this.autopilotCovers(slot.item.phase)
+    ) {
+      return
+    }
+    if (suggestion.operations.length > 0) {
+      this.applyAssistantDiff(id, suggestion.operations)
+    }
+    slot.item.autopilot = true
+    this.forwardItem(id)
   }
 
   private enqueueItem(

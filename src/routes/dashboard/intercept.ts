@@ -51,6 +51,7 @@ const configPatchSchema = z.object({
     .object({
       enabled: z.boolean(),
       autoRun: z.boolean(),
+      autopilot: z.enum(["off", "request", "response", "both"]).default("off"),
       model: z.string().max(256),
       instructionMode: z.enum(["shared", "separate"]),
       sharedInstruction: z.string().max(16000),

@@ -41,10 +41,18 @@ export interface InterceptFilterConfig {
 
 export type InterceptInstructionMode = "shared" | "separate"
 
+/** Directions in which Autopilot applies the assistant's changes and forwards. */
+export type InterceptAutopilot = "off" | InterceptDirection
+
 export interface InterceptAssistantConfig {
   enabled: boolean
   /** Auto-run assistant LLM as soon as an item is intercepted. */
   autoRun: boolean
+  /**
+   * Run the assistant on every held item in these directions, apply all of its
+   * changes, and forward without operator review. Failed runs stay held.
+   */
+  autopilot: InterceptAutopilot
   model: string
   instructionMode: InterceptInstructionMode
   sharedInstruction: string
@@ -195,6 +203,8 @@ export interface InterceptPendingItem {
   assistantStatus: "idle" | "running" | "ready" | "error"
   assistantSuggestion?: AssistantSuggestion
   assistantError?: string
+  /** Autopilot applied the assistant's changes and forwarded this item. */
+  autopilot?: boolean
 }
 
 export interface InterceptItemSummary {
@@ -218,6 +228,7 @@ export interface InterceptItemSummary {
   preview: string
   assistantStatus: InterceptPendingItem["assistantStatus"]
   assistantOpCount: number
+  autopilot: boolean
 }
 
 export interface InterceptSnapshot {
@@ -245,6 +256,7 @@ export const DEFAULT_INTERCEPT_CONFIG: InterceptConfig = {
   assistant: {
     enabled: false,
     autoRun: true,
+    autopilot: "off",
     model: "",
     instructionMode: "shared",
     sharedInstruction: "",

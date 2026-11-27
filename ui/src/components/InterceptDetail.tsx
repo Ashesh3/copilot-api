@@ -457,7 +457,12 @@ export function InterceptDetail({
                   expiresAtMs={item.expiresAtMs}
                   timeoutAction={timeoutAction}
                 />
-              : <Text type="supporting">{STATUS_LABEL[item.status]}</Text>}
+              : <Text type="supporting">
+                  {item.autopilot && item.status === "forwarded" ?
+                    "Forwarded by Autopilot"
+                  : STATUS_LABEL[item.status]}
+                </Text>
+              }
             </span>
           </div>
           <div className="intercept-detail-meta">

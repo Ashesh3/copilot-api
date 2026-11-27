@@ -19,9 +19,13 @@ import {
   validateFilterRegex,
 } from "~/lib/intercept/filters"
 import {
+  type AssistantDiffOp,
+  type AssistantSuggestion,
   DEFAULT_INTERCEPT_CONFIG,
+  type InterceptAssistantConfig,
   type InterceptFilterCondition,
 } from "~/lib/intercept/types"
+
 const makeCond = (
   partial: Partial<InterceptFilterCondition>,
 ): InterceptFilterCondition => ({
@@ -490,5 +494,114 @@ describe("InterceptEngine Queue Lifecycle", () => {
     expect(caught).toBeInstanceOf(Error)
     expect((caught as Error).message).toContain("Blocked by test")
     expect(engine.getSnapshot().stats.droppedCount).toBe(1)
+  })
+})
+
+function suggestion(operations: Array<AssistantDiffOp>): AssistantSuggestion {
+  return {
+    id: "sugg-test",
+    createdAt: new Date(0).toISOString(),
+    model: "test-model",
+    summary: "test suggestion",
+    operations,
+    previewBody: null,
+    previewCanonical: null,
+    durationMs: 0,
+  }
+}
+
+const AUTOPILOT_ASSISTANT: Omit<InterceptAssistantConfig, "autopilot"> = {
+  enabled: true,
+  autoRun: false,
+  model: "test-model",
+  instructionMode: "shared",
+  sharedInstruction: "Rewrite the user turn",
+  requestInstruction: "",
+  responseInstruction: "",
+}
+
+function chatRequest(content: string) {
+  return {
+    method: "POST",
+    path: "/chat/completions",
+    url: "https://api.githubcopilot.com/chat/completions",
+    upstream: "copilot" as const,
+    headers: {},
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{ role: "user", content }],
+    }),
+  }
+}
+
+describe("Autopilot", () => {
+  test("applies the assistant's changes and forwards without review", async () => {
+    const engine = new InterceptEngine(() =>
+      Promise.resolve(
+        suggestion([
+          { op: "replace", id: "msg-0", content: "Rewritten by assistant" },
+        ]),
+      ),
+    )
+    engine.updateConfig({
+      enabled: true,
+      direction: "request",
+      assistant: { ...AUTOPILOT_ASSISTANT, autopilot: "request" },
+    })
+
+    const outcome = await engine.interceptRequest(chatRequest("Original"))
+
+    expect(outcome.modified).toBe(true)
+    const sent = JSON.parse(outcome.body) as {
+      messages: Array<{ content: string }>
+    }
+    expect(sent.messages[0].content).toBe("Rewritten by assistant")
+    const [resolved] = engine.getSnapshot().recent
+    expect(resolved.status).toBe("forwarded")
+    expect(resolved.autopilot).toBe(true)
+  })
+
+  test("leaves held items alone in directions it does not cover", async () => {
+    let runs = 0
+    const engine = new InterceptEngine(() => {
+      runs += 1
+      return Promise.resolve(suggestion([]))
+    })
+    engine.updateConfig({
+      enabled: true,
+      direction: "both",
+      assistant: { ...AUTOPILOT_ASSISTANT, autopilot: "response" },
+    })
+
+    const pending = engine.interceptRequest(chatRequest("Original"))
+
+    expect(engine.getSnapshot().pending).toHaveLength(1)
+    expect(runs).toBe(0)
+    engine.forwardAllPending()
+    expect((await pending).modified).toBe(false)
+  })
+
+  test("keeps the item held for review when the assistant fails", async () => {
+    const engine = new InterceptEngine(() =>
+      Promise.reject(new Error("model unavailable")),
+    )
+    engine.updateConfig({
+      enabled: true,
+      direction: "request",
+      assistant: { ...AUTOPILOT_ASSISTANT, autopilot: "both" },
+    })
+    const failed = Promise.withResolvers<null>()
+    engine.subscribe((event) => {
+      if (event.type === "updated" && event.item.assistantStatus === "error") {
+        failed.resolve(null)
+      }
+    })
+
+    const pending = engine.interceptRequest(chatRequest("Original"))
+    await failed.promise
+
+    expect(engine.getSnapshot().pending).toHaveLength(1)
+    engine.forwardAllPending()
+    expect((await pending).modified).toBe(false)
   })
 })

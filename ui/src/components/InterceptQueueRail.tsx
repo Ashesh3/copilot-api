@@ -52,8 +52,13 @@ function QueueRow({
   now: number
   onSelect: (id: string) => void
 }) {
+  // The Autopilot status already accounts for any assistant edits; skip the extra flag.
+  const statusLabel =
+    item.autopilot && item.status === "forwarded" ?
+      "Autopilot"
+    : STATUS_LABEL[item.status]
   const flags = [
-    item.modified ? "edited" : null,
+    item.modified && !item.autopilot ? "edited" : null,
     item.assistantStatus === "ready" ? "AI suggestion" : null,
     item.assistantStatus === "running" ? "AI running" : null,
   ].filter((flag) => flag !== null)
@@ -84,9 +89,9 @@ function QueueRow({
             <span className="intercept-row-status">
               <StatusDot
                 variant={STATUS_DOT[item.status]}
-                label={STATUS_LABEL[item.status]}
+                label={statusLabel}
               />
-              {STATUS_LABEL[item.status]}
+              {statusLabel}
             </span>
             <span className="intercept-mono">{item.path}</span>
             <span>{fmtBytes(item.bodyBytes)}</span>

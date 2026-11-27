@@ -13,7 +13,7 @@ import { Switch } from "@astryxdesign/core/Switch"
 import { Tab, TabList } from "@astryxdesign/core/TabList"
 import { Heading, Text } from "@astryxdesign/core/Text"
 import { TextInput } from "@astryxdesign/core/TextInput"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react"
 
 import type {
   InterceptAssistantConfig,
@@ -355,12 +355,16 @@ export default function InterceptScreen() {
       activeConditions > 0 ?
         ` that match ${activeConditions} filter${activeConditions === 1 ? "" : "s"}`
       : ""
+    const autopilotText =
+      config.assistant.enabled && config.assistant.autopilot !== "off" ?
+        ` Autopilot forwards ${DIRECTION_TEXT[config.assistant.autopilot]} once the assistant's changes are applied.`
+      : ""
     return (
       <section className="intercept-detail is-empty">
         <EmptyState
           icon={<RadioIcon />}
           title="Nothing held right now"
-          description={`Holding ${DIRECTION_TEXT[config.direction]}${filterText}. New traffic appears in the queue as it arrives.`}
+          description={`Holding ${DIRECTION_TEXT[config.direction]}${filterText}. New traffic appears in the queue as it arrives.${autopilotText}`}
         />
       </section>
     )
@@ -479,6 +483,13 @@ export default function InterceptScreen() {
     </div>
   )
 
+  let assistantMarker: ReactNode
+  if (config.assistant.enabled && config.assistant.autopilot !== "off") {
+    assistantMarker = <Badge variant="neutral" label="Autopilot" />
+  } else if (config.assistant.enabled) {
+    assistantMarker = <StatusDot variant="success" label="Assistant on" />
+  }
+
   let body = renderAssistant()
   if (view === "traffic") {
     body = (
@@ -560,11 +571,7 @@ export default function InterceptScreen() {
           <Tab
             value="assistant"
             label="AI Assist"
-            endContent={
-              config.assistant.enabled ?
-                <StatusDot variant="success" label="Assistant on" />
-              : undefined
-            }
+            endContent={assistantMarker}
           />
         </TabList>
       </div>

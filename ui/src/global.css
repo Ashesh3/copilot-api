@@ -1735,6 +1735,14 @@ body {
   gap: var(--spacing-3);
 }
 
+.intercept-autopilot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  padding-top: var(--spacing-4);
+  border-top: 1px solid var(--color-border);
+}
+
 .intercept-field-group {
   display: flex;
   flex-direction: column;

@@ -278,12 +278,20 @@ async function invokeAssistantModel(options: {
   })
 }
 
-export async function runInterceptAssistant(options: {
+export interface RunInterceptAssistantOptions {
   item: InterceptPendingItem
   config: InterceptAssistantConfig
   instructionOverride?: string
   modelOverride?: string
-}): Promise<AssistantSuggestion> {
+}
+
+export type InterceptAssistantRunner = (
+  options: RunInterceptAssistantOptions,
+) => Promise<AssistantSuggestion>
+
+export async function runInterceptAssistant(
+  options: RunInterceptAssistantOptions,
+): Promise<AssistantSuggestion> {
   const startedAt = Date.now()
   const model = (options.modelOverride ?? options.config.model).trim()
   if (!model) {
