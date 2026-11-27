@@ -233,24 +233,11 @@ export async function recordModelFallbackResponse(
     attempt.visitedModels.add(getModelFallbackIdentity(currentModel))
   attempt.firstResponse = response
   attempt.pendingFallback = undefined
-  const outcome =
-    response.ok && (attempt.targetModel || nextFallbackModel(attempt)) ?
-      await inspectModelFallbackResponse(
-        response,
-        options.endpoint,
-        options.signal,
-      )
-    : undefined
+  const outcome = await classifyFallbackResponse(attempt, response, options)
   // An overlapping operation must not retry after another response commits.
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- The awaited body read can overlap another operation in this attempt.
   if (attempt.accepted || attempt.firstResponse !== response) return response
-  if (outcome?.reason) {
-    const next = nextFallbackPath(attempt, outcome.reason)
-    if (next) {
-      attempt.pendingFallback = next
-      throw new ModelFallbackResponseError(response, outcome.reason)
-    }
-  }
+  throwForFallback(attempt, response, outcome)
   const successful = outcome?.successful !== false
   // Under Intercept, durable acceptance waits for the response the operator
   // lets through: a dropped or edited response must not pin later turns.
@@ -259,12 +246,75 @@ export async function recordModelFallbackResponse(
     && deferUntilResponseDecided(
       attempt,
       async (decided) =>
-        await acceptModelFallbackResponse(attempt, decided, successful),
+        await settleDecidedResponse(attempt, decided, {
+          ...options,
+          original: response,
+          successful,
+        }),
     )
   ) {
     return response
   }
   return await acceptModelFallbackResponse(attempt, response, successful)
+}
+
+async function classifyFallbackResponse(
+  attempt: FallbackAttempt,
+  response: Response,
+  options: { endpoint?: string; signal?: AbortSignal | null },
+): Promise<
+  Awaited<ReturnType<typeof inspectModelFallbackResponse>> | undefined
+> {
+  return response.ok && (attempt.targetModel || nextFallbackModel(attempt)) ?
+      await inspectModelFallbackResponse(
+        response,
+        options.endpoint,
+        options.signal,
+      )
+    : undefined
+}
+
+function throwForFallback(
+  attempt: FallbackAttempt,
+  response: Response,
+  outcome: Awaited<ReturnType<typeof classifyFallbackResponse>>,
+): void {
+  if (!outcome?.reason) return
+  const next = nextFallbackPath(attempt, outcome.reason)
+  if (!next) return
+  attempt.pendingFallback = next
+  throw new ModelFallbackResponseError(response, outcome.reason)
+}
+
+/**
+ * Accept the response Intercept let through. One the operator edited is
+ * classified again, so an edit into a refusal or failure can still fall back
+ * and is never remembered as a successful fallback.
+ */
+async function settleDecidedResponse(
+  attempt: FallbackAttempt,
+  decided: Response,
+  options: {
+    endpoint?: string
+    signal?: AbortSignal | null
+    original: Response
+    successful: boolean
+  },
+): Promise<Response> {
+  if (decided === options.original) {
+    return await acceptModelFallbackResponse(
+      attempt,
+      decided,
+      options.successful,
+    )
+  }
+  const outcome = await classifyFallbackResponse(attempt, decided, options)
+  throwForFallback(attempt, decided, outcome)
+  return await acceptModelFallbackResponse(
+    attempt,
+    decided,
+    outcome?.successful !== false,
+  )
 }
 
 /**

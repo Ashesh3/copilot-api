@@ -25,7 +25,10 @@ export interface Decision {
   path: string
   upstream: "copilot" | "custom"
   providerId?: string
-  /** The request passed through unheld; its resends do too. */
+  /**
+   * Resends need no edits: the request passed through unheld or was
+   * forwarded unchanged, so its resends pass through too.
+   */
   passThrough: boolean
   originalDigest: string
   /** The approved body, when capture memory could hold it. */

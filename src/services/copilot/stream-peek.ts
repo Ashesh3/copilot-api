@@ -48,6 +48,9 @@ async function readFirstStreamEvent(
       if (done || bytes > FIRST_EVENT_PEEK_BYTES) return { chunks, done }
     }
   } catch (error) {
+    // With nothing to deliver yet, fail the send itself, before the client
+    // is committed to a streamed success.
+    if (chunks.length === 0) throw error
     return { chunks, failure: { error }, done: true }
   }
 }

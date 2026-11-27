@@ -73,14 +73,17 @@ function recordDecision(
   request: TextSend,
   outcome: { body: string; held: boolean },
 ): void {
+  // Forwarding a held request unchanged loses nothing on a resend, so it is
+  // replayed like one that was never held, without reserving anything.
+  const unchanged = !outcome.held || outcome.body === request.body
   const decision: Decision = {
     path: request.path,
     upstream: request.upstream,
     providerId: request.providerId,
-    passThrough: !outcome.held,
+    passThrough: unchanged,
     originalDigest: digestText(request.body),
   }
-  if (outcome.held) {
+  if (!unchanged) {
     // The approval outlives the held item in history, so it is reserved for
     // as long as the logical send can resend. Without room for the body, the
     // edit set alone replays it; without room for either, resends are
@@ -137,7 +140,8 @@ function snapshotOf(sent: SentRequest): InterceptRequestSnapshot {
   return {
     method: sent.method,
     path: sent.path,
-    model: sent.model ?? (body ? extractModelFromBody(body) : undefined),
+    // The body actually sent names the model; a replayed edit may change it.
+    model: (body && extractModelFromBody(body)) || sent.model,
     body,
     headers: {},
     sessionId: getClientSessionId(),
@@ -148,6 +152,7 @@ async function holdResponse(
   sent: SentRequest,
   response: Response,
 ): Promise<Response> {
+  if (!interceptEngine.isEnabled()) return response
   const held = await interceptEngine.interceptResponse({
     method: sent.method,
     path: sent.path,
@@ -233,6 +238,8 @@ export async function interceptLogicalSend<T extends { response: Response }>(
   try {
     result = await ownerStorage.run(owner, work)
   } finally {
+    // Retries are over: let go of the approval before its reservation.
+    owner.decision = undefined
     releaseDebugCaptureMemory(owner.decisionBytes)
     owner.decisionBytes = 0
   }
