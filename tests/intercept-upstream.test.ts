@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test"
 
+import { LocalHTTPError } from "~/lib/error"
 import { interceptEngine } from "~/lib/intercept/engine"
 import {
   interceptLogicalSend,
@@ -207,19 +208,20 @@ test("an approved __proto__ key is replayed as an own property", async () => {
   expect(sent.at(-1)).toBe('{"model":"gpt-4o","__proto__":{"polluted":true}}')
 })
 
-test("a retry loop holds only the response it settles on", async () => {
-  interceptEngine.updateConfig({ enabled: true, direction: "response" })
-  const statuses: Array<number> = []
-  interceptEngine.subscribe((event) => {
+function holdEachResponse(statuses: Array<number>): () => void {
+  return interceptEngine.subscribe((event) => {
     if (event.type !== "queued") return
     statuses.push(event.item.responseStatus ?? 0)
     interceptEngine.forwardItem(event.item.id)
   })
+}
 
+async function failoverLoop(): Promise<Response> {
   const { response } = await interceptLogicalSend(async () => {
     await interceptUpstreamSend({ ...SEND, body: chatBody("hi") }, () =>
       Promise.resolve(Response.json({ error: "busy" }, { status: 429 })),
     )
+    interceptEngine.updateConfig({ enabled: true })
     return {
       response: await interceptUpstreamSend(
         { ...SEND, body: chatBody("hi"), reason: "failover" },
@@ -227,9 +229,82 @@ test("a retry loop holds only the response it settles on", async () => {
       ),
     }
   })
+  return response
+}
+
+test("a retry loop holds only the response it settles on", async () => {
+  interceptEngine.updateConfig({ enabled: true, direction: "response" })
+  const statuses: Array<number> = []
+  const unsubscribe = holdEachResponse(statuses)
+
+  const response = await failoverLoop()
+  unsubscribe()
 
   expect(response.status).toBe(200)
   expect(statuses).toEqual([200])
+})
+
+test("turning Intercept on mid-loop still holds only the settled response", async () => {
+  interceptEngine.updateConfig({ enabled: false, direction: "response" })
+  const statuses: Array<number> = []
+  const unsubscribe = holdEachResponse(statuses)
+
+  const response = await failoverLoop()
+  unsubscribe()
+
+  expect(response.status).toBe(200)
+  expect(statuses).toEqual([200])
+})
+
+function responsesInput(items: Array<string>): string {
+  return JSON.stringify({
+    model: "gpt-4o",
+    input: items.map((content) => ({ content })),
+  })
+}
+
+test("an index edit replays only while its array is unchanged", async () => {
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  const { send } = recorder()
+  const input = responsesInput
+
+  await logicalSend(async () => {
+    await holdAndApprove(input(["a", "b"]), input(["a", "B"]), send)
+    // A memory-rollout retry dropped the first entry: index 1 moved.
+    const queued = nextQueued()
+    const resend = interceptUpstreamSend(
+      { ...SEND, body: input(["b", "c"]), reason: "compatibility_retry" },
+      send,
+    )
+    interceptEngine.forwardItem(await queued)
+    await resend
+  })
+
+  expect(interceptEngine.getSnapshot().recent).toHaveLength(2)
+})
+
+test("a conflicting retry is not sent once Intercept is off", async () => {
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  const { sent, send } = recorder()
+  let failure: unknown
+
+  await logicalSend(async () => {
+    await holdAndApprove(chatBody("original"), chatBody("approved"), send)
+    interceptEngine.updateConfig({ enabled: false })
+    failure = await interceptUpstreamSend(
+      { ...SEND, body: chatBody("rewritten"), reason: "compatibility_retry" },
+      send,
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+  })
+
+  expect(failure).toBeInstanceOf(LocalHTTPError)
+  if (failure instanceof LocalHTTPError) {
+    expect(failure.response.status).toBe(409)
+  }
+  expect(sent).toEqual([chatBody("approved")])
 })
 
 test("responses to multipart requests are held with their routed model", async () => {

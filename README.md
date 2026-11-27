@@ -854,9 +854,11 @@ ends. A response still streaming when that time ends is dropped only if the
 timeout action is drop and the filters match without its body; otherwise it
 passes through. A request is held once: account failover and automatic retries
 carry the approved edits, even after Intercept is turned off; a retry that
-changed what was edited is held again for review; and only the final upstream
-response is held. A dropped request or response reaches the client as an
-`intercept_dropped` error. A request's `stream` mode cannot be edited. Held
+changed what was edited is held again for review, or, once Intercept is off,
+refused with an `intercept_replay_conflict` error instead of being sent
+without the edits; and only the final upstream response is held. A dropped
+request or response reaches the client as an `intercept_dropped` error. A
+request's `stream` mode cannot be edited. Held
 bodies, edits, and assistant suggestions stay in server memory and share the
 LLM Debug memory budget; when it is full, traffic passes through unheld and
 edits that would not fit are refused. Credential headers are shown redacted.

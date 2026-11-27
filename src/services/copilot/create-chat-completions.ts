@@ -14,7 +14,6 @@ import {
   toDataUri,
 } from "~/lib/attachments"
 import { HTTPError } from "~/lib/error"
-import { parseSseEvents } from "~/lib/intercept/canonical"
 import { interceptLogicalSend } from "~/lib/intercept/upstream"
 import { modelSupportsAssistantPrefill } from "~/lib/model-settings"
 import { omitConfiguredReasoningEffort } from "~/lib/reasoning-effort-omission"
@@ -35,6 +34,7 @@ import { runManagedWebRequest } from "~/services/web/tool-loop"
 import { fitChatCompletionsCompactionPayload } from "./compaction-payload"
 import { classifyCompatibilityRetry } from "./compatibility-retry"
 import { normalizeGeminiToolSchemas } from "./gemini-tool-schema"
+import { peekFirstStreamEvent } from "./stream-peek"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -508,31 +508,6 @@ const handleStreamingResponse = (
   return events(response) as AsyncIterable<StreamEvent>
 }
 
-/** The first SSE event, read from a copy so the response stays untouched. */
-const peekFirstStreamEvent = async (
-  response: Response,
-): Promise<StreamEvent | undefined> => {
-  const body = response.clone().body
-  if (!body) return undefined
-  const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>
-  const decoder = new TextDecoder()
-  let text = ""
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (!done) text += decoder.decode(value, { stream: true })
-      const normalized = text.replaceAll("\r\n", "\n")
-      const complete =
-        done ? normalized : normalized.slice(0, normalized.lastIndexOf("\n\n"))
-      const first = parseSseEvents(complete).at(0)
-      if (first || done) return first
-    }
-  } finally {
-    // Cancelling the copy never blocks the response itself.
-    void reader.cancel().catch(() => undefined)
-  }
-}
-
 /**
  * Resend once when a stream opens with an overload error. This runs inside
  * the logical send, so Intercept holds only the stream the client receives.
@@ -541,15 +516,16 @@ const retryOverloadedStream = async (
   attempt: ChatUpstreamAttempt,
   options: { operation: ChatOperationState; signal?: AbortSignal },
 ): Promise<ChatUpstreamAttempt> => {
+  if (!attempt.response.ok) return attempt
+  const peeked = await peekFirstStreamEvent(attempt.response)
   if (
-    !attempt.response.ok
-    || !isOverloadStreamEvent(await peekFirstStreamEvent(attempt.response))
+    !isOverloadStreamEvent(peeked.event)
     || !consumeExtraSend(options.operation.retryBudget)
   ) {
-    return attempt
+    return { ...attempt, response: peeked.response }
   }
   consola.warn("Stream overload detected on first event, retrying")
-  void attempt.response.body?.cancel().catch(() => undefined)
+  void peeked.response.body?.cancel().catch(() => undefined)
   return {
     ...attempt,
     response: await dispatchChatCompletions(attempt.payload, {

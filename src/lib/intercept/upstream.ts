@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks"
+import { createHash } from "node:crypto"
 import { isDeepStrictEqual } from "node:util"
 
 import type { UpstreamSendReason } from "~/lib/routing-telemetry"
@@ -12,6 +13,7 @@ import { getClientSessionId } from "~/lib/request-session"
 
 import { isInterceptBypassed } from "./assistant"
 import { type InterceptRequestSnapshot, interceptEngine } from "./engine"
+import { replayConflictError } from "./items"
 
 /**
  * Intercept sees individual upstream sends, but one logical request can be
@@ -35,6 +37,15 @@ interface JsonChange {
   after?: { value: unknown }
 }
 
+/**
+ * An array on the path to an edit, by digest: index-based edits replay only
+ * while that array is unchanged, so an index still names the same element.
+ */
+interface ArrayGuard {
+  path: JsonPath
+  digest: string
+}
+
 /** The decision on the first send of a logical request. */
 interface Decision {
   path: string
@@ -45,8 +56,13 @@ interface Decision {
   approved: string
   snapshot: InterceptRequestSnapshot
   /** Undefined when either body is not JSON: only exact resends replay. */
-  changes?: Array<JsonChange>
+  edits?: { changes: Array<JsonChange>; guards: Array<ArrayGuard> }
 }
+
+type Replay =
+  | { kind: "replay"; body: string; snapshot: InterceptRequestSnapshot }
+  /** The resend differs where the operator edited; it needs a new review. */
+  | { kind: "conflict" }
 
 interface SentRequest {
   method: string
@@ -186,15 +202,55 @@ export interface UpstreamSend {
 
 type TextSend = UpstreamSend & { body: string }
 
+function digestJson(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex")
+}
+
+/** The value at `path`, following own properties only. */
+function valueAt(
+  root: unknown,
+  path: JsonPath,
+): { value: unknown } | undefined {
+  let current: unknown = root
+  for (const key of path) {
+    if (
+      (!isRecord(current) && !Array.isArray(current))
+      || !Object.hasOwn(current, key)
+    ) {
+      return undefined
+    }
+    current = (current as Record<string | number, unknown>)[key]
+  }
+  return { value: current }
+}
+
+function arrayGuards(
+  original: unknown,
+  changes: Array<JsonChange>,
+): Array<ArrayGuard> {
+  const guards = new Map<string, ArrayGuard>()
+  for (const change of changes) {
+    for (const [index, key] of change.path.entries()) {
+      if (typeof key !== "number") continue
+      const path = change.path.slice(0, index)
+      const id = JSON.stringify(path)
+      const array = valueAt(original, path)
+      if (!guards.has(id) && array) {
+        guards.set(id, { path, digest: digestJson(array.value) })
+      }
+    }
+  }
+  return [...guards.values()]
+}
+
 /** Edits from the original to the approved body; undefined when not JSON. */
-function approvalChanges(
-  original: string,
-  approved: string,
-): Array<JsonChange> | undefined {
-  if (approved === original) return []
+function approvalEdits(original: string, approved: string): Decision["edits"] {
+  if (approved === original) return { changes: [], guards: [] }
   const before = parseJson(original)
   const after = parseJson(approved)
-  return before && after ? diffJson(before.value, after.value) : undefined
+  if (!before || !after) return undefined
+  const changes = diffJson(before.value, after.value)
+  return { changes, guards: arrayGuards(before.value, changes) }
 }
 
 function recordDecision(
@@ -203,15 +259,12 @@ function recordDecision(
   outcome: { body: string; requestSnapshot: InterceptRequestSnapshot },
 ): void {
   const approved = outcome.body
-  const changes = approvalChanges(request.body, approved)
-  // The approved body and its edits stay alive until the logical send ends;
-  // a request that passed through retains nothing beyond the send itself.
-  const bytes =
-    approved === request.body ?
-      0
-    : textBytes(approved) + textBytes(JSON.stringify(changes ?? []))
-  if (!reserveDebugCaptureMemory(bytes)) return
-  owner.reservedBytes += bytes
+  let edits = approvalEdits(request.body, approved)
+  // The bodies are shared with the held item and the send; only the edit set
+  // is new. Without room for it, only exact resends replay the approval.
+  const bytes = edits ? textBytes(JSON.stringify(edits)) : 0
+  if (reserveDebugCaptureMemory(bytes)) owner.reservedBytes += bytes
+  else edits = undefined
   owner.decision = {
     path: request.path,
     upstream: request.upstream,
@@ -219,15 +272,35 @@ function recordDecision(
     original: request.body,
     approved,
     snapshot: outcome.requestSnapshot,
-    changes,
+    edits,
   }
 }
 
-/** The decision a resend inherits, or undefined when it needs its own. */
+/** Apply the operator's edits to a changed resend, or report a conflict. */
+function replayEdits(decision: Decision, body: string): Replay {
+  const parsed = decision.edits && parseJson(body)
+  if (!decision.edits || !parsed) return { kind: "conflict" }
+  for (const guard of decision.edits.guards) {
+    const array = valueAt(parsed.value, guard.path)
+    if (!array || digestJson(array.value) !== guard.digest) {
+      return { kind: "conflict" }
+    }
+  }
+  const replayed = applyChanges(parsed.value, decision.edits.changes)
+  if (!replayed) return { kind: "conflict" }
+  const replayedBody = JSON.stringify(replayed.value)
+  return {
+    kind: "replay",
+    body: replayedBody,
+    snapshot: { ...decision.snapshot, body: replayedBody },
+  }
+}
+
+/** How a resend inherits the decision, or undefined when none applies. */
 function replayDecision(
   owner: SendOwner | undefined,
   request: TextSend,
-): { body: string; snapshot: InterceptRequestSnapshot } | undefined {
+): Replay | undefined {
   const decision = owner?.decision
   // A new request is always decided on its own, even with an identical body.
   if (!decision || !request.reason || request.reason === "initial") {
@@ -241,20 +314,20 @@ function replayDecision(
     return undefined
   }
   if (request.body === decision.original) {
-    return { body: decision.approved, snapshot: decision.snapshot }
+    return {
+      kind: "replay",
+      body: decision.approved,
+      snapshot: decision.snapshot,
+    }
   }
   if (decision.approved === decision.original) {
     return {
+      kind: "replay",
       body: request.body,
       snapshot: { ...decision.snapshot, body: request.body },
     }
   }
-  const parsed = decision.changes && parseJson(request.body)
-  if (!decision.changes || !parsed) return undefined
-  const replayed = applyChanges(parsed.value, decision.changes)
-  if (!replayed) return undefined
-  const body = JSON.stringify(replayed.value)
-  return { body, snapshot: { ...decision.snapshot, body } }
+  return replayEdits(decision, request.body)
 }
 
 async function decideRequest(
@@ -313,11 +386,15 @@ export async function interceptUpstreamSend(
     typeof requestBody === "string" ?
       { ...request, body: requestBody }
     : undefined
-  const replayed = textRequest && replayDecision(owner, textRequest)
-  if (!replayed && !interceptEngine.isEnabled()) return await send(undefined)
+  const replay = textRequest && replayDecision(owner, textRequest)
+  if (replay?.kind !== "replay" && !interceptEngine.isEnabled()) {
+    // An approved request must not go out without the operator's edits.
+    if (replay?.kind === "conflict") throw replayConflictError()
+    return await send(undefined)
+  }
 
   let decided: { body: string | undefined; snapshot: InterceptRequestSnapshot }
-  if (replayed) decided = replayed
+  if (replay?.kind === "replay") decided = replay
   else if (textRequest) decided = await decideRequest(owner, textRequest)
   else decided = { body: undefined, snapshot: binarySnapshot(request) }
   const body = decided.body === requestBody ? undefined : decided.body
@@ -334,15 +411,14 @@ export async function interceptUpstreamSend(
  * Own one logical request: sends inside `work` share the first send's
  * decision and never hold their responses, so intermediate ones (failover
  * 429s, compatibility 400s, overloaded streams) reach the retry loop
- * untouched, and only the response `work` finally returns is held. Nested
- * owners defer to the outermost.
+ * untouched, and only the response `work` finally returns is held. The owner
+ * exists even while Intercept is off, so turning it on mid-loop still holds
+ * only the settled response. Nested owners defer to the outermost.
  */
 export async function interceptLogicalSend<T extends { response: Response }>(
   work: () => Promise<T>,
 ): Promise<T> {
-  if (!interceptEngine.isEnabled() || ownerStorage.getStore()) {
-    return await work()
-  }
+  if (ownerStorage.getStore()) return await work()
   const owner: SendOwner = { reservedBytes: 0 }
   let result: T
   try {

@@ -121,6 +121,27 @@ export function droppedError(
   )
 }
 
+/**
+ * A retry of an approved request differs where the operator edited it, and
+ * Intercept is off, so it cannot be reviewed again. Sending it would discard
+ * the approved edits, so it is not sent.
+ */
+export function replayConflictError(): LocalHTTPError {
+  const body = {
+    error: {
+      code: "intercept_replay_conflict",
+      type: "api_error",
+      message:
+        "A retry changed the request approved in Intercept, and Intercept is off, so the retry was not sent.",
+    },
+  }
+  return new LocalHTTPError(
+    body.error.message,
+    Response.json(body, { status: 409 }),
+    body,
+  )
+}
+
 /** The `stream` flag of a JSON request body, or undefined when it is not JSON. */
 export function requestStreamFlag(body: string): boolean | undefined {
   try {
