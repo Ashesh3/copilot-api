@@ -732,19 +732,28 @@ export class InterceptEngine {
     input: InterceptResponseInput,
   ): Promise<{ text: string; reservedBytes: number } | undefined> {
     const turnedOff = this.captureAbort.signal
-    const deadline = AbortSignal.timeout(this.config.timeoutSeconds * 1000)
-    const copy = await readResponseCopy(
-      input.response,
-      input.path,
-      AbortSignal.any([
-        turnedOff,
-        deadline,
-        ...(input.signal ? [input.signal] : []),
-      ]),
-    )
+    // Operator-configured hold deadline for Intercept, not an upstream timeout.
+    const deadline = new AbortController()
+    const timer = setTimeout(() => {
+      deadline.abort()
+    }, this.config.timeoutSeconds * 1000)
+    let copy: Awaited<ReturnType<typeof readResponseCopy>>
+    try {
+      copy = await readResponseCopy(
+        input.response,
+        input.path,
+        AbortSignal.any([
+          turnedOff,
+          deadline.signal,
+          ...(input.signal ? [input.signal] : []),
+        ]),
+      )
+    } finally {
+      clearTimeout(timer)
+    }
     if (
       !copy
-      && deadline.aborted
+      && deadline.signal.aborted
       && !turnedOff.aborted
       && !input.signal?.aborted
       && this.config.timeoutAction === "drop"
