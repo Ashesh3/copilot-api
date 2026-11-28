@@ -283,7 +283,7 @@ test("Responses force append merges into edge output_text blocks with a separato
 })
 
 test.each(["start", "end"] as const)(
-  "Responses force append at %s keeps a separator when it refills an emptied edge block",
+  "Responses force append at %s refills an emptied edge block, separating only end text",
   (position) => {
     configure([
       { mode: "replace", find: "Remove me", replacement: "" },
@@ -307,7 +307,7 @@ test.each(["start", "end"] as const)(
     const [systemItem] = payload.input as Array<{ content: unknown }>
     const added = {
       type: "input_text",
-      text: position === "end" ? "\n\nAdded" : "Added\n\n",
+      text: position === "end" ? "\n\nAdded" : "Added",
     }
     expect(systemItem.content).toEqual(
       position === "end" ? [kept, added] : [added, kept],
@@ -512,11 +512,7 @@ test.each([false, true])(
     expect(payload.system).toEqual(
       append ?
         [
-          {
-            type: "text",
-            text: "New\n\n",
-            cache_control: { type: "ephemeral" },
-          },
+          { type: "text", text: "New", cache_control: { type: "ephemeral" } },
           { type: "text", text: "Keep" },
         ]
       : [{ type: "text", text: "Keep" }],

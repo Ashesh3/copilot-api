@@ -139,16 +139,16 @@ function insertContent<Block extends object>(
     && typeof edge.text === "string"
   ) {
     let text = write.add(edge.text, block.text, position)
-    // Translators join instruction blocks with "", " ", or "\n", so an emptied
-    // edge block keeps the usual blank-line separator from the text beside it.
+    // Some translators join instruction blocks with "", " ", or "\n", so an end
+    // append that refills an emptied last block keeps a blank line before it.
+    // Beginning keeps its original output for existing rules.
     const joinsOtherText =
-      !edge.text
+      position === "end"
+      && !edge.text
       && content.some(
         (item, itemIndex) => itemIndex !== index && hasBlockText(item),
       )
-    if (joinsOtherText) {
-      text = position === "end" ? `\n\n${text}` : `${text}\n\n`
-    }
+    if (joinsOtherText) text = `\n\n${text}`
     return content.map((item, itemIndex) =>
       itemIndex === index ? { ...edge, text } : item,
     )
