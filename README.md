@@ -872,24 +872,36 @@ carries the gateway's CORS, security, and request ID headers, but not headers
 decided later, such as header-based model fallback notices. Codex counts only
 Responses events, not keep-alive frames, so it may abandon a hold longer than
 about five minutes. `COPILOT_API_DISABLE_SSE_HEARTBEAT` turns the early
-response off along with other heartbeats.
+response off along with other heartbeats. The Intercept page updates live over
+a WebSocket (`/dashboard/api/intercept/ws`, admin session and admin origin
+required, so set `COPILOT_ADMIN_ORIGIN` behind a proxy) and polls while it is
+disconnected.
 
 AI Assist sends a selected model a system prompt, the operator's user message,
 and a structured view of the held item: message text, tool calls, and tool
 results, with images, documents, and signed or encrypted blocks named but not
 included. Any model the Chat Completions route can serve is available,
 including Copilot models reached only through the Responses or Messages APIs.
-Its reasoning effort defaults to low for speed, is clamped to the levels the
-model supports, and is not sent to models without reasoning levels; "Model
+Its reasoning effort defaults to low for speed, is clamped to the nearest level
+the model supports, and is not sent to models without reasoning levels; "Model
 default" leaves it to the model, and a fallback rule's own effort still wins.
-The system prompt is editable (blank uses the default); the reply format the
-gateway parses is always appended to it. The model replies with edit
-operations, preferably find-and-replace edits of just the changed text, which
-are checked against the item and shown as a diff to accept in full or in part,
-or reject. Autopilot applies them and forwards without review, but keeps the
-item held when the assistant fails or its changes do not apply. Assistant calls
-run as separate requests with the configured model fallbacks and are never
-intercepted.
+Message types (system, developer, user, assistant, thinking, tool call, tool
+result) choose what the assistant sees and may change or insert. Within one
+Intercept session, results are remembered per message: as a conversation
+grows, only messages the assistant has not handled are sent, earlier results
+are reused, and a reply the operator already accepted is not sent again; "Run
+without cache" sends everything. Changing any AI Assist setting or turning
+Intercept off clears this memory. The system prompt is editable (blank uses
+the default); the reply format the gateway parses is always appended to it.
+The model replies with edit operations, preferably find-and-replace edits of
+just the changed text, which are checked against the item and shown as a diff
+to accept in full or in part, or reject. Autopilot applies them and forwards
+without review, but keeps the item held when the assistant fails or its
+changes do not apply. Every failure, including an automatic run that cannot
+start and a reply that is not a valid change set (shown with an excerpt of the
+reply), is logged and shown on the item and as a dashboard notification.
+Assistant calls run as separate requests with the configured model fallbacks
+and are never intercepted.
 
 In GitHub Accounts, expand an account's settings to enter an Integration ID.
 Leave it blank to use the hardcoded `copilot-developer-cli` default shown in the

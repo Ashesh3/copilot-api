@@ -78,7 +78,6 @@ import {
   handleForwardInterceptItem,
   handleGetInterceptItem,
   handleGetInterceptState,
-  handleInterceptEvents,
   handleRejectInterceptAssistant,
   handleTriggerInterceptAssistant,
   handleUpdateInterceptConfig,
@@ -249,7 +248,6 @@ dashboardRoutes.delete("/api/llm-debug", handleClearLlmDebugLogs)
 // Traffic Intercept
 dashboardRoutes.get("/api/intercept", handleGetInterceptState)
 dashboardRoutes.put("/api/intercept/config", handleUpdateInterceptConfig)
-dashboardRoutes.get("/api/intercept/events", handleInterceptEvents)
 dashboardRoutes.post("/api/intercept/forward-all", handleForwardAllIntercept)
 dashboardRoutes.post("/api/intercept/drop-all", handleDropAllIntercept)
 dashboardRoutes.delete("/api/intercept/recent", handleClearInterceptRecent)

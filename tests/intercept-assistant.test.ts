@@ -11,14 +11,17 @@ import {
   AssistantDiffError,
   buildAssistantPrompt,
   type InterceptAssistantResult,
-  isInterceptBypassed,
   parseAssistantDiffResponse,
-  runBypassingIntercept,
   runInterceptAssistant,
   validateDiffOps,
 } from "~/lib/intercept/assistant"
+import {
+  isInterceptBypassed,
+  runBypassingIntercept,
+} from "~/lib/intercept/assistant-model"
 import { applyCanonicalDiffOps } from "~/lib/intercept/canonical"
 import { InterceptEngine, StaleRevisionError } from "~/lib/intercept/engine"
+import { INTERCEPT_ASSISTANT_KINDS } from "~/lib/intercept/types"
 import { runAsIndependentRequest } from "~/lib/request-scopes"
 import {
   getRequestId,
@@ -33,6 +36,7 @@ const ASSISTANT: InterceptAssistantConfig = {
   model: "test-model",
   systemPrompt: "",
   reasoningEffort: "low",
+  messageKinds: [...INTERCEPT_ASSISTANT_KINDS],
   instructionMode: "shared",
   sharedInstruction: "Rewrite the user turn",
   requestInstruction: "",
@@ -100,6 +104,8 @@ function result(operations: Array<AssistantDiffOp>): InterceptAssistantResult {
     previewBody: null,
     previewCanonical: null,
     durationMs: 0,
+    reusedItemCount: 0,
+    reusedOperationCount: 0,
   }
 }
 

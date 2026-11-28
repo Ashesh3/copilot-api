@@ -35,6 +35,12 @@ import {
 import { createHistoryRuntime } from "./lib/telemetry-writer"
 import { tokenPool } from "./lib/token-pool"
 import {
+  attachInterceptChannel,
+  type InterceptSocket,
+  type InterceptSocketData,
+  tryUpgradeInterceptWebSocket,
+} from "./routes/dashboard/intercept-socket"
+import {
   desktopDictationWebSocket,
   tryUpgradeDesktopDictationWebSocket,
 } from "./routes/desktop-dictation/route"
@@ -269,6 +275,13 @@ async function dispatchStartFetch(
     if (remoteResult === "auth_failed") {
       return new Response("Unauthorized", { status: 401 })
     }
+    const interceptResult = await tryUpgradeInterceptWebSocket(req, bunServer)
+    if (interceptResult === "upgraded") {
+      return undefined as unknown as Response
+    }
+    if (interceptResult === "auth_failed") {
+      return new Response("Unauthorized", { status: 401 })
+    }
   }
   return await fetchServer(req)
 }
@@ -324,6 +337,17 @@ export const combinedWebSocket = {
       case "remote-control": {
         remoteWebSocket.open(
           ws as unknown as Parameters<typeof remoteWebSocket.open>[0],
+        )
+
+        break
+      }
+      case "intercept": {
+        const interceptWs = ws as unknown as InterceptSocket & {
+          data: InterceptSocketData
+        }
+        interceptWs.data.detach = attachInterceptChannel(
+          interceptWs,
+          interceptWs.data.sessionRequest,
         )
 
         break
@@ -434,6 +458,12 @@ export const combinedWebSocket = {
         remoteWebSocket.close(
           ws as unknown as Parameters<typeof remoteWebSocket.close>[0],
         )
+
+        break
+      }
+      case "intercept": {
+        const data = ws.data as InterceptSocketData
+        data.detach?.()
 
         break
       }

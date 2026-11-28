@@ -1,9 +1,11 @@
+/* eslint-disable max-lines -- one engine owns the hold lifecycle: queue, capture, edits, AI Assist and its session cache */
 import consola from "consola"
 
 import {
   releaseDebugCaptureMemory,
   reserveDebugCaptureMemory,
 } from "~/lib/debug-capture"
+import { inspectHttpError, isHTTPError } from "~/lib/error"
 import { getClientSessionId } from "~/lib/request-session"
 
 import type {
@@ -22,11 +24,13 @@ import type {
 } from "./types"
 
 import {
-  isInterceptBypassed,
+  assistantRunScope,
   resolveAssistantInstruction,
   runInterceptAssistant,
   validateDiffOps,
 } from "./assistant"
+import { AssistantSessionCache } from "./assistant-cache"
+import { isInterceptBypassed } from "./assistant-model"
 import {
   applyCanonicalDiffOps,
   CanonicalEditError,
@@ -135,6 +139,8 @@ interface AssistantRun {
   abort: AbortController
   /** Item revision the run reads; its result applies only to that revision. */
   revision: number
+  /** Cache scope of the run's settings, when they were complete. */
+  scope?: string
 }
 
 type AssistantOutcome =
@@ -151,6 +157,8 @@ interface PendingSlot {
   /** Autopilot covered this item's direction when it was held. */
   autopilotEligible: boolean
   assistantRun?: AssistantRun
+  /** Cache scope of the current suggestion, for remembering applied results. */
+  assistantScope?: string
 }
 
 interface RecentEntry {
@@ -174,6 +182,35 @@ const CAPTURE_FULL =
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+const ERROR_BODY_EXCERPT = 600
+
+/** A failed assistant run, with the upstream status and body when it has one. */
+async function describeRunError(error: unknown): Promise<string> {
+  if (!isHTTPError(error)) return errorText(error)
+  const inspection = await inspectHttpError(error)
+  const body =
+    inspection.kind === "upstream" ? inspection.bodyText?.trim() : undefined
+  const detail =
+    body ?
+      `: ${body.length > ERROR_BODY_EXCERPT ? `${body.slice(0, ERROR_BODY_EXCERPT)}…` : body}`
+    : ""
+  return `${error.message} (HTTP ${inspection.status})${detail}`
+}
+
+function itemLabel(item: InterceptPendingItem): string {
+  return `${item.phase.toUpperCase()} ${item.id.slice(0, 8)}`
+}
+
+function completeScope(
+  request: Parameters<typeof assistantRunScope>[0],
+): string | undefined {
+  try {
+    return assistantRunScope(request)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -202,6 +239,8 @@ export class InterceptEngine {
   /** Aborted when Intercept turns off, releasing responses still being read. */
   private captureAbort = new AbortController()
   private readonly runAssistant: InterceptAssistantRunner
+  /** AI Assist results for this Intercept session; see AssistantSessionCache. */
+  private readonly assistantCache = new AssistantSessionCache()
 
   /** `runAssistant` is a test seam; production calls the configured model. */
   constructor(runAssistant: InterceptAssistantRunner = runInterceptAssistant) {
@@ -242,8 +281,15 @@ export class InterceptEngine {
     }
 
     const wasEnabled = this.config.enabled
+    const assistantChanged =
+      JSON.stringify(next.assistant) !== JSON.stringify(this.config.assistant)
     this.config = next
     this.emit({ type: "config", config: this.getConfig() })
+
+    // A session's results hold only for its settings and while it is on.
+    if (assistantChanged || (wasEnabled && !next.enabled)) {
+      this.assistantCache.clear()
+    }
 
     // Turning Intercept off releases everything it was holding or reading.
     if (wasEnabled && !next.enabled) {
@@ -441,13 +487,23 @@ export class InterceptEngine {
     const operations = selectedOperations ?? suggestion.operations
     if (operations.length === 0) return slot.item
     validateDiffOps(slot.item.canonical.items, operations)
-    return this.editPendingItem(id, {
+    const updated = this.editPendingItem(id, {
       canonicalItems: applyCanonicalDiffOps(
         slot.item.canonical.items,
         operations,
       ),
       baseRevision: reviewed.revision,
     })
+    // What the operator accepted is settled: a later request that carries it
+    // (an edited reply in the conversation history) is not sent again.
+    if (updated && slot.assistantScope) {
+      this.assistantCache.rememberHandled(
+        slot.assistantScope,
+        updated.canonical.items,
+        new Set(this.config.assistant.messageKinds),
+      )
+    }
+    return updated
   }
 
   rejectAssistantSuggestion(id: string): InterceptPendingItem | undefined {
@@ -463,7 +519,7 @@ export class InterceptEngine {
 
   async triggerAssistant(
     id: string,
-    options?: { instruction?: string; model?: string },
+    options?: { instruction?: string; model?: string; fresh?: boolean },
   ): Promise<InterceptPendingItem | undefined> {
     const slot = this.pending.get(id)
     if (!slot) return undefined
@@ -479,19 +535,26 @@ export class InterceptEngine {
     item.assistantError = undefined
     this.emit({ type: "updated", item: summarizeItem(item) })
 
+    const request = {
+      item: { ...item },
+      config: this.config.assistant,
+      instructionOverride: options?.instruction,
+      modelOverride: options?.model,
+    }
+    // Incomplete settings leave nothing to remember; the run reports them.
+    run.scope = completeScope(request)
     let outcome: AssistantOutcome
     try {
       outcome = {
         suggestion: await this.runAssistant({
-          item: { ...item },
-          config: this.config.assistant,
-          instructionOverride: options?.instruction,
-          modelOverride: options?.model,
+          ...request,
           signal: run.abort.signal,
+          cache: this.assistantCache,
+          fresh: options?.fresh,
         }),
       }
     } catch (error) {
-      outcome = { error: errorText(error) }
+      outcome = { error: await describeRunError(error) }
     }
     this.settleAssistantRun(slot, run, outcome)
     return item
@@ -525,11 +588,30 @@ export class InterceptEngine {
     ) {
       item.assistantStatus = "ready"
       item.assistantSuggestion = suggestion
+      slot.assistantScope = run.scope
+      const reused =
+        suggestion.reusedItemCount > 0 ?
+          `, ${suggestion.reusedItemCount} items reused from this session`
+        : ""
+      consola.info(
+        `[Intercept] AI Assist ${itemLabel(item)}: ${suggestion.operations.length} changes from ${suggestion.model} in ${(suggestion.durationMs / 1000).toFixed(1)}s${reused}`,
+      )
     } else {
       item.assistantStatus = "error"
       item.assistantError = "error" in outcome ? outcome.error : CAPTURE_FULL
+      consola.warn(
+        `[Intercept] AI Assist failed for ${itemLabel(item)}: ${item.assistantError}`,
+      )
     }
     this.emit({ type: "updated", item: summarizeItem(item) })
+  }
+
+  /** Tell the operator, on the item and in the log, why AI Assist did not help. */
+  private reportAssistantProblem(slot: PendingSlot, message: string): void {
+    slot.item.assistantStatus = "error"
+    slot.item.assistantError = message
+    consola.warn(`[Intercept] ${message} (${itemLabel(slot.item)})`)
+    this.emit({ type: "updated", item: summarizeItem(slot.item) })
   }
 
   forwardItem(id: string, override?: InterceptItemEdit): boolean {
@@ -580,14 +662,34 @@ export class InterceptEngine {
     return enabled && (autopilot === "both" || autopilot === phase)
   }
 
+  /** Why AI Assist cannot run on `item` with the current settings, if it cannot. */
+  private assistantBlocker(item: InterceptPendingItem): string | undefined {
+    const cfg = this.config.assistant
+    if (!cfg.model.trim()) return "no assistant model is selected"
+    if (!item.canonical.editable) {
+      return (
+        item.canonical.readOnlyReason
+        ?? "the payload can only be edited as raw text"
+      )
+    }
+    if (!resolveAssistantInstruction(cfg, item.phase)) {
+      return `no user message is set for ${item.phase}s`
+    }
+    return undefined
+  }
+
   private maybeAutoRunAssistant(slot: PendingSlot): void {
     const cfg = this.config.assistant
-    const { item } = slot
-    if (!cfg.enabled || !cfg.model.trim() || !item.canonical.editable) return
+    if (!cfg.enabled) return
     if (!cfg.autoRun && !slot.autopilotEligible) return
-    if (!resolveAssistantInstruction(cfg, item.phase)) return
-    void this.triggerAssistant(item.id).then(() => {
-      this.completeAutopilot(item.id)
+    const blocker = this.assistantBlocker(slot.item)
+    if (blocker) {
+      this.reportAssistantProblem(slot, `AI Assist did not run: ${blocker}`)
+      return
+    }
+    const { id } = slot.item
+    void this.triggerAssistant(id).then(() => {
+      this.completeAutopilot(id)
     })
   }
 
@@ -613,9 +715,10 @@ export class InterceptEngine {
         revision: suggestion.revision,
       })
     } catch (error) {
-      slot.item.assistantStatus = "error"
-      slot.item.assistantError = errorText(error)
-      this.emit({ type: "updated", item: summarizeItem(slot.item) })
+      this.reportAssistantProblem(
+        slot,
+        `Autopilot could not apply the changes: ${errorText(error)}`,
+      )
       return
     }
     slot.item.autopilot = true

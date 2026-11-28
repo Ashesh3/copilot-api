@@ -103,6 +103,14 @@ function QueueRow({
             {flags.map((flag) => (
               <span key={flag}>{flag}</span>
             ))}
+            {item.assistantStatus === "error" ?
+              <span
+                className="intercept-row-error"
+                title={item.assistantError ?? "AI Assist failed"}
+              >
+                AI failed
+              </span>
+            : null}
           </span>
           {item.preview ?
             <span className="intercept-row-preview">{item.preview}</span>
