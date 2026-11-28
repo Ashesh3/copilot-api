@@ -1,4 +1,7 @@
-import type { SystemPromptOverride } from "../../../src/lib/system-prompt-overrides"
+import type {
+  SystemPromptAppendPosition,
+  SystemPromptOverride,
+} from "../../../src/lib/system-prompt-overrides"
 import type { ModelSetting } from "./types"
 
 import {
@@ -14,6 +17,8 @@ export interface SystemPromptOverrideRow {
   id: string
   mode: SystemPromptOverrideMode
   prompt: string
+  /** Used by force append only. */
+  position: SystemPromptAppendPosition
   find: string
   replacement: string
   allowPrepend: boolean
@@ -31,6 +36,31 @@ export const SYSTEM_PROMPT_OVERRIDE_LABELS: Record<
   prepend: "Add separate prompt",
 }
 
+export const SYSTEM_PROMPT_APPEND_POSITION_LABELS: Record<
+  SystemPromptAppendPosition,
+  string
+> = {
+  start: "Beginning",
+  end: "End",
+}
+
+/** Summary label for a saved rule, naming the append position. */
+export function getSystemPromptOverrideLabel(
+  rule: SystemPromptOverride,
+): string {
+  const label = SYSTEM_PROMPT_OVERRIDE_LABELS[rule.mode]
+  if (rule.mode !== "append") return label
+  const position = rule.position ?? "start"
+  return `${label} (${SYSTEM_PROMPT_APPEND_POSITION_LABELS[position].toLowerCase()})`
+}
+
+export function getSystemPromptAppendPositionOptions() {
+  return (["start", "end"] as const).map((position) => ({
+    value: position,
+    label: SYSTEM_PROMPT_APPEND_POSITION_LABELS[position],
+  }))
+}
+
 let rowIdCounter = 0
 
 export function createSystemPromptOverrideRow(
@@ -41,6 +71,7 @@ export function createSystemPromptOverrideRow(
     id: `system-prompt-override-${rowIdCounter}`,
     mode: rule.mode,
     prompt: rule.mode === "replace" ? "" : rule.prompt,
+    position: rule.mode === "append" ? (rule.position ?? "start") : "start",
     find: rule.mode === "replace" ? rule.find : "",
     replacement: rule.mode === "replace" ? rule.replacement : "",
     allowPrepend: rule.mode === "prepend",
@@ -55,15 +86,22 @@ export function toSystemPromptOverrideRows(
   )
 }
 
-/** Serialize active fields only; whitespace and the displayed order are literal. */
+/**
+ * Serialize active fields only; whitespace and the displayed order are literal.
+ * The default start position is omitted so existing rules save unchanged.
+ */
 export function toSystemPromptOverrides(
   rows: Array<SystemPromptOverrideRow>,
 ): Array<SystemPromptOverride> {
-  return rows.map((row) =>
-    row.mode === "replace" ?
-      { mode: row.mode, find: row.find, replacement: row.replacement }
-    : { mode: row.mode, prompt: row.prompt },
-  )
+  return rows.map((row): SystemPromptOverride => {
+    if (row.mode === "replace") {
+      return { mode: row.mode, find: row.find, replacement: row.replacement }
+    }
+    if (row.mode === "append" && row.position === "end") {
+      return { mode: row.mode, prompt: row.prompt, position: "end" }
+    }
+    return { mode: row.mode, prompt: row.prompt }
+  })
 }
 
 export function getSystemPromptOverrideOptions(row: SystemPromptOverrideRow) {

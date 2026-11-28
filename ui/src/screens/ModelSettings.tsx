@@ -38,7 +38,7 @@ import { SystemPromptOverrides } from "../components/SystemPromptOverrides"
 import { PencilIcon, Trash2Icon } from "../icons"
 import { del, get, post } from "../lib/api"
 import {
-  SYSTEM_PROMPT_OVERRIDE_LABELS,
+  getSystemPromptOverrideLabel,
   toSystemPromptOverrideRows,
   toSystemPromptOverrides,
   validateSystemPromptOverrideRows,
@@ -387,7 +387,7 @@ export default function ModelSettingsScreen() {
               {overrides
                 .map(
                   (rule, index) =>
-                    `${index + 1}. ${SYSTEM_PROMPT_OVERRIDE_LABELS[rule.mode]}`,
+                    `${index + 1}. ${getSystemPromptOverrideLabel(rule)}`,
                 )
                 .join(" → ")}
             </Text>

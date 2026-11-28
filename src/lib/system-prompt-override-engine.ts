@@ -1,4 +1,7 @@
-import type { SystemPromptOverride } from "~/lib/system-prompt-overrides"
+import type {
+  SystemPromptAppendPosition,
+  SystemPromptOverride,
+} from "~/lib/system-prompt-overrides"
 import type {
   AnthropicCustomMessage,
   AnthropicMessage,
@@ -20,16 +23,29 @@ interface OverrideResult {
 
 interface PromptTarget {
   clear: (prompt: string) => number
-  prefix: (prompt: string, separate: boolean, write: TextWriter) => void
+  /** Insert at the start or end of the existing prompt, creating one if absent. */
+  append: (prompt: string, at: PositionedWriter) => void
+  /** Add a separate prompt before all existing prompts. */
+  prepend: (prompt: string, write: TextWriter) => void
   replace: (rewrite: (text: string) => string) => void
 }
 
 interface TextWriter {
-  prefix: (text: string, prompt: string) => string
+  add: (
+    text: string,
+    prompt: string,
+    position?: SystemPromptAppendPosition,
+  ) => string
   replace: (
     text: string,
     rule: Extract<SystemPromptOverride, { mode: "replace" }>,
   ) => string
+}
+
+/** Where a force append rule writes inside the existing prompt. */
+interface PositionedWriter {
+  position: SystemPromptAppendPosition
+  write: TextWriter
 }
 
 const isInstructionRole = (role: unknown): boolean =>
@@ -87,27 +103,56 @@ function mapContent<Content>(
   }) as Content
 }
 
-function prefixContent<Block extends object>(
+/** Responses instruction text may arrive as either input or output text. */
+function isMergeableTextType(edgeType: unknown, blockType: string): boolean {
+  return (
+    edgeType === blockType
+    || (blockType === "input_text" && edgeType === "output_text")
+  )
+}
+
+/**
+ * Some translators join blocks with "", " ", or "\n" (and may turn non-text
+ * blocks into text placeholders), so end text that lands in its own block
+ * after other blocks starts with a blank line. Beginning keeps its output.
+ */
+function ownBlockPrompt(
+  prompt: string,
+  position: SystemPromptAppendPosition,
+  precededByBlocks: boolean,
+): string {
+  return position === "end" && precededByBlocks ? `\n\n${prompt}` : prompt
+}
+
+function insertContent<Block extends object>(
   content: string | Array<Block> | null | undefined,
-  prefix: Block & { type: string; text: string },
-  write: TextWriter,
+  block: Block & { type: string; text: string },
+  { position, write }: PositionedWriter,
 ): string | Array<Block> {
   assertContent(content)
-  if (!Array.isArray(content)) return write.prefix(content ?? "", prefix.text)
-  const first = content.at(0)
-  if (
-    first
-    && "type" in first
-    && first.type === prefix.type
-    && "text" in first
-    && typeof first.text === "string"
-  ) {
-    return [
-      { ...first, text: write.prefix(first.text, prefix.text) },
-      ...content.slice(1),
-    ]
+  if (!Array.isArray(content)) {
+    return write.add(content ?? "", block.text, position)
   }
-  return [{ ...prefix, text: write.prefix("", prefix.text) }, ...content]
+  const index = position === "end" ? content.length - 1 : 0
+  const edge = content.at(index)
+  if (
+    edge
+    && "type" in edge
+    && isMergeableTextType(edge.type, block.type)
+    && "text" in edge
+    && typeof edge.text === "string"
+  ) {
+    const text =
+      edge.text ?
+        write.add(edge.text, block.text, position)
+      : write.add("", ownBlockPrompt(block.text, position, content.length > 1))
+    return content.map((item, itemIndex) =>
+      itemIndex === index ? { ...edge, text } : item,
+    )
+  }
+  const prompt = ownBlockPrompt(block.text, position, content.length > 0)
+  const added = { ...block, text: write.add("", prompt) }
+  return position === "end" ? [...content, added] : [added, ...content]
 }
 
 /** Limit cumulative expansion before replacement strings are allocated. */
@@ -123,9 +168,12 @@ function textWriter(result: OverrideResult): TextWriter {
     }
   }
   return {
-    prefix(text, prompt) {
+    add(text, prompt, position = "start") {
       accountGrowth(prompt.length + (text ? 2 : 0))
-      return text ? `${prompt}\n\n${text}` : prompt
+      if (!text) return prompt
+      return position === "end" ?
+          `${text}\n\n${prompt}`
+        : `${prompt}\n\n${text}`
     },
     replace(text, rule) {
       let matches = 0
@@ -152,12 +200,18 @@ function runOverrides(
   for (const rule of rules) {
     switch (rule.mode) {
       case "clear": {
-        result.removed += target.clear(write.prefix("", rule.prompt))
+        result.removed += target.clear(write.add("", rule.prompt))
         break
       }
-      case "append":
+      case "append": {
+        target.append(rule.prompt, {
+          position: rule.position ?? "start",
+          write,
+        })
+        break
+      }
       case "prepend": {
-        target.prefix(rule.prompt, rule.mode === "prepend", write)
+        target.prepend(rule.prompt, write)
         break
       }
       case "replace": {
@@ -179,6 +233,12 @@ export function applyChatPromptOverrides(
   payload: { messages: Array<Message> },
   rules: Array<SystemPromptOverride>,
 ): OverrideResult {
+  const addSystemMessage = (prompt: string, write: TextWriter) => {
+    payload.messages = [
+      { role: "system", content: write.add("", prompt) },
+      ...payload.messages,
+    ]
+  }
   return runOverrides(
     {
       clear(prompt) {
@@ -191,26 +251,24 @@ export function applyChatPromptOverrides(
           payload.messages.unshift({ role: "system", content: prompt })
         return removed
       },
-      prefix(prompt, separate, write) {
+      append(prompt, at) {
         const existing =
           payload.messages.find((message) => message.role === "system")
           ?? payload.messages.find((message) => message.role === "developer")
-        if (separate || !existing) {
-          payload.messages = [
-            { role: "system", content: write.prefix("", prompt) },
-            ...payload.messages,
-          ]
+        if (!existing) {
+          addSystemMessage(prompt, at.write)
           return
         }
-        const content = prefixContent(
+        const content = insertContent(
           existing.content,
           { type: "text", text: prompt },
-          write,
+          at,
         )
         payload.messages = payload.messages.map((message) =>
           message === existing ? { ...existing, content } : message,
         )
       },
+      prepend: addSystemMessage,
       replace(rewrite) {
         payload.messages = payload.messages.map((message) =>
           isInstructionRole(message.role) ?
@@ -223,16 +281,16 @@ export function applyChatPromptOverrides(
   )
 }
 
-function prefixMessages(
+function appendMessages(
   payload: AnthropicMessagesPayload,
   prompt: string,
-  write: TextWriter,
+  at: PositionedWriter,
 ): void {
   if (payload.system && payload.system.length > 0) {
-    payload.system = prefixContent(
+    payload.system = insertContent(
       payload.system,
       { type: "text", text: prompt },
-      write,
+      at,
     )
     return
   }
@@ -244,13 +302,13 @@ function prefixMessages(
     instructions.find((message) => message.role === "system")
     ?? instructions.at(0)
   if (!existing) {
-    payload.system = write.prefix("", prompt)
+    payload.system = at.write.add("", prompt)
     return
   }
-  const content = prefixContent(
+  const content = insertContent(
     existing.content,
     { type: "text", text: prompt },
-    write,
+    at,
   )
   payload.messages = payload.messages.map((message) =>
     message === existing ? { ...existing, content } : message,
@@ -276,13 +334,12 @@ export function applyMessagesPromptOverrides(
         else delete payload.system
         return original - payload.messages.length + systemCount
       },
-      prefix(prompt, separate, write) {
-        if (!separate) {
-          prefixMessages(payload, prompt, write)
-          return
-        }
+      append(prompt, at) {
+        appendMessages(payload, prompt, at)
+      },
+      prepend(prompt, write) {
         const system = payload.system
-        const text = write.prefix("", prompt)
+        const text = write.add("", prompt)
         payload.system =
           !system || system.length === 0 ?
             text
@@ -338,10 +395,10 @@ function replaceResponsesInput(
   )
 }
 
-function prefixResponses(
+function appendResponses(
   payload: ResponsesPayload,
   prompt: string,
-  write: TextWriter,
+  at: PositionedWriter,
 ): void {
   const instructions =
     typeof payload.instructions === "string" ? payload.instructions : ""
@@ -349,10 +406,10 @@ function prefixResponses(
     const items = payload.input.filter((item) => isInstructionItem(item))
     const existing = items.find((item) => item.role === "system") ?? items.at(0)
     if (existing) {
-      const content = prefixContent(
+      const content = insertContent(
         existing.content,
         { type: "input_text", text: prompt },
-        write,
+        at,
       )
       payload.input = payload.input.map((item) =>
         item === existing ? { ...existing, content } : item,
@@ -360,7 +417,7 @@ function prefixResponses(
       return
     }
   }
-  payload.instructions = write.prefix(instructions, prompt)
+  payload.instructions = at.write.add(instructions, prompt, at.position)
 }
 
 function clearResponsesInput(payload: ResponsesPayload): number {
@@ -383,13 +440,11 @@ export function applyResponsesPromptOverrides(
         else delete payload.instructions
         return removed
       },
-      prefix(prompt, separate, write) {
-        if (separate)
-          payload.instructions = write.prefix(
-            payload.instructions ?? "",
-            prompt,
-          )
-        else prefixResponses(payload, prompt, write)
+      append(prompt, at) {
+        appendResponses(payload, prompt, at)
+      },
+      prepend(prompt, write) {
+        payload.instructions = write.add(payload.instructions ?? "", prompt)
       },
       replace(rewrite) {
         if (typeof payload.instructions === "string")
@@ -401,7 +456,10 @@ export function applyResponsesPromptOverrides(
   )
 }
 
-/** Gateway summary instructions are appended after all user-configured rules. */
+/**
+ * Gateway summary instructions follow everything the rules produce, so an end
+ * position places text after the configured prompt but before them.
+ */
 export function applyCompactionPromptOverrides(
   input: Array<ResponseInputItem>,
   rules: Array<SystemPromptOverride>,
@@ -415,8 +473,11 @@ export function applyCompactionPromptOverrides(
         prompt = text
         return removed
       },
-      prefix(text, _separate, write) {
-        prompt = write.prefix(prompt, text)
+      append(text, { position, write }) {
+        prompt = write.add(prompt, text, position)
+      },
+      prepend(text, write) {
+        prompt = write.add(prompt, text)
       },
       replace(rewrite) {
         prompt = rewrite(prompt)

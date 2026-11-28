@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test"
 
+import type { SystemPromptOverride } from "~/lib/system-prompt-overrides"
+
 import {
   MAX_SYSTEM_PROMPT_OVERRIDES,
   MAX_SYSTEM_PROMPT_OVERRIDE_TEXT_LENGTH,
@@ -8,6 +10,7 @@ import {
 
 import {
   createSystemPromptOverrideRow,
+  getSystemPromptOverrideLabel,
   getSystemPromptOverrideFieldErrors,
   getSystemPromptOverrideOptions,
   moveSystemPromptOverride,
@@ -63,6 +66,37 @@ test("saving ordered configurations retains whitespace and strips inactive draft
     { mode: "replace", find: "  exact \n", replacement: "\n  replacement  " },
   ])
   expect(toSystemPromptOverrides([])).toEqual([])
+})
+
+test("force append rows keep their position, saving only the non-default end position", () => {
+  const added = createSystemPromptOverrideRow()
+  expect(added.position).toBe("start")
+
+  const [start, end] = toSystemPromptOverrideRows({
+    model: "test-model",
+    systemPromptOverrides: [
+      { mode: "append", prompt: "Top", position: "start" },
+      { mode: "append", prompt: "Bottom", position: "end" },
+    ],
+  })
+  expect([start.position, end.position]).toEqual(["start", "end"])
+  expect(
+    toSystemPromptOverrides([start, end, { ...end, mode: "prepend" }]),
+  ).toEqual([
+    { mode: "append", prompt: "Top" },
+    { mode: "append", prompt: "Bottom", position: "end" },
+    { mode: "prepend", prompt: "Bottom" },
+  ])
+  const rules: Array<SystemPromptOverride> = [
+    { mode: "append", prompt: "x" },
+    { mode: "append", prompt: "x", position: "end" },
+    { mode: "clear", prompt: "" },
+  ]
+  expect(rules.map((rule) => getSystemPromptOverrideLabel(rule))).toEqual([
+    "Force append (beginning)",
+    "Force append (end)",
+    "Clear system prompts",
+  ])
 })
 
 test("editing retains legacy clear and append behavior, and an explicit empty rule list stays disabled", () => {
