@@ -84,6 +84,18 @@ function assertContent(content: unknown): void {
   )
 }
 
+const TEXT_BLOCK_TYPES = new Set<unknown>(["text", "input_text", "output_text"])
+
+function hasBlockText(block: object): boolean {
+  return (
+    "type" in block
+    && TEXT_BLOCK_TYPES.has(block.type)
+    && "text" in block
+    && typeof block.text === "string"
+    && block.text !== ""
+  )
+}
+
 /** Transform text only; retain block metadata, role controls, and other data. */
 function mapContent<Content>(
   content: Content,
@@ -93,10 +105,7 @@ function mapContent<Content>(
   if (typeof content === "string") return rewrite(content) as Content
   if (!Array.isArray(content)) return content
   return content.map((block: Record<string, unknown>) => {
-    const isText =
-      block.type === "text"
-      || block.type === "input_text"
-      || block.type === "output_text"
+    const isText = TEXT_BLOCK_TYPES.has(block.type)
     return isText && typeof block.text === "string" ?
         { ...block, text: rewrite(block.text) }
       : block
@@ -129,7 +138,18 @@ function insertContent<Block extends object>(
     && "text" in edge
     && typeof edge.text === "string"
   ) {
-    const text = write.add(edge.text, block.text, position)
+    let text = write.add(edge.text, block.text, position)
+    // Responses-to-Chat translation joins text blocks directly, so an emptied
+    // Responses edge block still needs a separator from the text beside it.
+    const joinsOtherText =
+      block.type === "input_text"
+      && !edge.text
+      && content.some(
+        (item, itemIndex) => itemIndex !== index && hasBlockText(item),
+      )
+    if (joinsOtherText) {
+      text = position === "end" ? `\n\n${text}` : `${text}\n\n`
+    }
     return content.map((item, itemIndex) =>
       itemIndex === index ? { ...edge, text } : item,
     )

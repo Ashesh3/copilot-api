@@ -282,6 +282,39 @@ test("Responses force append merges into edge output_text blocks with a separato
   })
 })
 
+test.each(["start", "end"] as const)(
+  "Responses force append at %s keeps a separator when it refills an emptied edge block",
+  (position) => {
+    configure([
+      { mode: "replace", find: "Remove me", replacement: "" },
+      { mode: "append", prompt: "Added", position },
+    ])
+    const edge = { type: "input_text", text: "Remove me" }
+    const kept = { type: "input_text", text: "Client system" }
+    const payload: ResponsesPayload = {
+      model: MODEL,
+      input: [
+        {
+          role: "system",
+          content: position === "end" ? [kept, edge] : [edge, kept],
+        },
+        { role: "user", content: "Hello" },
+      ],
+    }
+
+    forceResponsesSystemPrompt(payload, MODEL)
+
+    const [systemItem] = payload.input as Array<{ content: unknown }>
+    const added = {
+      type: "input_text",
+      text: position === "end" ? "\n\nAdded" : "Added\n\n",
+    }
+    expect(systemItem.content).toEqual(
+      position === "end" ? [kept, added] : [added, kept],
+    )
+  },
+)
+
 test("Messages replaces all system blocks and custom instruction turns with metadata intact", () => {
   configure([
     { mode: "replace", find: "OLD", replacement: "NEW" },
