@@ -207,6 +207,16 @@ test("a client whose socket buffers too much is dropped", async () => {
   expect(socket.frames).toHaveLength(1)
 })
 
+test("a client whose frame is dropped is closed to reconnect", async () => {
+  const socket = new FakeSocket()
+  socket.sendResult = 0
+  attach(socket)
+  await socket.until(() => socket.closed !== undefined)
+  expect(socket.closed).toEqual({ code: 1013, reason: "Frame dropped" })
+  interceptEngine.updateConfig({ direction: "both" })
+  expect(socket.frames).toHaveLength(1)
+})
+
 test("the channel closes once its session logs out", async () => {
   const socket = new FakeSocket()
   attach(socket)

@@ -246,10 +246,12 @@ function respondInTurn(replies: Array<string>): Array<string> {
 /** A held chat request carrying `messages`, parsed the way the engine does. */
 function conversation(
   messages: Array<{ role: string; content: string }>,
+  sessionId = "conversation-1",
 ): InterceptPendingItem {
   const body = JSON.stringify({ model: "client-model", messages })
   return {
     ...heldItem(),
+    sessionId,
     originalBody: body,
     currentBody: body,
     canonical: parseCanonicalView({
@@ -548,4 +550,41 @@ test("message types limit what the model sees and may insert", async () => {
   expect(String(failure)).toContain("may only insert user items")
   // The operator sees what the model actually answered.
   expect(String(failure)).toContain("Model reply:")
+})
+
+test("results are never reused across conversations or without one", async () => {
+  const reply = JSON.stringify({
+    summary: "private edit",
+    operations: [
+      { op: "edit", id: "msg-0", find: "hello", replace: "hello from A" },
+    ],
+  })
+  const prompts = respondInTurn([reply, reply, reply])
+  const cache = new AssistantSessionCache()
+  const config = { ...ASSISTANT, model: "responses-model" }
+  const shared = [{ role: "user", content: "hello" }]
+
+  listModel()
+  await runInterceptAssistant({
+    item: conversation(shared, "A"),
+    config,
+    cache,
+  })
+  listModel()
+  const other = await runInterceptAssistant({
+    item: conversation(shared, "B"),
+    config,
+    cache,
+  })
+  listModel()
+  const anonymous = await runInterceptAssistant({
+    item: { ...conversation(shared), sessionId: undefined },
+    config,
+    cache,
+  })
+
+  // Each run asked the model itself; nothing from A was reused.
+  expect(prompts).toHaveLength(3)
+  expect(other.reusedItemCount).toBe(0)
+  expect(anonymous.reusedItemCount).toBe(0)
 })

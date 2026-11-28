@@ -43,13 +43,21 @@ export function itemCacheKeys(
   })
 }
 
-/** Everything that changes what the assistant would answer for an item. */
+/**
+ * Everything that changes what the assistant would answer for an item, and
+ * where the answer may be reused: one client conversation, one direction, one
+ * wire protocol. Results never cross conversations, so one client's edits
+ * cannot reach another client's identical message.
+ */
 export function assistantCacheScope(settings: {
   model: string
   reasoningEffort: string
   systemPrompt: string
   instruction: string
   messageKinds: ReadonlyArray<string>
+  conversation: string
+  phase: string
+  protocol: string
 }): string {
   return digest(
     JSON.stringify([
@@ -58,6 +66,9 @@ export function assistantCacheScope(settings: {
       settings.systemPrompt,
       settings.instruction,
       [...settings.messageKinds].sort(),
+      settings.conversation,
+      settings.phase,
+      settings.protocol,
     ]),
   )
 }
@@ -84,9 +95,10 @@ interface CacheEntry {
 /**
  * What AI Assist already decided for items during one Intercept session, so a
  * conversation that grows sends only its new items to the model. Results are
- * kept per item, by scope (model, effort, prompts, instruction, message
- * types); the engine clears it when Intercept turns off or the assistant
- * settings change. Bounded, oldest first out.
+ * kept per item and scope (settings plus conversation, phase and protocol).
+ * The engine starts a new cache when Intercept turns off or the assistant
+ * settings change, so a run still in flight writes only into the old one.
+ * Bounded, oldest first out.
  */
 export class AssistantSessionCache {
   private readonly entries = new Map<string, CacheEntry>()
@@ -96,12 +108,6 @@ export class AssistantSessionCache {
 
   get size(): number {
     return this.entries.size
-  }
-
-  clear(): void {
-    this.entries.clear()
-    this.shown.clear()
-    this.bytes = 0
   }
 
   /** The operations remembered for an item, addressed to `itemId`. */
@@ -140,19 +146,20 @@ export class AssistantSessionCache {
   }
 
   /**
-   * Items of `kinds` the operator accepted changes into: handled, with
-   * nothing left to change. Items already remembered keep their result.
+   * Record `items` that `settled` picks as handled with nothing left to
+   * change, unless they already have a result. Keys count repeats across the
+   * whole list, as a later held item's keys will.
    */
-  rememberHandled(
+  rememberSettled(
     scope: string,
     items: ReadonlyArray<CanonicalItem>,
-    kinds: ReadonlySet<string>,
+    settled: (item: CanonicalItem, key: string) => boolean,
   ): void {
     const keys = itemCacheKeys(items)
     for (const [index, item] of items.entries()) {
-      if (!kinds.has(item.kind)) continue
-      if (this.entries.has(`${scope}:${keys[index]}`)) continue
-      this.remember(scope, keys[index], { itemId: item.id, operations: [] })
+      const key = keys[index]
+      if (!settled(item, key) || this.entries.has(`${scope}:${key}`)) continue
+      this.remember(scope, key, { itemId: item.id, operations: [] })
     }
   }
 
