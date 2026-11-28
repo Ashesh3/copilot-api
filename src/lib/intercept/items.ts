@@ -102,6 +102,7 @@ export function summarizeItem(
     assistantStatus: item.assistantStatus,
     assistantOpCount: item.assistantSuggestion?.operations.length ?? 0,
     ...(item.assistantError ? { assistantError: item.assistantError } : {}),
+    ...(item.assistantRunId ? { assistantRunId: item.assistantRunId } : {}),
     autopilot: item.autopilot === true,
   }
 }

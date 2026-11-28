@@ -20,7 +20,8 @@ const MAX_BUFFERED_BYTES = 8 * 1024 * 1024
 
 const CLOSE_SESSION_ENDED = 1008
 const CLOSE_SERVER_ERROR = 1011
-const CLOSE_TOO_FAR_BEHIND = 1013
+/** Closes a client that missed a frame, so it reconnects from a snapshot. */
+const CLOSE_TRY_AGAIN = 1013
 
 /** A JSON text frame; `data` of an engine event is the event itself. */
 export type InterceptSocketMessage =
@@ -94,15 +95,17 @@ export function attachInterceptChannel(
 
   const sendFrame = (frame: string): boolean => {
     const result = socket.send(frame)
+    // A dropped frame leaves the client out of date: close the socket so it
+    // polls, then reconnects from a fresh snapshot.
     if (result === 0) {
-      detach()
+      close(CLOSE_TRY_AGAIN, "Frame dropped")
       return false
     }
     if (
       result === -1
       && (socket.getBufferedAmount?.() ?? 0) > MAX_BUFFERED_BYTES
     ) {
-      close(CLOSE_TOO_FAR_BEHIND, "Client fell behind")
+      close(CLOSE_TRY_AGAIN, "Client fell behind")
       return false
     }
     return true
@@ -133,7 +136,7 @@ export function attachInterceptChannel(
   const send = (message: InterceptSocketMessage) => {
     if (closed) return
     if (queue.length >= MAX_QUEUED_EVENTS) {
-      close(CLOSE_TOO_FAR_BEHIND, "Client fell behind")
+      close(CLOSE_TRY_AGAIN, "Client fell behind")
       return
     }
     queue.push(JSON.stringify(message))

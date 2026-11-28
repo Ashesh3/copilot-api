@@ -4,7 +4,7 @@ import { z } from "zod"
 
 import {
   AssistantDiffError,
-  assistantDiffOpsSchema,
+  assistantDiffOpSchema,
 } from "~/lib/intercept/assistant"
 import { listAssistantModels } from "~/lib/intercept/assistant-model"
 import {
@@ -131,10 +131,19 @@ const triggerAssistantSchema = z.object({
   fresh: z.boolean().optional(),
 })
 
+/**
+ * A suggestion carries reused results as well as the model's own reply, so a
+ * selection from it is not bound by the per-reply operation limit.
+ */
+const MAX_APPLIED_OPERATIONS = 10_000
+
 const applyAssistantSchema = z.object({
   suggestionId: z.string().min(1),
   revision: z.number().int().min(0),
-  operations: assistantDiffOpsSchema.optional(),
+  operations: z
+    .array(assistantDiffOpSchema)
+    .max(MAX_APPLIED_OPERATIONS)
+    .optional(),
 })
 
 type ParsedBody<T> = { ok: true; value: T } | { ok: false; error: string }
