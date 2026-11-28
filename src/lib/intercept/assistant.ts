@@ -2,26 +2,61 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
 
+import type { CopilotInferenceEndpoint } from "~/lib/endpoint-routing"
+import type { Model } from "~/services/copilot/get-models"
+
+import {
+  runWithRoutedModelSelection,
+  selectCatalogRoutedModel,
+  usesPooledAccounts,
+} from "~/lib/account-router"
 import {
   createCustomProviderChatCompletions,
   type CustomProviderModelReference,
   getCustomProviderModels,
   resolveCustomProviderModel,
 } from "~/lib/custom-providers"
-import { getModelEndpointSupport } from "~/lib/endpoint-routing"
 import {
   applyModelFallbackToPayload,
-  getModelFallbackEffort,
+  getModelFallbackRedirect,
   runWithModelFallback,
 } from "~/lib/model-fallback"
-import { normalizeReasoningEffortForModel } from "~/lib/model-suffix"
+import {
+  getLoadedModelRedirects,
+  type ModelRedirectRequest,
+  type ModelRedirectResult,
+  type ModelRedirectVerbosity,
+} from "~/lib/model-redirect"
+import { resolveModelRedirectRules } from "~/lib/model-redirect-resolver"
+import { normalizeModelName } from "~/lib/model-resolver"
+import { getModelRoutingSafety } from "~/lib/model-routing-safety"
+import {
+  getModelReasoningConfig,
+  parseModelSuffix,
+  type ReasoningEffort,
+  usesImplicitReasoningDefault,
+} from "~/lib/model-suffix"
 import { runAsIndependentRequest } from "~/lib/request-scopes"
 import { state } from "~/lib/state"
+import { tokenPool } from "~/lib/token-pool"
+import {
+  anthropicResponseToChat,
+  chatPayloadToAnthropic,
+} from "~/routes/chat-completions/anthropic-bridge"
+import {
+  chatCompletionsToResponses,
+  getResponsesResultOutputText,
+} from "~/routes/chat-completions/responses-fallback"
+import { selectChatUpstreamEndpoint } from "~/routes/chat-completions/responses-fallback-executor"
+import { detectInitiator } from "~/services/copilot/copilot-payload-helpers"
+import { createAnthropicMessages } from "~/services/copilot/create-anthropic-messages"
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
   createChatCompletions,
 } from "~/services/copilot/create-chat-completions"
+import { createResponses } from "~/services/copilot/create-responses"
+import { finalizeResponsesRequest } from "~/services/copilot/responses-contract"
 
 import type {
   AssistantDiffOp,
@@ -33,7 +68,13 @@ import type {
 } from "./types"
 
 import {
+  ASSISTANT_RESPONSE_CONTRACT,
+  DEFAULT_ASSISTANT_SYSTEM_PROMPT,
+} from "./assistant-prompt"
+import {
   applyCanonicalDiffOps,
+  applyTextEdit,
+  editableText,
   parseCanonicalView,
   serializeCanonicalItemsToBody,
 } from "./canonical"
@@ -53,29 +94,160 @@ export class AssistantDiffError extends Error {}
 
 // --- Destinations -----------------------------------------------------------
 
-type AssistantDestination =
-  | { kind: "copilot" }
-  | { kind: "custom"; reference: CustomProviderModelReference }
+/** A requested model ID resolved the way the Chat Completions route does. */
+interface AssistantRoute {
+  model: string
+  effort?: ReasoningEffort
+  verbosity?: ModelRedirectVerbosity
+}
 
-/**
- * The Copilot-or-custom decision the Chat Completions route makes for the same
- * model ID. AI Assist sends Chat Completions only, so Copilot models must
- * support that endpoint.
- */
-function resolveAssistantDestination(
+type AssistantRedirect = (request: ModelRedirectRequest) => ModelRedirectResult
+
+function assistantPayload(
   model: string,
-): AssistantDestination | undefined {
-  const copilotModels = state.models?.data ?? []
-  const reference = resolveCustomProviderModel({
+  system: string,
+  user: string,
+): ChatCompletionsPayload {
+  return {
+    model,
+    stream: false,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  }
+}
+
+function customChatReference(
+  model: string,
+): CustomProviderModelReference | undefined {
+  return resolveCustomProviderModel({
     model,
     kind: "chat",
-    copilotModelIds: new Set(copilotModels.map((entry) => entry.id)),
+    copilotModelIds: new Set(state.models?.data.map((entry) => entry.id)),
   })
-  if (reference) return { kind: "custom", reference }
-  const copilotModel = copilotModels.find((entry) => entry.id === model)
-  return copilotModel && getModelEndpointSupport(copilotModel).chat ?
-      { kind: "copilot" }
-    : undefined
+}
+
+/**
+ * `applyModelRedirect`, synchronous so the picker lists IDs exactly as a
+ * request resolves them: unsafe or looping rule sets redirect nothing.
+ */
+function createAssistantRedirect(): AssistantRedirect {
+  const rules = getModelRoutingSafety().safe ? getLoadedModelRedirects() : []
+  return (request) => {
+    const result = resolveModelRedirectRules(rules, request)
+    return result.loop ?
+        {
+          model: request.model,
+          effort: request.effort,
+          verbosity: request.verbosity,
+          redirected: false,
+        }
+      : result
+  }
+}
+
+const EFFORT_ORDER: ReadonlyArray<ReasoningEffort> = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]
+
+/**
+ * `effort` on the model's scale: kept when supported, otherwise the nearest
+ * supported level (the lower one on a tie), never the model's default, so a
+ * low setting never turns into a slower one. Models without levels keep it.
+ */
+function clampEffort(
+  model: string,
+  effort: ReasoningEffort | undefined,
+): ReasoningEffort | undefined {
+  const supported = getModelReasoningConfig(model)?.supportedEfforts
+  if (!effort || !supported?.length || supported.includes(effort)) return effort
+  const target = EFFORT_ORDER.indexOf(effort)
+  const distance = (level: ReasoningEffort) =>
+    Math.abs(EFFORT_ORDER.indexOf(level) - target)
+  return [...supported]
+    .sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b))
+    .reduce((best, level) => (distance(level) < distance(best) ? level : best))
+}
+
+/**
+ * Chat's model resolution: a reasoning suffix (`model:high`) wins over the
+ * configured effort; a custom provider model keeps its own ID, any other is
+ * normalized and redirected, and each effort is clamped to its model.
+ */
+function resolveAssistantRoute(
+  requested: string,
+  configuredEffort: ReasoningEffort | undefined,
+  redirect: AssistantRedirect,
+): AssistantRoute {
+  const { baseModel, reasoningEffort: suffixEffort } =
+    parseModelSuffix(requested)
+  const normalized = normalizeModelName(baseModel)
+  const effort = clampEffort(normalized, suffixEffort ?? configuredEffort)
+  if (customChatReference(baseModel)) return { model: baseModel, effort }
+  const target = redirect({ model: normalized, effort })
+  const model = normalizeModelName(target.model)
+  return {
+    model,
+    effort: clampEffort(model, target.effort),
+    verbosity: target.verbosity,
+  }
+}
+
+/**
+ * The Copilot endpoint the Chat Completions route sends or translates to for
+ * `selectedModel`, so models served only through Responses or Messages work.
+ */
+function assistantEndpoint(
+  payload: ChatCompletionsPayload,
+  selectedModel: Model | undefined,
+): CopilotInferenceEndpoint | undefined {
+  if (!selectedModel) return undefined
+  const decision = selectChatUpstreamEndpoint({ payload, selectedModel })
+  return "target" in decision ? decision.target : undefined
+}
+
+/**
+ * The model rows of every account that may serve `model`. The merged catalog
+ * keeps only the first account's row, whose endpoints can differ.
+ */
+function servingModelRows(model: string): Array<Model> {
+  if (!usesPooledAccounts()) {
+    const row = state.models?.data.find((entry) => entry.id === model)
+    return row ? [row] : []
+  }
+  return tokenPool
+    .getEligibleAccountsForModel(model)
+    .flatMap((account) => tokenPool.getModelForAccount(model, account.id) ?? [])
+}
+
+function isAssistantModelAvailable(
+  id: string,
+  redirect: AssistantRedirect,
+): boolean {
+  const { model } = resolveAssistantRoute(id, undefined, redirect)
+  if (customChatReference(model)) return true
+  const payload = assistantPayload(model, "", "")
+  return servingModelRows(model).some(
+    (row) => assistantEndpoint(payload, row) !== undefined,
+  )
+}
+
+/** Redirect sources the Chat route accepts, as the models listing names them. */
+function redirectSourceIds(): Array<string> {
+  return getLoadedModelRedirects()
+    .filter((rule) => rule.enabled)
+    .map((rule) =>
+      rule.sourceEffort === "all" || rule.sourceEffort === "default" ?
+        rule.sourceModel
+      : `${rule.sourceModel}:${rule.sourceEffort}`,
+    )
 }
 
 /** Model IDs AI Assist can call, each resolving as it will be sent. */
@@ -84,8 +256,10 @@ export function listAssistantModels(): Array<string> {
   for (const listing of getCustomProviderModels()) {
     if (listing.kind === "chat") ids.add(listing.id)
   }
+  for (const id of redirectSourceIds()) ids.add(id)
+  const redirect = createAssistantRedirect()
   return [...ids]
-    .filter((id) => resolveAssistantDestination(id) !== undefined)
+    .filter((id) => isAssistantModelAvailable(id, redirect))
     .sort((a, b) => a.localeCompare(b))
 }
 
@@ -132,10 +306,7 @@ function projectItem(item: CanonicalItem): ProjectedItem {
   if (item.opaque) {
     return renderItem(item, `(${item.label}: content not shown)`, false)
   }
-  const text =
-    item.kind === "tool_call" ?
-      (item.toolArguments ?? item.content)
-    : item.content
+  const text = editableText(item)
   const limit = isInstruction(item) ? INSTRUCTION_CHAR_LIMIT : ITEM_CHAR_LIMIT
   if (text.length <= limit) return renderItem(item, text, false)
   return renderItem(
@@ -214,33 +385,16 @@ function formatItems(selection: ItemSelection): string {
   return section.trim() || "(no items)"
 }
 
-const SYSTEM_PROMPT = [
-  "You edit intercepted LLM traffic inside an HTTP proxy so it fits the operator's scenario.",
-  "You receive a structured view of one request or response: each item is a message, content part, tool call, tool result, or reasoning block with a stable id.",
-  "Reply with exactly one JSON object and nothing else: no prose, no code fences.",
-  "",
-  "{",
-  '  "summary": "One sentence: what you changed and why",',
-  '  "operations": [',
-  '    { "op": "replace", "id": "<target id>", "content": "<new text>", "toolName": "<tool_call only>", "toolArguments": "<tool_call only: JSON object as a string>", "reason": "<short reason>" },',
-  '    { "op": "delete", "id": "<target id>", "reason": "<short reason>" },',
-  '    { "op": "insert_after", "afterId": "<target id, or null for the very start>", "kind": "system|developer|user|assistant|tool_call|tool_result|thinking", "content": "<text>", "toolName": "<required for tool_call>", "toolCallId": "<required for tool_result: the call_id it answers>", "toolArguments": "<required for tool_call: JSON object as a string>", "reason": "<short reason>" }',
-  "  ]",
-  "}",
-  "",
-  "Rules:",
-  "- Address only ids listed under TARGET ITEMS. Items under REQUEST CONTEXT are background and cannot be edited.",
-  "- Each id may appear in at most one replace or delete. Never insert after an item you delete.",
-  "- Items marked read-only can be kept or deleted, never replaced.",
-  "- Items marked truncated show only their beginning: never replace their content or toolArguments; delete them or insert new items instead.",
-  "- A replace sets the item's whole content; write the complete new text.",
-  "- For tool_call items put the arguments in toolArguments as a JSON object string.",
-  "- Make the smallest change that satisfies the scenario. If nothing needs to change, return an empty operations array.",
-].join("\n")
+/** The operator's system prompt, or the default when blank, then the reply contract. */
+export function resolveAssistantSystemPrompt(systemPrompt?: string): string {
+  const role = systemPrompt?.trim() || DEFAULT_ASSISTANT_SYSTEM_PROMPT
+  return `${role}\n\n${ASSISTANT_RESPONSE_CONTRACT}`
+}
 
 export function buildAssistantPrompt(options: {
   item: InterceptPendingItem
   instruction: string
+  systemPrompt?: string
 }): { system: string; user: string; targets: AssistantTargets } {
   const { item, instruction } = options
   const phase = item.phase.toUpperCase()
@@ -275,7 +429,7 @@ export function buildAssistantPrompt(options: {
   )
 
   return {
-    system: SYSTEM_PROMPT,
+    system: resolveAssistantSystemPrompt(options.systemPrompt),
     user: parts.join("\n"),
     targets: new Map(selection.shown.map((entry) => [entry.item.id, entry])),
   }
@@ -310,6 +464,13 @@ const reasonSchema = z.string().optional()
 
 /** One diff operation, from the assistant or submitted by the operator. */
 export const assistantDiffOpSchema = z.discriminatedUnion("op", [
+  z.object({
+    op: z.literal("edit"),
+    id: z.string().min(1),
+    find: z.string().min(1),
+    replace: z.string(),
+    reason: reasonSchema,
+  }),
   z
     .object({
       op: z.literal("replace"),
@@ -389,7 +550,6 @@ function checkOperation(
     }
     return
   }
-
   const item = byId.get(op.id)
   if (!item) throw new AssistantDiffError(`Unknown item id ${op.id}`)
   if (item.opaque) {
@@ -397,6 +557,8 @@ function checkOperation(
       `Item ${op.id} is read-only; it can be kept or deleted`,
     )
   }
+  // The search runs on the full text, so a cut view does not matter here.
+  if (op.op === "edit") return
   // Tool calls show their arguments, so those are the text a cut view hides.
   const replacesText =
     op.content !== undefined || op.toolArguments !== undefined
@@ -416,10 +578,31 @@ function checkOperation(
   }
 }
 
+/** Apply `op` to the text earlier edits left; throws when it does not fit. */
+function checkEdit(
+  op: Extract<AssistantDiffOp, { op: "edit" }>,
+  byId: ReadonlyMap<string, CanonicalItem>,
+  edited: Map<string, string>,
+): void {
+  const item = byId.get(op.id) as CanonicalItem
+  const result = applyTextEdit(
+    edited.get(op.id) ?? editableText(item),
+    op.find,
+    op.replace,
+  )
+  if (!result.ok) {
+    throw new AssistantDiffError(
+      `The text to change in ${op.id} was ${result.reason}`,
+    )
+  }
+  edited.set(op.id, result.text)
+}
+
 /**
  * Throw `AssistantDiffError` unless every operation addresses a known item in
  * a way that can be applied. Assistant output may address only `targets`, the
- * items its prompt showed.
+ * items its prompt showed. Edits apply in order, each to the text the
+ * previous ones left.
  */
 export function validateDiffOps(
   items: ReadonlyArray<CanonicalItem>,
@@ -429,14 +612,22 @@ export function validateDiffOps(
   const byId = new Map(items.map((item) => [item.id, item]))
   const changed = new Set<string>()
   const deleted = new Set<string>()
+  const edited = new Map<string, string>()
   for (const op of operations) {
     checkOperation(op, byId, targets)
     if (op.op === "insert_after") continue
-    if (changed.has(op.id)) {
+    if (changed.has(op.id) || (op.op !== "edit" && edited.has(op.id))) {
       throw new AssistantDiffError(`Item ${op.id} is changed more than once`)
+    }
+    if (op.op === "edit") {
+      checkEdit(op, byId, edited)
+      continue
     }
     changed.add(op.id)
     if (op.op === "delete") deleted.add(op.id)
+  }
+  for (const [id, text] of edited) {
+    if (byId.get(id)?.kind === "tool_call") checkToolArguments(id, text)
   }
   for (const op of operations) {
     if (op.op === "insert_after" && op.afterId && deleted.has(op.afterId)) {
@@ -482,67 +673,148 @@ export function parseAssistantDiffResponse(raw: string): {
 
 // --- Invocation -------------------------------------------------------------
 
-function assistantReplyText(
-  result: ChatCompletionResponse | AsyncIterable<unknown>,
-): string {
-  if (Symbol.asyncIterator in result) {
-    throw new Error("The assistant model returned a stream")
-  }
-  const content = result.choices[0]?.message.content
+function replyText(content: unknown): string {
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("The assistant model returned no text")
   }
   return content
 }
 
+function chatReplyText(
+  result: ChatCompletionResponse | AsyncIterable<unknown>,
+): string {
+  if (Symbol.asyncIterator in result) {
+    throw new Error("The assistant model returned a stream")
+  }
+  return replyText(result.choices[0]?.message.content)
+}
+
+/** Send through the Copilot endpoint the Chat Completions route would use. */
+async function sendToCopilot(options: {
+  endpoint: CopilotInferenceEndpoint
+  selectedModel: Model
+  payload: ChatCompletionsPayload
+  verbosity: ModelRedirectVerbosity | undefined
+  signal: AbortSignal | undefined
+}): Promise<string> {
+  const { endpoint, payload, signal } = options
+  if (endpoint === "/chat/completions") {
+    return chatReplyText(await createChatCompletions(payload, { signal }))
+  }
+  if (endpoint === "/responses") {
+    const translated = chatCompletionsToResponses(payload)
+    if (options.verbosity) {
+      translated.text = { ...translated.text, verbosity: options.verbosity }
+    }
+    // Finalized here without the gateway's default effort, so "Model default"
+    // leaves the effort to the model.
+    const { body } = finalizeResponsesRequest(translated, {
+      implicitDefault: usesImplicitReasoningDefault(payload.model),
+    })
+    const result = await createResponses(body, {
+      vision: false,
+      initiator: detectInitiator(payload.messages),
+      signal,
+      prepared: true,
+    })
+    if (Symbol.asyncIterator in result) {
+      throw new Error("The assistant model returned a stream")
+    }
+    return replyText(getResponsesResultOutputText(result))
+  }
+  const result = await createAnthropicMessages(
+    await chatPayloadToAnthropic(payload, options.selectedModel, signal),
+    { signal },
+  )
+  if (Symbol.asyncIterator in result) {
+    throw new Error("The assistant model returned a stream")
+  }
+  return chatReplyText(anthropicResponseToChat(result, payload.model))
+}
+
+/**
+ * The effort a Copilot model receives: clamped to its levels, and none for a
+ * model without levels. A requested effort is sent even to a model set to
+ * keep its implicit default; that setting only stops a default being added.
+ */
+function copilotEffort(
+  model: string,
+  requested: ReasoningEffort | undefined,
+): ReasoningEffort | undefined {
+  if (!getModelReasoningConfig(model)) return undefined
+  return clampEffort(model, requested)
+}
+
 /** One attempt; the fallback runner supplies the model for retries. */
 async function sendAssistantAttempt(
   source: ChatCompletionsPayload,
-  signal: AbortSignal | undefined,
+  options: { effort?: ReasoningEffort; signal?: AbortSignal },
 ): Promise<{ model: string; content: string }> {
-  const payload = applyModelFallbackToPayload(structuredClone(source))
-  const { model } = payload
-  const destination = resolveAssistantDestination(model)
-  if (!destination) {
-    throw new Error(
-      `${model} cannot run AI Assist: it is not an available Chat Completions model`,
-    )
-  }
-  const effort = normalizeReasoningEffortForModel(
-    model,
-    getModelFallbackEffort(),
+  const { signal } = options
+  const route = resolveAssistantRoute(
+    source.model,
+    options.effort,
+    createAssistantRedirect(),
   )
-  if (destination.kind === "custom") {
+  const payload = { ...structuredClone(source), model: route.model }
+  applyModelFallbackToPayload(payload, {
+    effort: route.effort,
+    verbosity: route.verbosity,
+  })
+  const { model } = payload
+  // A fallback rule's own effort and verbosity win for its target model.
+  const fallback = getModelFallbackRedirect()
+  const effort =
+    model === route.model && !fallback ?
+      route.effort
+    : clampEffort(model, fallback?.effort ?? route.effort)
+  const reference = customChatReference(model)
+  if (reference) {
     const result = await createCustomProviderChatCompletions(
-      destination.reference,
-      { ...payload, model: destination.reference.upstreamModel },
+      reference,
+      { ...payload, model: reference.upstreamModel },
       { signal, reasoningEffort: effort },
     )
-    return { model, content: assistantReplyText(result) }
+    return { model, content: chatReplyText(result) }
   }
-  if (effort) payload.reasoning_effort = effort
-  const result = await createChatCompletions(payload, { signal })
-  return { model, content: assistantReplyText(result) }
+  // The account is chosen first; its own model row decides the endpoint.
+  const routed = await selectCatalogRoutedModel(model)
+  const selectedModel = routed.model
+  const endpoint = assistantEndpoint(payload, selectedModel)
+  if (!selectedModel || !endpoint) {
+    throw new Error(
+      `${model} cannot run AI Assist: it is not an available chat model`,
+    )
+  }
+  const sentEffort = copilotEffort(model, effort)
+  if (sentEffort) payload.reasoning_effort = sentEffort
+  const content = await runWithRoutedModelSelection(
+    routed,
+    async () =>
+      await sendToCopilot({
+        endpoint,
+        selectedModel,
+        payload,
+        verbosity: fallback?.verbosity ?? route.verbosity,
+        signal,
+      }),
+  )
+  return { model, content }
 }
 
 async function invokeAssistantModel(options: {
   model: string
   system: string
   user: string
+  effort?: ReasoningEffort
   signal?: AbortSignal
 }): Promise<{ model: string; content: string }> {
-  const { signal } = options
-  const payload: ChatCompletionsPayload = {
-    model: options.model,
-    stream: false,
-    messages: [
-      { role: "system", content: options.system },
-      { role: "user", content: options.user },
-    ],
-  }
+  const { effort, signal } = options
+  const payload = assistantPayload(options.model, options.system, options.user)
   // A separate request: the held request's account, fallback, telemetry and
   // response headers stay untouched, and its own traffic is never intercepted.
-  // Configured model fallbacks apply as on the Chat Completions route.
+  // Model IDs, redirects and configured model fallbacks resolve as on the
+  // Chat Completions route.
   return await runAsIndependentRequest(
     "Intercept Assistant",
     async () =>
@@ -550,7 +822,7 @@ async function invokeAssistantModel(options: {
         async () =>
           await runWithModelFallback(
             { payload, signal },
-            async () => await sendAssistantAttempt(payload, signal),
+            async () => await sendAssistantAttempt(payload, { effort, signal }),
           ),
       ),
   )
@@ -591,11 +863,17 @@ export async function runInterceptAssistant(
     throw new Error(`No AI Assist instruction is set for ${item.phase}s`)
   }
 
-  const prompt = buildAssistantPrompt({ item, instruction })
+  const prompt = buildAssistantPrompt({
+    item,
+    instruction,
+    systemPrompt: options.config.systemPrompt,
+  })
+  const { reasoningEffort } = options.config
   const reply = await invokeAssistantModel({
     model,
     system: prompt.system,
     user: prompt.user,
+    effort: reasoningEffort === "default" ? undefined : reasoningEffort,
     signal,
   })
   const { summary, operations } = parseAssistantDiffResponse(reply.content)

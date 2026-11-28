@@ -37,9 +37,93 @@ interface InterceptDiffViewerProps {
 }
 
 const OP_LABEL: Record<AssistantDiffOp["op"], string> = {
+  edit: "Edit",
   replace: "Replace",
   delete: "Delete",
   insert_after: "Insert",
+}
+
+/** Text an item is reviewed and edited by: tool calls by their arguments. */
+function itemText(item: CanonicalItem): string {
+  return item.kind === "tool_call" && !item.opaque ?
+      (item.toolArguments ?? item.content)
+    : item.content
+}
+
+/**
+ * Why an edit's `find` text would be refused in `text`, mirroring the server's
+ * `applyTextEdit`: it must occur exactly once, overlapping matches included.
+ */
+function editMatchProblem(text: string, find: string): string | undefined {
+  const first = find ? text.indexOf(find) : -1
+  if (first === -1) return "text not found in item"
+  return text.includes(find, first + 1) ?
+      "text matches more than once"
+    : undefined
+}
+
+/**
+ * Edits to one item depend on each other (each searches the text the earlier
+ * ones left), so a subset could change a different occurrence: they are
+ * selected together.
+ */
+function sharesEditChain(
+  operations: ReadonlyArray<AssistantDiffOp>,
+  index: number,
+  toggled: number,
+): boolean {
+  if (index === toggled) return true
+  const a = operations[index]
+  const b = operations[toggled]
+  return a.op === "edit" && b.op === "edit" && a.id === b.id
+}
+
+/**
+ * Match notes per operation, evaluated the way the server applies them: in
+ * order, each edit against the text the preceding selected operations on the
+ * same item left. Deselected edits are checked but do not change the text;
+ * once a selected edit fails, the server rejects the set, so later edits on
+ * that item are not checked further.
+ */
+function editMatchNotes(
+  operations: ReadonlyArray<AssistantDiffOp>,
+  selected: ReadonlyArray<boolean>,
+  items: ReadonlyArray<CanonicalItem>,
+): Array<string> {
+  // Text per item after the selected operations so far; `null` once an edit failed.
+  const texts = new Map<string, string | null>()
+  const textOf = (id: string): string | null | undefined => {
+    if (texts.has(id)) return texts.get(id)
+    const item = items.find((entry) => entry.id === id)
+    return item ? itemText(item) : undefined
+  }
+
+  return operations.map((op, index) => {
+    if (op.op === "replace") {
+      const text = textOf(op.id)
+      const item = items.find((entry) => entry.id === op.id)
+      const next =
+        item?.kind === "tool_call" ?
+          (op.toolArguments ?? op.content)
+        : op.content
+      if (selected[index] && text !== null && next !== undefined) {
+        texts.set(op.id, next)
+      }
+      return ""
+    }
+    if (op.op !== "edit") return ""
+    const text = textOf(op.id)
+    if (text === undefined) return ""
+    if (text === null) return " · blocked by an earlier failing edit"
+    const problem = editMatchProblem(text, op.find)
+    if (selected[index]) {
+      texts.set(
+        op.id,
+        problem === undefined ? text.replace(op.find, () => op.replace) : null,
+      )
+    }
+    return problem === undefined ? "" : ` · ${problem}`
+  })
 }
 
 /** Executable identity of a tool item; changes here alter what the client runs. */
@@ -88,14 +172,7 @@ function OpDiff({
   op: AssistantDiffOp
   target: CanonicalItem | undefined
 }) {
-  // Tool calls are reviewed by their arguments, as the editor shows them.
-  let targetText = "(item not found)"
-  if (target) {
-    targetText =
-      target.kind === "tool_call" && !target.opaque ?
-        (target.toolArguments ?? target.content)
-      : target.content
-  }
+  const targetText = target ? itemText(target) : "(item not found)"
   if (op.op === "delete") {
     return (
       <div className="intercept-diff is-single">
@@ -105,6 +182,14 @@ function OpDiff({
           text={targetText}
           facts={target}
         />
+      </div>
+    )
+  }
+  if (op.op === "edit") {
+    return (
+      <div className="intercept-diff">
+        <DiffSide tone="before" label="Removed" text={op.find} facts={target} />
+        <DiffSide tone="after" label="Added" text={op.replace} />
       </div>
     )
   }
@@ -151,6 +236,11 @@ export function InterceptDiffViewer({
   )
   const selectedOps = suggestion.operations.filter(
     (_, index) => selected[index],
+  )
+  const matchNotes = editMatchNotes(
+    suggestion.operations,
+    selected,
+    currentItems,
   )
   const opCount = suggestion.operations.length
 
@@ -233,7 +323,9 @@ export function InterceptDiffViewer({
                       onChange={(checked) =>
                         setSelected((prev) =>
                           prev.map((value, i) =>
-                            i === index ? checked : value,
+                            sharesEditChain(suggestion.operations, i, index) ?
+                              checked
+                            : value,
                           ),
                         )
                       }
@@ -252,8 +344,9 @@ export function InterceptDiffViewer({
                   : <Text type="supporting">
                       <code>{op.id}</code>
                       {target ?
-                        ` · ${KIND_LABEL[target.kind]}`
+                        ` · ${target.label || KIND_LABEL[target.kind]}`
                       : " · not found"}
+                      {matchNotes[index]}
                       {(
                         op.op === "replace"
                         && op.toolName !== undefined

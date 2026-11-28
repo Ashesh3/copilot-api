@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { randomUUID } from "node:crypto"
 
 import { resolveCopilotRequestAttribution } from "~/lib/copilot-request-context"
+import { respondWithInterceptKeepalive } from "~/lib/intercept/keepalive-response"
 import { runWithRequestRoutingScopes } from "~/lib/request-scopes"
 import { resolveRoutingAffinityFromHeaders } from "~/lib/routing-affinity"
 import { webToolsMiddleware } from "~/services/web/middleware"
@@ -12,7 +13,7 @@ import {
   isVerifiedTransparentProxyRequest,
 } from "./lib/api-key-guard"
 import { forwardError } from "./lib/error"
-import { inferenceCors } from "./lib/inference-cors"
+import { grantedInferenceOrigin, inferenceCors } from "./lib/inference-cors"
 import { resolveDoubledMessagesPath } from "./lib/messages-path-alias"
 import { createAuthMiddleware } from "./lib/request-auth"
 import { requestLogger } from "./lib/request-logger"
@@ -280,3 +281,27 @@ server.route("/v1beta/models", googleAIRoutes)
 server.route("/models", googleAIRoutes)
 
 server.all("*", transparentProxy)
+
+/** The app's entry point: Intercept keeps held streaming requests alive. */
+export async function fetchServer(request: Request): Promise<Response> {
+  return await respondWithInterceptKeepalive({
+    respond: async () => await server.fetch(request),
+    decorate: (headers) => {
+      applySecurityHeaders({
+        header: (name, value) => {
+          headers.set(name, value)
+        },
+      })
+      const pathname = new URL(request.url).pathname
+      const origin = grantedInferenceOrigin({
+        origin: request.headers.get("origin") ?? undefined,
+        path: resolveDoubledMessagesPath(pathname) ?? pathname,
+        method: request.method,
+      })
+      if (origin) {
+        headers.set("Access-Control-Allow-Origin", origin)
+        headers.set("Vary", "Origin")
+      }
+    },
+  })
+}

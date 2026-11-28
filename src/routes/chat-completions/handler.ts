@@ -42,6 +42,7 @@ import {
   isHTTPError,
 } from "~/lib/error"
 import { forceChatSystemPrompt } from "~/lib/forced-system-prompt"
+import { markStreamingClient } from "~/lib/intercept/wait-signal"
 import {
   applyModelFallbackToPayload,
   getModelFallbackRedirect,
@@ -115,6 +116,7 @@ export async function handleCompletion(c: Context) {
   const rawPayload = await parseChatRequestBody(c)
   const prepared = prepareChatCompletionsRequest(rawPayload)
   const preparedSource = prepared.source
+  if (preparedSource.stream === true) markStreamingClient("chat")
   const nativeOptions: NativeMessagesRequestOptions = {
     anthropicBeta: c.req.header("anthropic-beta"),
     anthropicVersion: c.req.header("anthropic-version"),

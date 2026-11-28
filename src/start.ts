@@ -51,7 +51,7 @@ import {
   responsesWebSocket,
 } from "./routes/responses/websocket"
 import { tryUpgradeVoiceWebSocket, voiceWebSocket } from "./routes/voice/route"
-import { server } from "./server"
+import { fetchServer } from "./server"
 import { resolveCopilotIntegrationId } from "./services/copilot/copilot-contract"
 import { getVSCodeVersion } from "./services/get-vscode-version"
 
@@ -270,7 +270,7 @@ async function dispatchStartFetch(
       return new Response("Unauthorized", { status: 401 })
     }
   }
-  return server.fetch(req)
+  return await fetchServer(req)
 }
 
 // Combined WebSocket handler that dispatches by the authenticated connection type.

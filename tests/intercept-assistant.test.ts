@@ -17,6 +17,7 @@ import {
   runInterceptAssistant,
   validateDiffOps,
 } from "~/lib/intercept/assistant"
+import { applyCanonicalDiffOps } from "~/lib/intercept/canonical"
 import { InterceptEngine, StaleRevisionError } from "~/lib/intercept/engine"
 import { runAsIndependentRequest } from "~/lib/request-scopes"
 import {
@@ -30,6 +31,8 @@ const ASSISTANT: InterceptAssistantConfig = {
   autoRun: false,
   autopilot: "off",
   model: "test-model",
+  systemPrompt: "",
+  reasoningEffort: "low",
   instructionMode: "shared",
   sharedInstruction: "Rewrite the user turn",
   requestInstruction: "",
@@ -179,6 +182,34 @@ describe("assistant replies", () => {
       ],
       "toolName",
     ],
+    [
+      "an edit whose text is not in the item",
+      [{ op: "edit", id: "msg-0", find: "goodbye", replace: "hi" }],
+      "not found",
+    ],
+    [
+      "an edit whose text occurs more than once",
+      [{ op: "edit", id: "tc-0", find: '"', replace: "'" }],
+      "more than once",
+    ],
+    [
+      "an edit that leaves tool arguments invalid",
+      [{ op: "edit", id: "tc-0", find: '"a"}', replace: '"a"' }],
+      "JSON",
+    ],
+    [
+      "an edit and a replace of one item",
+      [
+        { op: "edit", id: "msg-0", find: "hello", replace: "hi" },
+        { op: "replace", id: "msg-0", content: "a" },
+      ],
+      "more than once",
+    ],
+    [
+      "an edit to a read-only item",
+      [{ op: "edit", id: "img-0", find: "image", replace: "cat" }],
+      "read-only",
+    ],
   ])("refuses %s", (_, operations, message) => {
     expect(() => validateDiffOps(ITEMS, operations)).toThrow(message)
   })
@@ -187,6 +218,31 @@ describe("assistant replies", () => {
     expect(() =>
       validateDiffOps(ITEMS, [{ op: "delete", id: "img-0" }]),
     ).not.toThrow()
+  })
+
+  test("applies edits in order, each to the text the previous one left", () => {
+    const items: Array<CanonicalItem> = [
+      { id: "msg-0", kind: "user", label: "User", content: "the cat sat" },
+    ]
+    const operations: Array<AssistantDiffOp> = [
+      { op: "edit", id: "msg-0", find: "cat", replace: "dog" },
+      { op: "edit", id: "msg-0", find: "dog sat", replace: "dog ran" },
+    ]
+
+    validateDiffOps(items, operations)
+
+    expect(applyCanonicalDiffOps(items, operations)[0].content).toBe(
+      "the dog ran",
+    )
+  })
+
+  test("edits a tool call's arguments", () => {
+    const call = applyCanonicalDiffOps(ITEMS, [
+      { op: "edit", id: "tc-0", find: '"a"', replace: '"b.txt"' },
+    ])[2]
+
+    expect(call.toolArguments).toBe('{"path":"b.txt"}')
+    expect(call.content).toBe('{"path":"b.txt"}')
   })
 })
 

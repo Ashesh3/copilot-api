@@ -45,6 +45,7 @@ import {
   reportHttpError,
 } from "~/lib/error"
 import { forceChatSystemPrompt } from "~/lib/forced-system-prompt"
+import { markStreamingClient } from "~/lib/intercept/wait-signal"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelFallbackToPayload,
@@ -485,6 +486,7 @@ async function handleGoogleAIInner(c: Context) {
   const isCount = action === "countTokens"
   const outputMode: GoogleStreamOutputMode =
     c.req.query("alt") === "sse" ? "sse" : "json"
+  if (isStream && outputMode === "sse") markStreamingClient("google")
 
   const { baseModel, reasoningEffort: suffixEffort } =
     parseModelSuffix(rawModel)

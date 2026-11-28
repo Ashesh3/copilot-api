@@ -514,6 +514,8 @@ const AUTOPILOT_ASSISTANT: Omit<InterceptAssistantConfig, "autopilot"> = {
   enabled: true,
   autoRun: false,
   model: "test-model",
+  systemPrompt: "",
+  reasoningEffort: "low",
   instructionMode: "shared",
   sharedInstruction: "Rewrite the user turn",
   requestInstruction: "",

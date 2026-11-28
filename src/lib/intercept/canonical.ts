@@ -347,6 +347,34 @@ function insertedItem(
   }
 }
 
+/** The text an edit searches: a tool call's arguments, otherwise its content. */
+export function editableText(item: CanonicalItem): string {
+  return item.kind === "tool_call" ?
+      (item.toolArguments ?? item.content)
+    : item.content
+}
+
+export type TextEditResult =
+  | { ok: true; text: string }
+  | { ok: false; reason: "not found" | "found more than once" }
+
+/** Replace the one occurrence of `find`; refuse when it is absent or repeated. */
+export function applyTextEdit(
+  text: string,
+  find: string,
+  replace: string,
+): TextEditResult {
+  const at = text.indexOf(find)
+  if (at === -1) return { ok: false, reason: "not found" }
+  if (text.includes(find, at + 1)) {
+    return { ok: false, reason: "found more than once" }
+  }
+  return {
+    ok: true,
+    text: text.slice(0, at) + replace + text.slice(at + find.length),
+  }
+}
+
 /**
  * Applies diff operations to canonical items. Unknown target IDs and content
  * edits of read-only items throw `CanonicalEditError`.
@@ -369,6 +397,26 @@ export function applyCanonicalDiffOps(
 
   for (const op of operations) {
     switch (op.op) {
+      case "edit": {
+        const index = indexOf(op.id)
+        const current = next[index]
+        if (current.opaque) {
+          throw new CanonicalEditError(
+            `"${current.label}" (${current.id}) is read-only; it can be removed but not edited.`,
+          )
+        }
+        const result = applyTextEdit(editableText(current), op.find, op.replace)
+        if (!result.ok) {
+          throw new CanonicalEditError(
+            `The text to change in "${current.label}" (${current.id}) was ${result.reason}.`,
+          )
+        }
+        next[index] =
+          current.kind === "tool_call" ?
+            { ...current, toolArguments: result.text, content: result.text }
+          : { ...current, content: result.text }
+        break
+      }
       case "replace": {
         const index = indexOf(op.id)
         const current = next[index]

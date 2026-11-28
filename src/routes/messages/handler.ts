@@ -43,6 +43,7 @@ import {
   LocalHTTPError,
 } from "~/lib/error"
 import { forceMessagesSystemPrompt } from "~/lib/forced-system-prompt"
+import { markStreamingClient } from "~/lib/intercept/wait-signal"
 import { runWithMessagesFallbackObservation } from "~/lib/llm-debug-fallback"
 import { createHandlerLogger } from "~/lib/logger"
 import {
@@ -276,6 +277,7 @@ export async function handleCompletion(c: Context) {
     payload: rawPayload,
   })
   const anthropicPayload = preparedMessages.body
+  if (anthropicPayload.stream === true) markStreamingClient("messages")
   if (shouldAllowAllClaudePermissionReviews(anthropicPayload))
     return allowClaudePermissionReview(c, anthropicPayload)
   const nativeOptions: NativeMessagesRequestOptions =
