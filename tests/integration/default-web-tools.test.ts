@@ -36,35 +36,126 @@ const originalFetch = globalThis.fetch
 const destinations: Array<{ host: string; path: string; status: number }> = []
 const pageOriginAttempts: Array<string> = []
 const openedUrls: Array<string> = []
+type HostedPageRead = "ok" | "cache_miss" | "error"
 /** How GitHub's hosted reader answered each page read in the running test. */
-const hostedPageReads: Array<"ok" | "cache_miss" | "error"> = []
+const hostedPageReads: Array<{ result: HostedPageRead }> = []
 let model = ""
 
 const HOSTED_READER_MARKER = "GitHub-hosted webpage reader"
 
-function hostedPageReadResult(value: {
-  output?: Array<{ type?: string; content?: unknown }>
-}): "ok" | "cache_miss" | "error" {
-  const text = (value.output ?? [])
-    .filter((item) => item.type === "message" && Array.isArray(item.content))
-    .flatMap((item) => item.content as Array<{ text?: unknown }>)
-    .map((part) => (typeof part.text === "string" ? part.text : ""))
-    .join("\n")
-  if (/"status"\s*:\s*"ok"/u.test(text)) return "ok"
-  return /cache miss/iu.test(text) ? "cache_miss" : "error"
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+/** Text of the message blocks in a Messages, Responses, or reader result. */
+function messageText(value: unknown): string {
+  if (!isRecord(value)) return ""
+  const messages =
+    Array.isArray(value.output) ?
+      value.output.filter(
+        (item: unknown) =>
+          isRecord(item)
+          && item.type === "message"
+          && item.role === "assistant",
+      )
+    : [value]
+  return messages
+    .flatMap((message: unknown) =>
+      isRecord(message) && Array.isArray(message.content) ?
+        (message.content as Array<unknown>)
+      : [],
+    )
+    .map((part) =>
+      (
+        isRecord(part)
+        && (part.type === "text" || part.type === "output_text")
+        && typeof part.text === "string"
+      ) ?
+        part.text
+      : "",
+    )
+    .join("")
+}
+
+function bufferedAnswer(body: string): string {
+  try {
+    return messageText(JSON.parse(body) as unknown)
+  } catch {
+    return ""
+  }
+}
+
+/**
+ * A read counts as a cache miss only when GitHub completed the request and the
+ * reader's structured answer reports that failure. Anything else is an error.
+ */
+function hostedPageReadResult(value: unknown): HostedPageRead {
+  if (!isRecord(value) || value.status !== "completed" || value.error)
+    return "error"
+  let answer: unknown
+  try {
+    answer = JSON.parse(
+      messageText(value)
+        .replace(/^```(?:json)?\s*/u, "")
+        .replace(/\s*```$/u, ""),
+    ) as unknown
+  } catch {
+    return "error"
+  }
+  if (!isRecord(answer) || typeof answer.content !== "string") return "error"
+  if (answer.status === "ok") return "ok"
+  return answer.status === "error" && /cache miss/iu.test(answer.content) ?
+      "cache_miss"
+    : "error"
+}
+
+/** Record a reader request as an error until its response is classified. */
+function startHostedPageRead(
+  url: URL,
+  init: RequestInit | undefined,
+): { result: HostedPageRead } | undefined {
+  if (
+    url.pathname !== "/responses"
+    || typeof init?.body !== "string"
+    || !init.body.includes(HOSTED_READER_MARKER)
+  )
+    return undefined
+  const read = { result: "error" as HostedPageRead }
+  hostedPageReads.push(read)
+  return read
+}
+
+function recordResponsesOutput(
+  value: unknown,
+  read: { result: HostedPageRead } | undefined,
+): void {
+  const output =
+    isRecord(value) && Array.isArray(value.output) ? value.output : []
+  for (const item of output as Array<unknown>) {
+    if (
+      isRecord(item)
+      && item.type === "web_search_call"
+      && isRecord(item.action)
+      && item.action.type === "open_page"
+      && typeof item.action.url === "string"
+    )
+      openedUrls.push(item.action.url)
+  }
+  if (read) read.result = hostedPageReadResult(value)
 }
 
 /**
  * GitHub's hosted reader is sometimes unable to open any page and answers
  * "Cache miss" for every URL, whatever the gateway sends. The gateway then
  * reports the failure, so the page-content check becomes a warning only when
- * every hosted page read in the test failed that way. All other checks run.
+ * every hosted page read in the test failed that way and the client still
+ * received an answer. All other checks run.
  */
-function expectPageContent(label: string, text: string): void {
+function expectPageContent(label: string, text: string, answer: string): void {
   const unavailable =
     hostedPageReads.length > 0
-    && hostedPageReads.every((read) => read === "cache_miss")
+    && hostedPageReads.every((read) => read.result === "cache_miss")
   if (unavailable && !text.includes("Example Domain")) {
+    expect(answer.trim()).not.toBe("")
     const message = `Skipped the page-content check in live test "${label}": GitHub-hosted page reading answered "Cache miss" for every page it opened.`
     console.warn(message)
     if (process.env.GITHUB_ACTIONS === "true") {
@@ -107,31 +198,14 @@ beforeEach(async () => {
       pageOriginAttempts.push(url.hostname)
       throw new Error("Web tool attempted forbidden page-origin egress")
     }
+    const read = startHostedPageRead(url, init)
     const response = await originalFetch(input, init)
     if (
       url.pathname === "/responses"
       && response.ok
       && response.headers.get("content-type")?.includes("application/json")
     ) {
-      const value = (await response.clone().json()) as {
-        output?: Array<{
-          type?: string
-          action?: { type?: string; url?: string }
-          content?: unknown
-        }>
-      }
-      for (const item of value.output ?? [])
-        if (
-          item.type === "web_search_call"
-          && item.action?.type === "open_page"
-          && item.action.url
-        )
-          openedUrls.push(item.action.url)
-      if (
-        typeof init?.body === "string"
-        && init.body.includes(HOSTED_READER_MARKER)
-      )
-        hostedPageReads.push(hostedPageReadResult(value))
+      recordResponsesOutput(await response.clone().json(), read)
     }
     destinations.push({
       host: url.hostname,
@@ -173,7 +247,7 @@ test("live default web search searches and opens pages entirely on GitHub", asyn
   ).toBe(true)
   expect(openedUrls).toContain("https://example.com/")
   expect(pageOriginAttempts).toEqual([])
-  expectPageContent("live default web search", body)
+  expectPageContent("live default web search", body, bufferedAnswer(body))
   expect(body).not.toContain('"name":"_copilot_web_')
 }, 180_000)
 
@@ -208,7 +282,7 @@ test("live Responses clients open pages on GitHub without client configuration",
   ).toBe(true)
   expect(openedUrls).toContain("https://example.com/")
   expect(pageOriginAttempts).toEqual([])
-  expectPageContent("live Responses clients", body)
+  expectPageContent("live Responses clients", body, bufferedAnswer(body))
   expect(body).not.toContain(
     '"type":"function_call","name":"_copilot_web_search"',
   )
@@ -231,7 +305,8 @@ test("live streaming page reading stays GitHub-only with one terminal", async ()
   expect(response.status).toBe(200)
   expect(openedUrls).toContain("https://example.com/")
   expect(pageOriginAttempts).toEqual([])
-  expectPageContent("live streaming page reading", streamedText(body))
+  const answer = streamedText(body)
+  expectPageContent("live streaming page reading", answer, answer)
   expect(body.match(/event: message_stop/g)).toHaveLength(1)
   expect(body).not.toContain('"name":"_copilot_web_')
 }, 180_000)
