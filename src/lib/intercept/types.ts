@@ -267,6 +267,8 @@ export interface InterceptPendingItem {
   assistantStatus: "idle" | "running" | "ready" | "error"
   assistantSuggestion?: AssistantSuggestion
   assistantError?: string
+  /** New for every assistant run and reported problem, so each outcome is distinct. */
+  assistantRunId?: string
   /** Autopilot applied the assistant's changes and forwarded this item. */
   autopilot?: boolean
 }
@@ -293,6 +295,7 @@ export interface InterceptItemSummary {
   assistantStatus: InterceptPendingItem["assistantStatus"]
   assistantOpCount: number
   assistantError?: string
+  assistantRunId?: string
   autopilot: boolean
 }
 

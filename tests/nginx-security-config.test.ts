@@ -62,6 +62,31 @@ test("public nginx template exposes only the exact transcription upload routes",
   }
 })
 
+test("public nginx template upgrades the dashboard Intercept WebSocket", async () => {
+  const template = await read("sites-available/public-domain.conf.template")
+  const location = template.match(
+    /location = \/dashboard\/api\/intercept\/ws \{([\s\S]*?)\n {2}\}/,
+  )?.[1]
+
+  expect(location).toBeDefined()
+  for (const directive of [
+    "if ($request_method != GET) { return 404; }",
+    "proxy_pass {{UPSTREAM_URL}};",
+    "proxy_http_version 1.1;",
+    "proxy_set_header Host $host;",
+    "proxy_set_header X-Forwarded-Host $host;",
+    "proxy_set_header X-Real-IP $remote_addr;",
+    "proxy_set_header X-Forwarded-For $remote_addr;",
+    "proxy_set_header X-Forwarded-Proto $scheme;",
+    "proxy_set_header Upgrade $http_upgrade;",
+    "proxy_set_header Connection upgrade;",
+    "proxy_buffering off;",
+    "proxy_cache off;",
+  ]) {
+    expect(location).toContain(directive)
+  }
+})
+
 test("Claude spoof template exposes only authenticated compatibility families", async () => {
   const template = await read("sites-available/spoof-domains.conf.template")
   expect(template).toContain("^/v1/code/sessions")

@@ -875,7 +875,8 @@ about five minutes. `COPILOT_API_DISABLE_SSE_HEARTBEAT` turns the early
 response off along with other heartbeats. The Intercept page updates live over
 a WebSocket (`/dashboard/api/intercept/ws`, admin session and admin origin
 required, so set `COPILOT_ADMIN_ORIGIN` behind a proxy) and polls while it is
-disconnected.
+disconnected. A reverse proxy must pass WebSocket upgrades for that path; the
+nginx public-domain template has a location for it.
 
 AI Assist sends a selected model a system prompt, the operator's user message,
 and a structured view of the held item: message text, tool calls, and tool
@@ -887,11 +888,14 @@ the model supports, and is not sent to models without reasoning levels; "Model
 default" leaves it to the model, and a fallback rule's own effort still wins.
 Message types (system, developer, user, assistant, thinking, tool call, tool
 result) choose what the assistant sees and may change or insert. Within one
-Intercept session, results are remembered per message: as a conversation
-grows, only messages the assistant has not handled are sent, earlier results
-are reused, and a reply the operator already accepted is not sent again; "Run
-without cache" sends everything. Changing any AI Assist setting or turning
-Intercept off clears this memory. The system prompt is editable (blank uses
+Intercept session, results are remembered per message of each client
+conversation, direction and protocol: as a conversation grows, only messages
+the assistant has not handled are sent, earlier results are reused, and a
+response change the operator accepted is not sent again with the next request.
+Requests without a client session ID, and images or other read-only parts, are
+always reviewed afresh; "Run without cache" sends everything. Changing any AI
+Assist setting or turning Intercept off clears this memory, including for runs
+still in progress. The system prompt is editable (blank uses
 the default); the reply format the gateway parses is always appended to it.
 The model replies with edit operations, preferably find-and-replace edits of
 just the changed text, which are checked against the item and shown as a diff

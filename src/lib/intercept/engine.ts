@@ -1,5 +1,6 @@
 /* eslint-disable max-lines -- one engine owns the hold lifecycle: queue, capture, edits, AI Assist and its session cache */
 import consola from "consola"
+import { randomUUID } from "node:crypto"
 
 import {
   releaseDebugCaptureMemory,
@@ -15,6 +16,7 @@ import type {
 import type {
   AssistantDiffOp,
   CanonicalItem,
+  InterceptAssistantConfig,
   InterceptConfig,
   InterceptItemStatus,
   InterceptItemSummary,
@@ -29,7 +31,7 @@ import {
   runInterceptAssistant,
   validateDiffOps,
 } from "./assistant"
-import { AssistantSessionCache } from "./assistant-cache"
+import { AssistantSessionCache, itemCacheKeys } from "./assistant-cache"
 import { isInterceptBypassed } from "./assistant-model"
 import {
   applyCanonicalDiffOps,
@@ -139,8 +141,14 @@ interface AssistantRun {
   abort: AbortController
   /** Item revision the run reads; its result applies only to that revision. */
   revision: number
-  /** Cache scope of the run's settings, when they were complete. */
-  scope?: string
+  /** The session cache and settings the run used. */
+  memory: AssistantMemory
+}
+
+/** A suggestion's cache generation and the settings it was made under. */
+interface AssistantMemory {
+  cache: AssistantSessionCache
+  config: InterceptAssistantConfig
 }
 
 type AssistantOutcome =
@@ -157,8 +165,8 @@ interface PendingSlot {
   /** Autopilot covered this item's direction when it was held. */
   autopilotEligible: boolean
   assistantRun?: AssistantRun
-  /** Cache scope of the current suggestion, for remembering applied results. */
-  assistantScope?: string
+  /** Where the current suggestion came from, for remembering what is accepted. */
+  assistantMemory?: AssistantMemory
 }
 
 interface RecentEntry {
@@ -214,6 +222,33 @@ function completeScope(
 }
 
 /**
+ * An accepted response reaches the client and comes back in its next
+ * request's history. Remember the items the changes produced as handled for
+ * that conversation's request runs, so they are not sent again; unchanged
+ * items keep their own results, and original histories are unaffected.
+ */
+function rememberAcceptedResponse(
+  memory: AssistantMemory,
+  before: ReadonlyArray<CanonicalItem>,
+  after: InterceptPendingItem,
+): void {
+  if (after.phase !== "response") return
+  const scope = completeScope({
+    config: memory.config,
+    item: { ...after, phase: "request" },
+  })
+  if (!scope) return
+  const kinds = new Set<string>(memory.config.messageKinds)
+  const unchanged = new Set(itemCacheKeys(before))
+  memory.cache.rememberSettled(
+    scope,
+    after.canonical.items,
+    (entry, key) =>
+      kinds.has(entry.kind) && !entry.opaque && !unchanged.has(key),
+  )
+}
+
+/**
  * Move a capture's reservation to the bytes its held item retains. The
  * decoded text can be shorter than the bytes read (a stripped BOM), so a
  * shrink is released rather than refused. False when growth does not fit.
@@ -240,7 +275,7 @@ export class InterceptEngine {
   private captureAbort = new AbortController()
   private readonly runAssistant: InterceptAssistantRunner
   /** AI Assist results for this Intercept session; see AssistantSessionCache. */
-  private readonly assistantCache = new AssistantSessionCache()
+  private assistantCache = new AssistantSessionCache()
 
   /** `runAssistant` is a test seam; production calls the configured model. */
   constructor(runAssistant: InterceptAssistantRunner = runInterceptAssistant) {
@@ -286,9 +321,10 @@ export class InterceptEngine {
     this.config = next
     this.emit({ type: "config", config: this.getConfig() })
 
-    // A session's results hold only for its settings and while it is on.
+    // A session's results hold only for its settings and while it is on. A
+    // new cache, not a cleared one, so runs still in flight cannot refill it.
     if (assistantChanged || (wasEnabled && !next.enabled)) {
-      this.assistantCache.clear()
+      this.assistantCache = new AssistantSessionCache()
     }
 
     // Turning Intercept off releases everything it was holding or reading.
@@ -487,6 +523,7 @@ export class InterceptEngine {
     const operations = selectedOperations ?? suggestion.operations
     if (operations.length === 0) return slot.item
     validateDiffOps(slot.item.canonical.items, operations)
+    const before = slot.item.canonical.items
     const updated = this.editPendingItem(id, {
       canonicalItems: applyCanonicalDiffOps(
         slot.item.canonical.items,
@@ -494,14 +531,8 @@ export class InterceptEngine {
       ),
       baseRevision: reviewed.revision,
     })
-    // What the operator accepted is settled: a later request that carries it
-    // (an edited reply in the conversation history) is not sent again.
-    if (updated && slot.assistantScope) {
-      this.assistantCache.rememberHandled(
-        slot.assistantScope,
-        updated.canonical.items,
-        new Set(this.config.assistant.messageKinds),
-      )
+    if (updated && slot.assistantMemory) {
+      rememberAcceptedResponse(slot.assistantMemory, before, updated)
     }
     return updated
   }
@@ -529,27 +560,27 @@ export class InterceptEngine {
     const run: AssistantRun = {
       abort: new AbortController(),
       revision: item.revision,
+      memory: { cache: this.assistantCache, config: this.config.assistant },
     }
     slot.assistantRun = run
     item.assistantStatus = "running"
     item.assistantError = undefined
+    item.assistantRunId = randomUUID()
     this.emit({ type: "updated", item: summarizeItem(item) })
 
     const request = {
       item: { ...item },
-      config: this.config.assistant,
+      config: run.memory.config,
       instructionOverride: options?.instruction,
       modelOverride: options?.model,
     }
-    // Incomplete settings leave nothing to remember; the run reports them.
-    run.scope = completeScope(request)
     let outcome: AssistantOutcome
     try {
       outcome = {
         suggestion: await this.runAssistant({
           ...request,
           signal: run.abort.signal,
-          cache: this.assistantCache,
+          cache: run.memory.cache,
           fresh: options?.fresh,
         }),
       }
@@ -588,7 +619,7 @@ export class InterceptEngine {
     ) {
       item.assistantStatus = "ready"
       item.assistantSuggestion = suggestion
-      slot.assistantScope = run.scope
+      slot.assistantMemory = run.memory
       const reused =
         suggestion.reusedItemCount > 0 ?
           `, ${suggestion.reusedItemCount} items reused from this session`
@@ -610,6 +641,7 @@ export class InterceptEngine {
   private reportAssistantProblem(slot: PendingSlot, message: string): void {
     slot.item.assistantStatus = "error"
     slot.item.assistantError = message
+    slot.item.assistantRunId = randomUUID()
     consola.warn(`[Intercept] ${message} (${itemLabel(slot.item)})`)
     this.emit({ type: "updated", item: summarizeItem(slot.item) })
   }

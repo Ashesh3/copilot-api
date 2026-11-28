@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 
 import type { InterceptAssistantResult } from "~/lib/intercept/assistant"
-import type { AssistantSessionCache } from "~/lib/intercept/assistant-cache"
 
 import {
   DEBUG_CAPTURE_MEMORY_MAX_BYTES,
@@ -338,28 +337,62 @@ describe("AI Assist session", () => {
   }
 
   test("changing AI Assist settings or turning Intercept off forgets this session's results", async () => {
-    let cache: AssistantSessionCache | undefined
+    const seen: Array<number | undefined> = []
     const engine = newEngine((options) => {
-      cache = options.cache
-      cache?.remember("scope", "key", { itemId: null, operations: [] })
+      seen.push(options.cache?.size)
+      options.cache?.remember("scope", "key", { itemId: null, operations: [] })
       return Promise.resolve(noChanges)
+    })
+    engine.updateConfig({ enabled: true, direction: "request", assistant })
+    let queued = nextQueued(engine)
+    let pending = engine.interceptRequest(chatRequest("original"))
+    let id = await queued
+
+    await engine.triggerAssistant(id)
+    await engine.triggerAssistant(id)
+    engine.updateConfig({
+      assistant: { ...assistant, reasoningEffort: "high" },
+    })
+    await engine.triggerAssistant(id)
+    engine.updateConfig({ enabled: false })
+    await pending
+
+    engine.updateConfig({ enabled: true })
+    queued = nextQueued(engine)
+    pending = engine.interceptRequest(chatRequest("again"))
+    id = await queued
+    await engine.triggerAssistant(id)
+
+    // Remembered across runs; forgotten on a settings change and on turn-off.
+    expect(seen).toEqual([0, 1, 0, 0])
+    engine.forwardAllPending()
+    await pending
+  })
+
+  test("a run still in flight cannot refill the cache after a settings change", async () => {
+    const { promise: release, resolve } = Promise.withResolvers<undefined>()
+    const seen: Array<number | undefined> = []
+    const engine = newEngine(async (options) => {
+      seen.push(options.cache?.size)
+      if (seen.length === 1) await release
+      options.cache?.remember("scope", "key", { itemId: null, operations: [] })
+      return noChanges
     })
     engine.updateConfig({ enabled: true, direction: "request", assistant })
     const queued = nextQueued(engine)
     const pending = engine.interceptRequest(chatRequest("original"))
     const id = await queued
 
-    await engine.triggerAssistant(id)
-    expect(cache?.size).toBe(1)
+    const slow = engine.triggerAssistant(id)
     engine.updateConfig({
       assistant: { ...assistant, reasoningEffort: "high" },
     })
-    expect(cache?.size).toBe(0)
-
+    resolve(undefined)
+    await slow
     await engine.triggerAssistant(id)
-    expect(cache?.size).toBe(1)
-    engine.updateConfig({ enabled: false })
-    expect(cache?.size).toBe(0)
+
+    expect(seen).toEqual([0, 0])
+    engine.forwardAllPending()
     await pending
   })
 

@@ -48,6 +48,14 @@ import {
   updateInterceptDraft,
   useInterceptDrafts,
 } from "../lib/intercept-drafts"
+import {
+  type InterceptSocketMessage,
+  InterceptStateLoads,
+  parseInterceptSocketMessage,
+  type StateUpdate,
+  withQueued,
+  withUpdated,
+} from "../lib/intercept-live-state"
 import { useToast } from "../lib/toast"
 
 const API = "/dashboard/api/intercept"
@@ -56,14 +64,6 @@ const SOCKET_PATH = `${API}/ws`
 const POLL_MS = 4000
 const RECONNECT_MIN_MS = 1000
 const RECONNECT_MAX_MS = 30_000
-
-/** JSON text frames sent by the live-updates socket. */
-type SocketMessage =
-  | { event: "snapshot"; data: { snapshot: InterceptSnapshot } }
-  | { event: "config"; data: { config: InterceptConfig } }
-  | { event: "queued" | "updated"; data: { item: InterceptItemSummary } }
-  | { event: "resolved"; data: { id: string } }
-  | { event: "ping"; data: number }
 
 interface InterceptStateResponse extends InterceptSnapshot {
   availableModels: Array<string>
@@ -91,53 +91,6 @@ const DIRECTION_TEXT: Record<InterceptDirection, string> = {
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback
-}
-
-function parseSocketMessage(data: unknown): SocketMessage | undefined {
-  if (typeof data !== "string") return undefined
-  try {
-    return JSON.parse(data) as SocketMessage
-  } catch {
-    return undefined
-  }
-}
-
-/** Held items stay ordered oldest first, as in the server snapshot. */
-function withQueued(
-  state: InterceptStateResponse,
-  item: InterceptItemSummary,
-): InterceptStateResponse {
-  const pending = [
-    ...state.pending.filter((entry) => entry.id !== item.id),
-    item,
-  ].sort((a, b) => a.createdAtMs - b.createdAtMs)
-  return {
-    ...state,
-    pending,
-    stats: { ...state.stats, pendingCount: pending.length },
-  }
-}
-
-function replaceSummary(
-  list: Array<InterceptItemSummary>,
-  item: InterceptItemSummary,
-): Array<InterceptItemSummary> | undefined {
-  if (!list.some((entry) => entry.id === item.id)) return undefined
-  return list.map((entry) => (entry.id === item.id ? item : entry))
-}
-
-/**
- * Items outside both lists have aged out of Recent (or are announced by a
- * later frame), so an update for one changes nothing shown.
- */
-function withUpdated(
-  state: InterceptStateResponse,
-  item: InterceptItemSummary,
-): InterceptStateResponse {
-  const pending = replaceSummary(state.pending, item)
-  if (pending) return { ...state, pending }
-  const recent = replaceSummary(state.recent, item)
-  return recent ? { ...state, recent } : state
 }
 
 function assistantFailureMessage(item: InterceptItemSummary): string {
@@ -183,38 +136,56 @@ export default function InterceptScreen() {
   const [isConfirmingDisable, setIsConfirmingDisable] = useState(false)
   const [isDisabling, setIsDisabling] = useState(false)
   const effectiveIdRef = useRef<string | undefined>(undefined)
-  const refreshSeqRef = useRef(0)
-  /** Sequence number of the state GET still awaited, if any. */
-  const refreshInFlightRef = useRef<number | undefined>(undefined)
+  const [loads] = useState(
+    () => new InterceptStateLoads<InterceptStateResponse>(),
+  )
+  /** The state GETs running now, one at a time, including a queued one. */
+  const refreshRunRef = useRef<Promise<void> | undefined>(undefined)
+  /** Refreshes requested so far; one requested mid-GET runs once after it. */
+  const refreshRequestsRef = useRef(0)
   const hasStateRef = useRef(false)
-  /** Last seen AI Assist status per item, to toast each new failure once. */
-  const assistantStatusRef = useRef<ReadonlyMap<string, string> | null>(null)
+  /** Item per AI Assist failure already seen, to toast each failure once. */
+  const assistantFailuresRef = useRef<ReadonlyMap<string, string> | null>(null)
   // Bumped whenever an edit response replaces the detail, so a detail GET
   // that started earlier cannot overwrite it with an older body.
   const detailWriteRef = useRef(0)
 
-  // Each state request takes a sequence number; only the newest one, issued
-  // while this screen is mounted, may update state.
-  const refresh = useCallback(async () => {
-    const seq = ++refreshSeqRef.current
-    refreshInFlightRef.current = seq
+  const loadState = useCallback(async () => {
+    const seq = loads.begin()
     const ticket = beginInterceptDraftSnapshot()
     try {
       const next = await get<InterceptStateResponse>(API)
-      if (seq !== refreshSeqRef.current) return
+      const updates = loads.finish(seq)
+      if (!updates) return
       hasStateRef.current = true
-      setState(next)
+      setState(updates.reduce((acc, update) => update(acc), next))
       retainHeldInterceptDrafts(ticket, next.pending)
       setLoadError(null)
     } catch (err) {
-      if (seq !== refreshSeqRef.current) return
+      if (!loads.finish(seq)) return
       setLoadError(errorMessage(err, "Could not load intercept state"))
-    } finally {
-      if (refreshInFlightRef.current === seq) {
-        refreshInFlightRef.current = undefined
-      }
     }
-  }, [])
+  }, [loads])
+
+  // At most one state GET runs at a time. A refresh requested meanwhile runs
+  // once after it; the returned promise settles when that one has landed.
+  const refresh = useCallback((): Promise<void> => {
+    refreshRequestsRef.current += 1
+    if (refreshRunRef.current) return refreshRunRef.current
+    const run = (async () => {
+      try {
+        let served: number
+        do {
+          served = refreshRequestsRef.current
+          await loadState()
+        } while (refreshRequestsRef.current !== served)
+      } finally {
+        refreshRunRef.current = undefined
+      }
+    })()
+    refreshRunRef.current = run
+    return run
+  }, [loadState])
 
   /** Summaries and the selected item's detail, for polling and Refresh. */
   const refreshAll = useCallback(async () => {
@@ -237,9 +208,12 @@ export default function InterceptScreen() {
     let retryTimer: ReturnType<typeof setTimeout> | undefined
     let pollTimer: ReturnType<typeof setInterval> | undefined
 
-    // While the socket is down, poll so the page never goes stale.
+    // While the socket is down, poll so the page never goes stale. A poll
+    // due while a state GET is still pending is skipped, never stacked.
     const startPolling = () => {
-      pollTimer ??= setInterval(() => void refreshAll(), POLL_MS)
+      pollTimer ??= setInterval(() => {
+        if (!refreshRunRef.current) void refreshAll()
+      }, POLL_MS)
     }
     const stopPolling = () => {
       clearInterval(pollTimer)
@@ -252,24 +226,19 @@ export default function InterceptScreen() {
       }
     }
 
-    // Socket frames arrive in server order, so applying them supersedes any
-    // state GET still in flight; that GET is reissued so nothing it was
-    // fetched for is lost. Before the first GET lands there is nothing to
-    // patch (the snapshot lacks the model list), so a GET loads everything.
-    const applyEvent = (
-      update: (prev: InterceptStateResponse) => InterceptStateResponse,
-    ) => {
-      if (!hasStateRef.current) {
+    // Socket frames arrive in server order and apply at once; a state load
+    // in flight replays them onto its result when it lands. Before the first
+    // GET lands there is nothing to patch (the snapshot lacks the model
+    // list), so a GET loads everything.
+    const applyEvent = (update: StateUpdate<InterceptStateResponse>) => {
+      if (!loads.record(update) && !hasStateRef.current) {
         void refresh()
         return
       }
-      const interrupted = refreshInFlightRef.current !== undefined
-      refreshSeqRef.current += 1
       setState((prev) => (prev ? update(prev) : prev))
-      if (interrupted) void refresh()
     }
 
-    const applyMessage = (message: SocketMessage) => {
+    const applyMessage = (message: InterceptSocketMessage) => {
       switch (message.event) {
         case "snapshot": {
           // Drafts are pruned by GETs only: a snapshot sent by the server
@@ -316,7 +285,7 @@ export default function InterceptScreen() {
       hasOpened = true
     }
     const handleMessage = (event: MessageEvent) => {
-      const message = parseSocketMessage(event.data)
+      const message = parseInterceptSocketMessage(event.data)
       if (message) applyMessage(message)
     }
     // Reconnect with backoff; poll until the socket is open again.
@@ -340,10 +309,9 @@ export default function InterceptScreen() {
 
     startPolling()
     connect()
-    const seqRef = refreshSeqRef
     return () => {
       // Responses still in flight belong to this mount; ignore them.
-      seqRef.current += 1
+      loads.cancel()
       stopPolling()
       clearTimeout(retryTimer)
       socket?.removeEventListener("open", handleOpen)
@@ -352,24 +320,29 @@ export default function InterceptScreen() {
       socket?.close()
       socket = undefined
     }
-  }, [refresh, refreshAll])
+  }, [loads, refresh, refreshAll])
 
-  // Toast each AI Assist failure once, when an item's status turns to error.
+  // Toast each AI Assist failure once. Every run and every reported problem
+  // has its own id, so a retry that fails again toasts again; failures
+  // present when the screen first loads do not.
   useEffect(() => {
     if (!state) return
-    const previous = assistantStatusRef.current
+    const items = [...state.pending, ...state.recent]
+    const shown = new Set(items.map((item) => item.id))
+    const previous = assistantFailuresRef.current
     const next = new Map<string, string>()
-    for (const item of [...state.pending, ...state.recent]) {
-      next.set(item.id, item.assistantStatus)
-      if (
-        previous
-        && item.assistantStatus === "error"
-        && previous.get(item.id) !== "error"
-      ) {
-        toast.error(assistantFailureMessage(item))
-      }
+    for (const [runId, itemId] of previous ?? []) {
+      if (shown.has(itemId)) next.set(runId, itemId)
     }
-    assistantStatusRef.current = next
+    for (const item of items) {
+      const runId = item.assistantRunId
+      if (item.assistantStatus !== "error" || !runId || next.has(runId)) {
+        continue
+      }
+      next.set(runId, item.id)
+      if (previous) toast.error(assistantFailureMessage(item))
+    }
+    assistantFailuresRef.current = next
   }, [state, toast])
 
   const listItems =
@@ -456,16 +429,25 @@ export default function InterceptScreen() {
   const patchConfig = async (
     patch: Partial<InterceptConfig>,
   ): Promise<boolean> => {
-    const seq = ++refreshSeqRef.current
+    const seq = loads.begin()
     const ticket = beginInterceptDraftSnapshot()
     try {
       const res = await put<ConfigUpdateResponse>(`${API}/config`, patch)
-      if (seq === refreshSeqRef.current) {
-        setState((prev) => (prev ? { ...prev, ...res.snapshot } : prev))
+      const updates = loads.finish(seq)
+      if (updates) {
+        setState((prev) =>
+          prev ?
+            updates.reduce((acc, update) => update(acc), {
+              ...prev,
+              ...res.snapshot,
+            })
+          : prev,
+        )
         retainHeldInterceptDrafts(ticket, res.snapshot.pending)
       }
       return true
     } catch (err) {
+      loads.finish(seq)
       toast.error(errorMessage(err, "Could not update Intercept"))
       void refresh()
       return false

@@ -171,7 +171,13 @@ export function buildAssistantPrompt(options: {
   context?: ReadonlyArray<CanonicalItem>
   /** Lines shown above the target items, such as what was left out. */
   notes?: ReadonlyArray<string>
-}): { system: string; user: string; targets: AssistantTargets } {
+}): {
+  system: string
+  user: string
+  targets: AssistantTargets
+  /** Ids of the context items the prompt had room for. */
+  shownContext: Array<string>
+} {
   const { item, instruction } = options
   const phase = item.phase.toUpperCase()
   const parts: Array<string> = [
@@ -190,10 +196,13 @@ export function buildAssistantPrompt(options: {
   parts.push("", "# Operator scenario", instruction.trim(), "")
 
   const context = options.context ?? item.requestContext?.canonical.items ?? []
+  let shownContext: Array<string> = []
   if (item.phase === "response" && context.length > 0) {
+    const contextSelection = selectItems(context, CONTEXT_CHAR_BUDGET)
+    shownContext = contextSelection.shown.map((entry) => entry.item.id)
     parts.push(
       "# REQUEST CONTEXT (the request that produced this response; read-only)",
-      formatItems(selectItems(context, CONTEXT_CHAR_BUDGET)),
+      formatItems(contextSelection),
       "",
     )
   }
@@ -210,6 +219,7 @@ export function buildAssistantPrompt(options: {
     system: resolveAssistantSystemPrompt(options.systemPrompt),
     user: parts.join("\n"),
     targets: new Map(selection.shown.map((entry) => [entry.item.id, entry])),
+    shownContext,
   }
 }
 
@@ -282,11 +292,10 @@ export const assistantDiffOpSchema = z.discriminatedUnion("op", [
   }),
 ])
 
-export const assistantDiffOpsSchema = z.array(assistantDiffOpSchema).max(200)
-
+/** One model reply's operations; a suggestion may also carry reused ones. */
 const assistantReplySchema = z.object({
   summary: z.string().optional(),
-  operations: assistantDiffOpsSchema,
+  operations: z.array(assistantDiffOpSchema).max(200),
 })
 
 function isJsonText(text: string): boolean {
@@ -496,19 +505,28 @@ function runInstruction(
   return instruction
 }
 
-/** The cache scope of a run: everything that changes the assistant's answer. */
+/**
+ * The cache scope of a run: everything that changes the assistant's answer,
+ * within one client conversation, direction and protocol. Undefined without a
+ * conversation identity: such requests never reuse results.
+ */
 export function assistantRunScope(
   options: Pick<
     RunInterceptAssistantOptions,
     "config" | "instructionOverride" | "modelOverride" | "item"
   >,
-): string {
+): string | undefined {
+  const { item } = options
+  if (!item.sessionId) return undefined
   return assistantCacheScope({
     model: runModel(options),
     reasoningEffort: options.config.reasoningEffort,
     systemPrompt: options.config.systemPrompt,
     instruction: runInstruction(options),
     messageKinds: options.config.messageKinds,
+    conversation: item.sessionId,
+    phase: item.phase,
+    protocol: item.canonical.protocol,
   })
 }
 
@@ -517,6 +535,8 @@ interface AssistantPlan {
   keys: Map<string, string>
   /** Earlier results for items handled before, addressed to this item. */
   reused: Array<AssistantDiffOp>
+  /** Of those, the items inserted at the very start. */
+  reusedStart: Array<AssistantDiffOp>
   reusedItemCount: number
   /** Items of the selected types the model has not handled yet. */
   fresh: Array<CanonicalItem>
@@ -524,51 +544,62 @@ interface AssistantPlan {
   otherKinds: number
   /** Read-only request items to show a response's model. */
   context: Array<CanonicalItem>
-  contextKeys: Array<string>
+  /** Cache key per context item id. */
+  contextKeys: Map<string, string>
 }
 
 function planContext(
   plan: AssistantPlan,
   options: { item: InterceptPendingItem; kinds: ReadonlySet<string> },
-  memory: { cache?: AssistantSessionCache; scope: string },
+  memory: { cache?: AssistantSessionCache; scope?: string },
 ): void {
   const context = options.item.requestContext?.canonical.items ?? []
   const keys = itemCacheKeys(context)
+  const { cache, scope } = memory
   for (const [index, entry] of context.entries()) {
+    if (!options.kinds.has(entry.kind)) continue
     const key = keys[index]
     const seen =
-      memory.cache?.wasShown(memory.scope, key)
-      || memory.cache?.lookup(memory.scope, key, null) !== undefined
-    if (!options.kinds.has(entry.kind) || seen) continue
+      cache && scope && !entry.opaque ?
+        cache.wasShown(scope, key)
+        || cache.lookup(scope, key, null) !== undefined
+      : false
+    if (seen) continue
     plan.context.push(entry)
-    plan.contextKeys.push(key)
+    plan.contextKeys.set(entry.id, key)
   }
 }
 
 function planAssistantRun(
   options: RunInterceptAssistantOptions,
-  scope: string,
+  scope: string | undefined,
 ): AssistantPlan {
   const { item } = options
-  const cache = options.fresh ? undefined : options.cache
+  const cache = options.fresh || !scope ? undefined : options.cache
   const kinds = new Set<string>(options.config.messageKinds)
   const items = item.canonical.items
   const keys = itemCacheKeys(items)
   const plan: AssistantPlan = {
     keys: new Map(items.map((entry, index) => [entry.id, keys[index]])),
     reused: [],
+    reusedStart: [],
     reusedItemCount: 0,
     fresh: [],
     otherKinds: 0,
     context: [],
-    contextKeys: [],
+    contextKeys: new Map(),
   }
   for (const [index, entry] of items.entries()) {
     if (!kinds.has(entry.kind)) {
       plan.otherKinds += 1
       continue
     }
-    const earlier = cache?.lookup(scope, keys[index], entry.id)
+    // Read-only nodes show only a placeholder, so two different images would
+    // share a key: they are always reviewed afresh.
+    const earlier =
+      scope && !entry.opaque ?
+        cache?.lookup(scope, keys[index], entry.id)
+      : undefined
     if (!earlier) {
       plan.fresh.push(entry)
       continue
@@ -576,9 +607,9 @@ function planAssistantRun(
     plan.reusedItemCount += 1
     plan.reused.push(...earlier)
   }
-  if (plan.reusedItemCount > 0) {
-    const start = cache?.lookup(scope, `${START_KEY}:${item.phase}`, null)
-    if (start) plan.reused.unshift(...start)
+  if (scope && plan.reusedItemCount > 0) {
+    plan.reusedStart = cache?.lookup(scope, START_KEY, null) ?? []
+    plan.reused.unshift(...plan.reusedStart)
   }
   planContext(plan, { item, kinds }, { cache, scope })
   return plan
@@ -638,6 +669,8 @@ interface ModelAnswer {
   operations: Array<AssistantDiffOp>
   /** Ids of the items the model was shown and may have changed. */
   shown: ReadonlyArray<string>
+  /** Ids of the read-only context items the model was shown. */
+  shownContext: ReadonlyArray<string>
 }
 
 /** Ask the model about `plan.fresh`; its operations, checked against the item. */
@@ -671,6 +704,7 @@ async function askModel(
       summary,
       operations,
       shown: [...prompt.targets.keys()],
+      shownContext: prompt.shownContext,
     }
   } catch (error) {
     if (error instanceof AssistantDiffError) {
@@ -682,31 +716,39 @@ async function askModel(
 
 /** Remember what the model decided for each item it was shown. */
 function rememberAnswer(
-  options: RunInterceptAssistantOptions & { cache: AssistantSessionCache },
-  run: { scope: string; plan: AssistantPlan; answer: ModelAnswer },
+  cache: AssistantSessionCache,
+  run: {
+    scope: string
+    plan: AssistantPlan
+    answer: ModelAnswer
+    items: ReadonlyArray<CanonicalItem>
+  },
 ): void {
-  const { cache, item } = options
   const { scope, plan, answer } = run
+  const opaque = new Set(
+    run.items.filter((entry) => entry.opaque).map((entry) => entry.id),
+  )
   for (const id of answer.shown) {
     const key = plan.keys.get(id)
-    if (key === undefined) continue
+    if (key === undefined || opaque.has(id)) continue
     const own = answer.operations.filter((op) =>
       op.op === "insert_after" ? op.afterId === id : op.id === id,
     )
     cache.remember(scope, key, { itemId: id, operations: own })
   }
+  // This suggestion's start insertions replace any earlier ones, even when
+  // there are none now, so a prefix is never stored twice.
   const start = answer.operations.filter(
     (op) => op.op === "insert_after" && op.afterId === null,
   )
-  if (start.length > 0) {
-    const startKey = `${START_KEY}:${item.phase}`
-    const earlier = cache.lookup(scope, startKey, null) ?? []
-    cache.remember(scope, startKey, {
-      itemId: null,
-      operations: [...earlier, ...start],
-    })
-  }
-  cache.markShown(scope, plan.contextKeys)
+  cache.remember(scope, START_KEY, {
+    itemId: null,
+    operations: [...plan.reusedStart, ...start],
+  })
+  cache.markShown(
+    scope,
+    answer.shownContext.flatMap((id) => plan.contextKeys.get(id) ?? []),
+  )
 }
 
 function preview(
@@ -736,8 +778,8 @@ function preview(
 
 /**
  * Propose changes for a held item. Items of the selected message types that
- * this session already handled reuse their earlier result; only the rest go
- * to the model, and none at all when nothing is new.
+ * this conversation already handled in this session reuse their earlier
+ * result; only the rest go to the model, and none at all when nothing is new.
  */
 export async function runInterceptAssistant(
   options: RunInterceptAssistantOptions,
@@ -758,14 +800,24 @@ export async function runInterceptAssistant(
       `Reused earlier results for ${plan.reusedItemCount} items`
     : "No items of the selected message types to review"
   let operations = plan.reused
+  let answer: ModelAnswer | undefined
   if (plan.fresh.length > 0) {
-    const answer = await askModel(options, plan)
+    answer = await askModel(options, plan)
     model = answer.model
     summary = answer.summary
     operations = [...plan.reused, ...answer.operations]
     // Reused and new changes must apply together.
     validateDiffOps(item.canonical.items, operations)
-    if (cache) rememberAnswer({ ...options, cache }, { scope, plan, answer })
+  }
+  // Remembered only once the whole suggestion is known to write back.
+  const written = preview(item, operations)
+  if (answer && cache && scope) {
+    rememberAnswer(cache, {
+      scope,
+      plan,
+      answer,
+      items: item.canonical.items,
+    })
   }
 
   return {
@@ -774,7 +826,7 @@ export async function runInterceptAssistant(
     model,
     summary,
     operations,
-    ...preview(item, operations),
+    ...written,
     durationMs: Date.now() - startedAt,
     reusedItemCount: plan.reusedItemCount,
     reusedOperationCount: plan.reused.length,
