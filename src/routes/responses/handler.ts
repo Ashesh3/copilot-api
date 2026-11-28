@@ -834,7 +834,9 @@ export const handleResponses = async (c: Context) => {
   const payload = await parseResponsesRequestBody(c)
   const preparedSource = prepareResponsesRequest(payload)
   const sourcePayload = preparedSource.source
-  if (sourcePayload.stream === true) markStreamingClient("responses")
+  if (sourcePayload.stream === true) {
+    markStreamingClient("responses", sourcePayload.model)
+  }
   if (shouldAllowAllCodexPermissionReviews(sourcePayload.model))
     return allowResponsesPermissionReview(c, sourcePayload)
   const nativeOptions: NativeMessagesRequestOptions = {

@@ -6,6 +6,11 @@ import type { CopilotInferenceEndpoint } from "~/lib/endpoint-routing"
 import type { Model } from "~/services/copilot/get-models"
 
 import {
+  runWithRoutedModelSelection,
+  selectCatalogRoutedModel,
+  usesPooledAccounts,
+} from "~/lib/account-router"
+import {
   createCustomProviderChatCompletions,
   type CustomProviderModelReference,
   getCustomProviderModels,
@@ -13,17 +18,28 @@ import {
 } from "~/lib/custom-providers"
 import {
   applyModelFallbackToPayload,
-  getModelFallbackEffort,
+  getModelFallbackRedirect,
   runWithModelFallback,
 } from "~/lib/model-fallback"
 import {
+  getLoadedModelRedirects,
+  type ModelRedirectRequest,
+  type ModelRedirectResult,
+  type ModelRedirectVerbosity,
+} from "~/lib/model-redirect"
+import { resolveModelRedirectRules } from "~/lib/model-redirect-resolver"
+import { normalizeModelName } from "~/lib/model-resolver"
+import { getModelRoutingSafety } from "~/lib/model-routing-safety"
+import {
   getModelReasoningConfig,
   normalizeReasoningEffortForModel,
+  parseModelSuffix,
   type ReasoningEffort,
   usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { runAsIndependentRequest } from "~/lib/request-scopes"
 import { state } from "~/lib/state"
+import { tokenPool } from "~/lib/token-pool"
 import {
   anthropicResponseToChat,
   chatPayloadToAnthropic,
@@ -41,6 +57,7 @@ import {
   createChatCompletions,
 } from "~/services/copilot/create-chat-completions"
 import { createResponses } from "~/services/copilot/create-responses"
+import { finalizeResponsesRequest } from "~/services/copilot/responses-contract"
 
 import type {
   AssistantDiffOp,
@@ -78,13 +95,14 @@ export class AssistantDiffError extends Error {}
 
 // --- Destinations -----------------------------------------------------------
 
-type AssistantDestination =
-  | { kind: "custom"; reference: CustomProviderModelReference }
-  | {
-      kind: "copilot"
-      endpoint: CopilotInferenceEndpoint
-      selectedModel: Model
-    }
+/** A requested model ID resolved the way the Chat Completions route does. */
+interface AssistantRoute {
+  model: string
+  effort?: ReasoningEffort
+  verbosity?: ModelRedirectVerbosity
+}
+
+type AssistantRedirect = (request: ModelRedirectRequest) => ModelRedirectResult
 
 function assistantPayload(
   model: string,
@@ -101,29 +119,110 @@ function assistantPayload(
   }
 }
 
-/**
- * The destination the Chat Completions route picks for the same request: a
- * custom provider, or the Copilot endpoint it sends or translates to, so
- * models served only through Responses or Messages are available too.
- */
-function resolveAssistantDestination(
-  payload: ChatCompletionsPayload,
-): AssistantDestination | undefined {
-  const copilotModels = state.models?.data ?? []
-  const reference = resolveCustomProviderModel({
-    model: payload.model,
+function customChatReference(
+  model: string,
+): CustomProviderModelReference | undefined {
+  return resolveCustomProviderModel({
+    model,
     kind: "chat",
-    copilotModelIds: new Set(copilotModels.map((entry) => entry.id)),
+    copilotModelIds: new Set(state.models?.data.map((entry) => entry.id)),
   })
-  if (reference) return { kind: "custom", reference }
-  const selectedModel = copilotModels.find(
-    (entry) => entry.id === payload.model,
+}
+
+/**
+ * `applyModelRedirect`, synchronous so the picker lists IDs exactly as a
+ * request resolves them: unsafe or looping rule sets redirect nothing.
+ */
+function createAssistantRedirect(): AssistantRedirect {
+  const rules = getModelRoutingSafety().safe ? getLoadedModelRedirects() : []
+  return (request) => {
+    const result = resolveModelRedirectRules(rules, request)
+    return result.loop ?
+        {
+          model: request.model,
+          effort: request.effort,
+          verbosity: request.verbosity,
+          redirected: false,
+        }
+      : result
+  }
+}
+
+/**
+ * Chat's model resolution: a reasoning suffix (`model:high`) wins over the
+ * configured effort; a custom provider model keeps its own ID, any other is
+ * normalized and redirected, and each effort is clamped to its model.
+ */
+function resolveAssistantRoute(
+  requested: string,
+  configuredEffort: ReasoningEffort | undefined,
+  redirect: AssistantRedirect,
+): AssistantRoute {
+  const { baseModel, reasoningEffort: suffixEffort } =
+    parseModelSuffix(requested)
+  const normalized = normalizeModelName(baseModel)
+  const effort = normalizeReasoningEffortForModel(
+    normalized,
+    suffixEffort ?? configuredEffort,
   )
+  if (customChatReference(baseModel)) return { model: baseModel, effort }
+  const target = redirect({ model: normalized, effort })
+  const model = normalizeModelName(target.model)
+  return {
+    model,
+    effort: normalizeReasoningEffortForModel(model, target.effort),
+    verbosity: target.verbosity,
+  }
+}
+
+/**
+ * The Copilot endpoint the Chat Completions route sends or translates to for
+ * `selectedModel`, so models served only through Responses or Messages work.
+ */
+function assistantEndpoint(
+  payload: ChatCompletionsPayload,
+  selectedModel: Model | undefined,
+): CopilotInferenceEndpoint | undefined {
   if (!selectedModel) return undefined
   const decision = selectChatUpstreamEndpoint({ payload, selectedModel })
-  return "target" in decision ?
-      { kind: "copilot", endpoint: decision.target, selectedModel }
-    : undefined
+  return "target" in decision ? decision.target : undefined
+}
+
+/**
+ * The model rows of every account that may serve `model`. The merged catalog
+ * keeps only the first account's row, whose endpoints can differ.
+ */
+function servingModelRows(model: string): Array<Model> {
+  if (!usesPooledAccounts()) {
+    const row = state.models?.data.find((entry) => entry.id === model)
+    return row ? [row] : []
+  }
+  return tokenPool
+    .getEligibleAccountsForModel(model)
+    .flatMap((account) => tokenPool.getModelForAccount(model, account.id) ?? [])
+}
+
+function isAssistantModelAvailable(
+  id: string,
+  redirect: AssistantRedirect,
+): boolean {
+  const { model } = resolveAssistantRoute(id, undefined, redirect)
+  if (customChatReference(model)) return true
+  const payload = assistantPayload(model, "", "")
+  return servingModelRows(model).some(
+    (row) => assistantEndpoint(payload, row) !== undefined,
+  )
+}
+
+/** Redirect sources the Chat route accepts, as the models listing names them. */
+function redirectSourceIds(): Array<string> {
+  return getLoadedModelRedirects()
+    .filter((rule) => rule.enabled)
+    .map((rule) =>
+      rule.sourceEffort === "all" || rule.sourceEffort === "default" ?
+        rule.sourceModel
+      : `${rule.sourceModel}:${rule.sourceEffort}`,
+    )
 }
 
 /** Model IDs AI Assist can call, each resolving as it will be sent. */
@@ -132,11 +231,10 @@ export function listAssistantModels(): Array<string> {
   for (const listing of getCustomProviderModels()) {
     if (listing.kind === "chat") ids.add(listing.id)
   }
+  for (const id of redirectSourceIds()) ids.add(id)
+  const redirect = createAssistantRedirect()
   return [...ids]
-    .filter(
-      (id) =>
-        resolveAssistantDestination(assistantPayload(id, "", "")) !== undefined,
-    )
+    .filter((id) => isAssistantModelAvailable(id, redirect))
     .sort((a, b) => a.localeCompare(b))
 }
 
@@ -567,19 +665,32 @@ function chatReplyText(
 }
 
 /** Send through the Copilot endpoint the Chat Completions route would use. */
-async function sendToCopilot(
-  destination: Extract<AssistantDestination, { kind: "copilot" }>,
-  payload: ChatCompletionsPayload,
-  signal: AbortSignal | undefined,
-): Promise<string> {
-  if (destination.endpoint === "/chat/completions") {
+async function sendToCopilot(options: {
+  endpoint: CopilotInferenceEndpoint
+  selectedModel: Model
+  payload: ChatCompletionsPayload
+  verbosity: ModelRedirectVerbosity | undefined
+  signal: AbortSignal | undefined
+}): Promise<string> {
+  const { endpoint, payload, signal } = options
+  if (endpoint === "/chat/completions") {
     return chatReplyText(await createChatCompletions(payload, { signal }))
   }
-  if (destination.endpoint === "/responses") {
-    const result = await createResponses(chatCompletionsToResponses(payload), {
+  if (endpoint === "/responses") {
+    const translated = chatCompletionsToResponses(payload)
+    if (options.verbosity) {
+      translated.text = { ...translated.text, verbosity: options.verbosity }
+    }
+    // Finalized here without the gateway's default effort, so "Model default"
+    // leaves the effort to the model.
+    const { body } = finalizeResponsesRequest(translated, {
+      implicitDefault: usesImplicitReasoningDefault(payload.model),
+    })
+    const result = await createResponses(body, {
       vision: false,
       initiator: detectInitiator(payload.messages),
       signal,
+      prepared: true,
     })
     if (Symbol.asyncIterator in result) {
       throw new Error("The assistant model returned a stream")
@@ -587,7 +698,7 @@ async function sendToCopilot(
     return replyText(getResponsesResultOutputText(result))
   }
   const result = await createAnthropicMessages(
-    await chatPayloadToAnthropic(payload, destination.selectedModel, signal),
+    await chatPayloadToAnthropic(payload, options.selectedModel, signal),
     { signal },
   )
   if (Symbol.asyncIterator in result) {
@@ -616,33 +727,55 @@ async function sendAssistantAttempt(
   options: { effort?: ReasoningEffort; signal?: AbortSignal },
 ): Promise<{ model: string; content: string }> {
   const { signal } = options
-  const payload = applyModelFallbackToPayload(structuredClone(source))
+  const route = resolveAssistantRoute(
+    source.model,
+    options.effort,
+    createAssistantRedirect(),
+  )
+  const payload = { ...structuredClone(source), model: route.model }
+  applyModelFallbackToPayload(payload, {
+    effort: route.effort,
+    verbosity: route.verbosity,
+  })
   const { model } = payload
-  const destination = resolveAssistantDestination(payload)
-  if (!destination) {
+  // A fallback rule's own effort and verbosity win for its target model.
+  const fallback = getModelFallbackRedirect()
+  const effort =
+    model === route.model && !fallback ?
+      route.effort
+    : normalizeReasoningEffortForModel(model, fallback?.effort ?? route.effort)
+  const reference = customChatReference(model)
+  if (reference) {
+    const result = await createCustomProviderChatCompletions(
+      reference,
+      { ...payload, model: reference.upstreamModel },
+      { signal, reasoningEffort: effort },
+    )
+    return { model, content: chatReplyText(result) }
+  }
+  // The account is chosen first; its own model row decides the endpoint.
+  const routed = await selectCatalogRoutedModel(model)
+  const selectedModel = routed.model
+  const endpoint = assistantEndpoint(payload, selectedModel)
+  if (!selectedModel || !endpoint) {
     throw new Error(
       `${model} cannot run AI Assist: it is not an available chat model`,
     )
   }
-  // A fallback rule's own effort wins for the model it falls back to.
-  const requested = getModelFallbackEffort(options.effort)
-  if (destination.kind === "custom") {
-    const result = await createCustomProviderChatCompletions(
-      destination.reference,
-      { ...payload, model: destination.reference.upstreamModel },
-      {
+  const sentEffort = copilotEffort(model, effort)
+  if (sentEffort) payload.reasoning_effort = sentEffort
+  const content = await runWithRoutedModelSelection(
+    routed,
+    async () =>
+      await sendToCopilot({
+        endpoint,
+        selectedModel,
+        payload,
+        verbosity: fallback?.verbosity ?? route.verbosity,
         signal,
-        reasoningEffort: normalizeReasoningEffortForModel(model, requested),
-      },
-    )
-    return { model, content: chatReplyText(result) }
-  }
-  const effort = copilotEffort(model, requested)
-  if (effort) payload.reasoning_effort = effort
-  return {
-    model,
-    content: await sendToCopilot(destination, payload, signal),
-  }
+      }),
+  )
+  return { model, content }
 }
 
 async function invokeAssistantModel(options: {
@@ -656,7 +789,8 @@ async function invokeAssistantModel(options: {
   const payload = assistantPayload(options.model, options.system, options.user)
   // A separate request: the held request's account, fallback, telemetry and
   // response headers stay untouched, and its own traffic is never intercepted.
-  // Configured model fallbacks apply as on the Chat Completions route.
+  // Model IDs, redirects and configured model fallbacks resolve as on the
+  // Chat Completions route.
   return await runAsIndependentRequest(
     "Intercept Assistant",
     async () =>

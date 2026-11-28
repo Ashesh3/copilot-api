@@ -56,7 +56,16 @@ import {
   summarizeItem,
 } from "./items"
 import { DEFAULT_INTERCEPT_CONFIG } from "./types"
-import { signalInterceptWait } from "./wait-signal"
+import { interceptWaitCancelSignal, signalInterceptWait } from "./wait-signal"
+
+/** The request's signal, also aborted when its client cancels the early stream. */
+function holdSignal(
+  signal: AbortSignal | null | undefined,
+): AbortSignal | undefined {
+  const cancelled = interceptWaitCancelSignal()
+  if (!cancelled) return signal ?? undefined
+  return signal ? AbortSignal.any([signal, cancelled]) : cancelled
+}
 
 export interface InterceptRequestInput {
   method: string
@@ -726,7 +735,11 @@ export class InterceptEngine {
     )
 
     signalInterceptWait()
-    const resolution = await this.enqueueItem(item, reservedBytes, input.signal)
+    const resolution = await this.enqueueItem(
+      item,
+      reservedBytes,
+      holdSignal(input.signal),
+    )
     if (resolution.action === "drop") {
       throw droppedError(resolution.reason, resolution.status)
     }
@@ -826,13 +839,17 @@ export class InterceptEngine {
     const confirmedAtStart = responseMatchConfirmed(this.config, context)
     // Reading the rest of the upstream stream can take as long as the hold.
     signalInterceptWait()
-    const copy = await this.captureResponse(input, {
-      expiresAtMs,
-      // Both the rules the read began under and the current rules must
-      // confirm the match before a timeout drops the response.
-      matchConfirmed: () =>
-        confirmedAtStart && responseMatchConfirmed(this.config, context),
-    })
+    const signal = holdSignal(input.signal)
+    const copy = await this.captureResponse(
+      { ...input, signal },
+      {
+        expiresAtMs,
+        // Both the rules the read began under and the current rules must
+        // confirm the match before a timeout drops the response.
+        matchConfirmed: () =>
+          confirmedAtStart && responseMatchConfirmed(this.config, context),
+      },
+    )
     if (!copy) return input.response
     if (
       !shouldIntercept(this.config, { ...context, responseBody: copy.text })
@@ -883,7 +900,7 @@ export class InterceptEngine {
       `[Intercept] Holding RESPONSE ${item.id.slice(0, 8)} ${input.response.status} ${input.path} (model=${item.model ?? "unknown"})`,
     )
 
-    const resolution = await this.enqueueItem(item, reservedBytes, input.signal)
+    const resolution = await this.enqueueItem(item, reservedBytes, signal)
     if (resolution.action === "forward" && resolution.body === copy.text) {
       return input.response
     }

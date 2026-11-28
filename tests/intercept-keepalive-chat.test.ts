@@ -4,6 +4,11 @@ import type { Model } from "~/services/copilot/get-models"
 
 import { setConfigForTest } from "~/lib/config"
 import { interceptEngine } from "~/lib/intercept/engine"
+import { respondWithInterceptKeepalive } from "~/lib/intercept/keepalive-response"
+import {
+  markStreamingClient,
+  signalInterceptWait,
+} from "~/lib/intercept/wait-signal"
 import { setModelFallbackConfigForTest } from "~/lib/model-fallback-config"
 import { setModelRedirectsForTest } from "~/lib/model-redirect"
 import { setModelSettingsForTest } from "~/lib/model-settings"
@@ -55,10 +60,8 @@ afterEach(() => {
   setConfigForTest(null)
 })
 
-test("a held Copilot Chat Completions stream gets a keepalive before forward", async () => {
-  interceptEngine.updateConfig({ enabled: true, direction: "request" })
-  await seedProtocolDatabase()
-  const response = await fetchServer(
+function sendChat(): Promise<Response> {
+  return fetchServer(
     new Request("http://localhost/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -72,28 +75,107 @@ test("a held Copilot Chat Completions stream gets a keepalive before forward", a
       }),
     }),
   )
-  expect(response.headers.get("content-type")).toContain("text/event-stream")
-  const stream = response.body as ReadableStream<Uint8Array> | null
-  const reader = stream?.getReader()
-  if (!reader) throw new Error("Expected a streaming body")
-  const decoder = new TextDecoder()
-  const first = await reader.read()
-  expect(decoder.decode(first.value)).toContain(SSE_HEARTBEAT_COMMENT)
+}
 
+async function openHeldChat() {
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  await seedProtocolDatabase()
+  const response = await sendChat()
+  expect(response.headers.get("content-type")).toContain("text/event-stream")
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader()
+  const first = await reader.read()
+  expect(new TextDecoder().decode(first.value)).toContain(SSE_HEARTBEAT_COMMENT)
   // The request is still held: nothing reached the upstream yet.
   expect(upstreamPaths).toEqual([])
   expect(interceptEngine.getSnapshot().pending).toHaveLength(1)
-  expect(interceptEngine.forwardAllPending()).toBe(1)
+  return reader
+}
 
+async function readRest(
+  reader: Awaited<ReturnType<typeof openHeldChat>>,
+): Promise<string> {
+  const decoder = new TextDecoder()
   let body = ""
   for (;;) {
     const chunk = await reader.read()
-    if (chunk.done) break
+    if (chunk.done) return body
     body += decoder.decode(chunk.value, { stream: true })
   }
+}
+
+test("a held Copilot Chat Completions stream gets a keepalive before forward", async () => {
+  const reader = await openHeldChat()
+  expect(interceptEngine.forwardAllPending()).toBe(1)
+
+  const body = await readRest(reader)
   expect(upstreamPaths).toEqual(["/chat/completions"])
   expect(body).toContain("keepalive answer")
   expect(body).toContain("[DONE]")
+})
+
+test("a complete reply to a held stream still arrives as chunks", async () => {
+  // An app reply that ignored `stream: true`, arriving after the hold began.
+  const response = await respondWithInterceptKeepalive({
+    respond: async () => {
+      markStreamingClient("chat")
+      signalInterceptWait()
+      await Bun.sleep(5)
+      return Response.json({
+        id: "chatcmpl-complete",
+        object: "chat.completion",
+        created: 1,
+        model: chatModel,
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            message: { role: "assistant", content: "complete answer" },
+          },
+        ],
+      })
+    },
+    decorate: () => undefined,
+  })
+
+  expect(response.headers.get("content-type")).toBe("text/event-stream")
+  const body = await response.text()
+  expect(body.startsWith(SSE_HEARTBEAT_COMMENT)).toBe(true)
+  expect(body).toContain('"content":"complete answer"')
+  expect(body).toContain("data: [DONE]")
+})
+
+test("cancelling a held stream drops the held request", async () => {
+  const reader = await openHeldChat()
+  await reader.cancel()
+
+  for (let tries = 0; tries < 50; tries += 1) {
+    if (interceptEngine.getSnapshot().pending.length === 0) break
+    await Bun.sleep(10)
+  }
+  expect(interceptEngine.getSnapshot().pending).toHaveLength(0)
+  expect(upstreamPaths).toEqual([])
+})
+
+test("the heartbeat kill switch keeps a held stream unopened", async () => {
+  process.env.COPILOT_API_DISABLE_SSE_HEARTBEAT = "1"
+  try {
+    interceptEngine.updateConfig({ enabled: true, direction: "request" })
+    await seedProtocolDatabase()
+    const pending = sendChat()
+    for (let tries = 0; tries < 50; tries += 1) {
+      if (interceptEngine.getSnapshot().pending.length > 0) break
+      await Bun.sleep(10)
+    }
+    const early = await Promise.race([pending, Bun.sleep(50).then(() => null)])
+    expect(early).toBeNull()
+
+    expect(interceptEngine.forwardAllPending()).toBe(1)
+    const body = await (await pending).text()
+    expect(body).not.toContain(SSE_HEARTBEAT_COMMENT)
+    expect(body).toContain("keepalive answer")
+  } finally {
+    delete process.env.COPILOT_API_DISABLE_SSE_HEARTBEAT
+  }
 })
 
 function model(id: string): Model {

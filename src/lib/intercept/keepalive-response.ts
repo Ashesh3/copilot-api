@@ -1,35 +1,60 @@
 import { randomUUID } from "node:crypto"
 
+import type { AnthropicResponse } from "~/routes/messages/anthropic-types"
+import type { ChatCompletionResponse } from "~/services/copilot/create-chat-completions"
+import type { ResponsesResult } from "~/services/copilot/create-responses"
+
+import { HTTPError, inspectHttpError } from "~/lib/error"
 import {
+  isHeartbeatDisabled,
   SSE_HEARTBEAT_COMMENT,
   SSE_HEARTBEAT_INTERVAL_MS,
 } from "~/lib/sse-lifecycle"
+import {
+  emitAnthropicResponseAsStream,
+  emitChatCompletionResponseAsStream,
+  emitResponsesResultAsStream,
+} from "~/routes/messages/web-search-helpers"
+import { emitResponsesFailureAsStream } from "~/routes/responses/stream-lifecycle"
 
-import { runWithInterceptWait, type StreamProtocol } from "./wait-signal"
+import {
+  type InterceptWait,
+  runWithInterceptWait,
+  type StreamingClient,
+  type StreamProtocol,
+} from "./wait-signal"
 
 const RESPONDED = Symbol("responded")
 
-const SSE_HEADERS = {
-  "cache-control": "no-cache",
-  connection: "keep-alive",
-  "content-type": "text/event-stream",
+const encoder = new TextEncoder()
+
+interface SseEvent {
+  event?: string
+  data: string
 }
 
-const encoder = new TextEncoder()
+interface SseWriter {
+  readonly aborted: boolean
+  readonly closed: boolean
+  writeSSE: (message: SseEvent) => Promise<void>
+}
 
 /**
  * Answer one inbound request. When its client expects an SSE response and the
  * request starts waiting on Intercept before `respond` settles, return a 200
  * SSE response at once and send heartbeats until `respond` settles, then
- * stream its body, or its error as the protocol's in-stream error. `respond`
- * runs to the end first, model fallback retries included, so nothing but
- * heartbeats is committed while the operator decides. It wraps the whole app
- * so the app's own context never sees the early response.
+ * stream its reply in the client's protocol. `respond` runs to the end first,
+ * model fallback retries included, so nothing but heartbeats is committed
+ * while the operator decides. It wraps the whole app so the app's own context
+ * never sees the early response; `decorate` adds the headers the app would
+ * have added to it. The heartbeat kill switch turns the early response off.
  */
-export async function respondWithInterceptKeepalive(
-  respond: () => Promise<Response>,
-): Promise<Response> {
-  const { wait, result: response } = runWithInterceptWait(respond)
+export async function respondWithInterceptKeepalive(options: {
+  respond: () => Promise<Response>
+  decorate: (headers: Headers) => void
+}): Promise<Response> {
+  if (isHeartbeatDisabled()) return await options.respond()
+  const { wait, result: response } = runWithInterceptWait(options.respond)
   const first = await Promise.race([
     response.then(
       () => RESPONDED,
@@ -37,72 +62,83 @@ export async function respondWithInterceptKeepalive(
     ),
     wait.started,
   ])
-  if (first === RESPONDED || !wait.protocol) return await response
-  return keepAliveUntil(wait.protocol, response)
+  const { client } = wait
+  if (first === RESPONDED || !client) return await response
+  const headers = new Headers({
+    "cache-control": "no-cache",
+    connection: "keep-alive",
+    "content-type": "text/event-stream",
+  })
+  if (client.requestId) headers.set("x-request-id", client.requestId)
+  options.decorate(headers)
+  return new Response(keepAliveUntil({ wait, client, pending: response }), {
+    headers,
+  })
 }
 
-function keepAliveUntil(
-  protocol: StreamProtocol,
-  pending: Promise<Response>,
-): Response {
+function keepAliveUntil(options: {
+  wait: InterceptWait
+  client: StreamingClient
+  pending: Promise<Response>
+}): ReadableStream<Uint8Array> {
+  const { wait } = options
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
   const writer = writable.getWriter()
-  // A client that left fails the write; its request signal ends the work.
+  let delivering = false
   const beat = () => {
     writer.write(encoder.encode(SSE_HEARTBEAT_COMMENT)).catch(() => undefined)
   }
   beat()
   const timer = setInterval(beat, SSE_HEARTBEAT_INTERVAL_MS)
-  void pending
+  // A cancelled response errors the writable side: release what the request
+  // still waits on, so a held item drops instead of going upstream later.
+  writer.closed.catch(() => {
+    if (delivering) return
+    clearInterval(timer)
+    wait.cancel.abort()
+  })
+  void options.pending
     .catch(() => undefined)
     .then(async (response) => {
       clearInterval(timer)
-      await deliver({ protocol, response, writer, writable })
+      if (wait.cancel.signal.aborted) {
+        void response?.body?.cancel().catch(() => undefined)
+        return
+      }
+      delivering = true
+      await deliver({ client: options.client, response, writer, writable })
     })
-  return new Response(readable, { headers: SSE_HEADERS })
+  return readable
 }
 
 async function deliver(options: {
-  protocol: StreamProtocol
+  client: StreamingClient
   response: Response | undefined
   writer: WritableStreamDefaultWriter<Uint8Array>
   writable: WritableStream<Uint8Array>
 }): Promise<void> {
-  const { response, writer } = options
+  const { client, response, writer } = options
   if (response?.ok && isEventStream(response) && response.body) {
     writer.releaseLock()
     // Closes with the body; a client that leaves cancels the body too.
     await response.body.pipeTo(options.writable).catch(() => undefined)
     return
   }
-  const failure = await readFailure(response)
+  const sse: SseWriter = {
+    aborted: false,
+    closed: false,
+    writeSSE: async ({ event, data }) => {
+      const prefix = event ? `event: ${event}\n` : ""
+      await writer.write(encoder.encode(`${prefix}data: ${data}\n\n`))
+    },
+  }
   try {
-    await writer.write(encoder.encode(errorEvent(options.protocol, failure)))
+    await (response?.ok ?
+      writeCompleted(client, response, sse)
+    : writeFailure(client, response, sse))
     await writer.close()
   } catch {
     // The client already left.
-  }
-}
-
-/** What a non-stream answer says; a successful one is discarded. */
-async function readFailure(
-  response: Response | undefined,
-): Promise<RouteFailure> {
-  if (!response) {
-    return { status: 500, text: "", fallback: "The request failed" }
-  }
-  if (response.ok) {
-    void response.body?.cancel().catch(() => undefined)
-    return {
-      status: response.status,
-      text: "",
-      fallback: "The gateway did not return a stream",
-    }
-  }
-  return {
-    status: response.status,
-    text: await response.text().catch(() => ""),
-    fallback: `The request failed with status ${response.status}`,
   }
 }
 
@@ -119,6 +155,69 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+/** A complete non-stream reply (a provider that ignored `stream`), as a stream. */
+async function writeCompleted(
+  client: StreamingClient,
+  response: Response,
+  sse: SseWriter,
+): Promise<void> {
+  const body: unknown = await response.json().catch(() => undefined)
+  if (!isRecord(body)) {
+    await writeFailure(client, undefined, sse)
+    return
+  }
+  switch (client.protocol) {
+    case "chat": {
+      await emitChatCompletionResponseAsStream(
+        sse,
+        body as unknown as ChatCompletionResponse,
+        { writeDone: true },
+      )
+
+      break
+    }
+    case "messages": {
+      await emitAnthropicResponseAsStream(sse, body as AnthropicResponse)
+
+      break
+    }
+    case "responses": {
+      await emitResponsesResultAsStream(sse, body as unknown as ResponsesResult)
+
+      break
+    }
+    default: {
+      // A Google stream chunk is a complete GenerateContentResponse.
+      await sse.writeSSE({ data: JSON.stringify(body) })
+    }
+  }
+}
+
+/** The app's error reply as the protocol's in-stream failure. */
+async function writeFailure(
+  client: StreamingClient,
+  response: Response | undefined,
+  sse: SseWriter,
+): Promise<void> {
+  if (client.protocol === "responses") {
+    // Classified like any other Responses stream failure, retry-after kept.
+    await emitResponsesFailureAsStream(sse, {
+      responseId: `resp_${randomUUID().replaceAll("-", "")}`,
+      model: client.model ?? "unknown",
+      inspection:
+        response ?
+          await inspectHttpError(new HTTPError("Request failed", response))
+        : undefined,
+    })
+    return
+  }
+  const status = response?.status ?? 500
+  const text = response ? await response.text().catch(() => "") : ""
+  for (const event of errorEvents(client.protocol, status, text)) {
+    await sse.writeSSE(event)
+  }
+}
+
 function parseJson(text: string): unknown {
   try {
     return JSON.parse(text)
@@ -127,70 +226,30 @@ function parseJson(text: string): unknown {
   }
 }
 
-function stringField(
-  record: Record<string, unknown> | undefined,
-  key: string,
-): string | undefined {
-  const value = record?.[key]
-  return typeof value === "string" && value ? value : undefined
-}
-
-function sseEvent(event: string, data: unknown): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
-}
-
-interface RouteFailure {
-  status: number
-  /** The body the route answered with. */
-  text: string
-  /** The message when the body carries none. */
-  fallback: string
-}
-
-/** The error a route answered with, framed as its protocol's stream error. */
-function errorEvent(protocol: StreamProtocol, failure: RouteFailure): string {
-  const body = parseJson(failure.text)
+/** The error body a route answered with, framed as its stream error. */
+function errorEvents(
+  protocol: Exclude<StreamProtocol, "responses">,
+  status: number,
+  text: string,
+): Array<SseEvent> {
+  const body = parseJson(text)
   const error = isRecord(body) && isRecord(body.error) ? body.error : undefined
   const message =
-    stringField(error, "message") ?? (failure.text.trim() || failure.fallback)
+    (typeof error?.message === "string" && error.message)
+    || text.trim()
+    || `The request failed with status ${status}`
   if (protocol === "messages") {
-    return sseEvent(
-      "error",
+    const data =
       isRecord(body) && body.type === "error" && error ?
         body
-      : { type: "error", error: { type: "api_error", message } },
-    )
+      : { type: "error", error: { type: "api_error", message } }
+    return [{ event: "error", data: JSON.stringify(data) }]
   }
   if (protocol === "chat") {
     const data = error ? body : { error: { message, type: "api_error" } }
-    return `data: ${JSON.stringify(data)}\n\ndata: [DONE]\n\n`
+    return [{ data: JSON.stringify(data) }, { data: "[DONE]" }]
   }
-  if (protocol === "google") {
-    const data =
-      error ? body : (
-        { error: { code: failure.status, message, status: "INTERNAL" } }
-      )
-    return `data: ${JSON.stringify(data)}\n\n`
-  }
-  return sseEvent("response.failed", {
-    type: "response.failed",
-    sequence_number: 0,
-    response: {
-      id: `resp_${randomUUID().replaceAll("-", "")}`,
-      object: "response",
-      created_at: Math.floor(Date.now() / 1000),
-      status: "failed",
-      output: [],
-      output_text: "",
-      usage: null,
-      error: {
-        code:
-          stringField(error, "code")
-          ?? stringField(error, "type")
-          ?? "server_error",
-        message,
-      },
-      incomplete_details: null,
-    },
-  })
+  const data =
+    error ? body : { error: { code: status, message, status: "INTERNAL" } }
+  return [{ data: JSON.stringify(data) }]
 }

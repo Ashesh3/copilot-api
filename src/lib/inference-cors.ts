@@ -138,18 +138,31 @@ function isInferenceRoute(
   )
 }
 
+/** The origin granted CORS access for a request, if any. */
+export function grantedInferenceOrigin(request: {
+  origin: string | undefined
+  path: string
+  method: string | undefined
+}): string | undefined {
+  const { origin, method } = request
+  if (origin === undefined || !allowedOrigins().has(origin)) return undefined
+  if (method === undefined || !isInferenceRoute(request.path, method)) {
+    return undefined
+  }
+  return origin
+}
+
 export const inferenceCors: MiddlewareHandler = async (c, next) => {
   const origin = c.req.header("origin")
-  const originAllowed = origin !== undefined && allowedOrigins().has(origin)
-  const requestedMethod =
-    c.req.method === "OPTIONS" ?
-      c.req.header("access-control-request-method")
-    : c.req.method
   const allowed =
-    originAllowed
-    && requestedMethod !== undefined
-    && isInferenceRoute(c.req.path, requestedMethod)
-
+    grantedInferenceOrigin({
+      origin,
+      path: c.req.path,
+      method:
+        c.req.method === "OPTIONS" ?
+          c.req.header("access-control-request-method")
+        : c.req.method,
+    }) !== undefined
   if (c.req.method === "OPTIONS") {
     if (!allowed) return c.json({ error: "Not found" }, 404)
     c.header("Access-Control-Allow-Origin", origin)

@@ -96,6 +96,40 @@ test("a held stream the operator drops ends with an Anthropic error event", asyn
   expect(body).toContain('"type":"permission_error"')
 })
 
+test("the early response carries the CORS grant and request ID", async () => {
+  process.env.COPILOT_INFERENCE_CORS_ORIGINS = "https://app.example"
+  try {
+    interceptEngine.updateConfig({ enabled: true, direction: "request" })
+    await seedProtocolDatabase()
+    const response = await fetchServer(
+      new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+          "content-type": "application/json",
+          origin: "https://app.example",
+          "x-request-id": "req-keepalive-1",
+        },
+        body: JSON.stringify({
+          model: claudeModel,
+          max_tokens: 64,
+          stream: true,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      }),
+    )
+    expect(response.headers.get("access-control-allow-origin")).toBe(
+      "https://app.example",
+    )
+    expect(response.headers.get("x-request-id")).toBe("req-keepalive-1")
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff")
+    expect(interceptEngine.forwardAllPending()).toBe(1)
+    expect(await response.text()).toContain("message_stop")
+  } finally {
+    delete process.env.COPILOT_INFERENCE_CORS_ORIGINS
+  }
+})
+
 async function expectKeepaliveBeforeForward(
   modelId: string,
   upstreamPath: string,

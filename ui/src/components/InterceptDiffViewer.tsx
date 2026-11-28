@@ -50,14 +50,64 @@ function itemText(item: CanonicalItem): string {
     : item.content
 }
 
-/** Warns when an edit's `find` text does not occur exactly once in its item. */
-function editMatchNote(item: CanonicalItem, find: string): string {
-  const text = itemText(item)
+/**
+ * Why an edit's `find` text would be refused in `text`, mirroring the server's
+ * `applyTextEdit`: it must occur exactly once, overlapping matches included.
+ */
+function editMatchProblem(text: string, find: string): string | undefined {
   const first = find ? text.indexOf(find) : -1
-  if (first === -1) return " · text not found in item"
-  return text.includes(find, first + find.length) ?
-      " · text matches more than once"
-    : ""
+  if (first === -1) return "text not found in item"
+  return text.includes(find, first + 1) ?
+      "text matches more than once"
+    : undefined
+}
+
+/**
+ * Match notes per operation, evaluated the way the server applies them: in
+ * order, each edit against the text the preceding selected operations on the
+ * same item left. Deselected edits are checked but do not change the text;
+ * once a selected edit fails, the server rejects the set, so later edits on
+ * that item are not checked further.
+ */
+function editMatchNotes(
+  operations: ReadonlyArray<AssistantDiffOp>,
+  selected: ReadonlyArray<boolean>,
+  items: ReadonlyArray<CanonicalItem>,
+): Array<string> {
+  // Text per item after the selected operations so far; `null` once an edit failed.
+  const texts = new Map<string, string | null>()
+  const textOf = (id: string): string | null | undefined => {
+    if (texts.has(id)) return texts.get(id)
+    const item = items.find((entry) => entry.id === id)
+    return item ? itemText(item) : undefined
+  }
+
+  return operations.map((op, index) => {
+    if (op.op === "replace") {
+      const text = textOf(op.id)
+      const item = items.find((entry) => entry.id === op.id)
+      const next =
+        item?.kind === "tool_call" ?
+          (op.toolArguments ?? op.content)
+        : op.content
+      if (selected[index] && text !== null && next !== undefined) {
+        texts.set(op.id, next)
+      }
+      return ""
+    }
+    if (op.op !== "edit") return ""
+    const text = textOf(op.id)
+    if (text === undefined) return ""
+    if (text === null) return " · blocked by an earlier failing edit"
+    const problem = editMatchProblem(text, op.find)
+    if (selected[index]) {
+      texts.set(
+        op.id,
+        problem === undefined ? text.replace(op.find, () => op.replace) : null,
+      )
+    }
+    return problem === undefined ? "" : ` · ${problem}`
+  })
 }
 
 /** Executable identity of a tool item; changes here alter what the client runs. */
@@ -171,6 +221,11 @@ export function InterceptDiffViewer({
   const selectedOps = suggestion.operations.filter(
     (_, index) => selected[index],
   )
+  const matchNotes = editMatchNotes(
+    suggestion.operations,
+    selected,
+    currentItems,
+  )
   const opCount = suggestion.operations.length
 
   return (
@@ -273,9 +328,7 @@ export function InterceptDiffViewer({
                       {target ?
                         ` · ${target.label || KIND_LABEL[target.kind]}`
                       : " · not found"}
-                      {op.op === "edit" && target ?
-                        editMatchNote(target, op.find)
-                      : null}
+                      {matchNotes[index]}
                       {(
                         op.op === "replace"
                         && op.toolName !== undefined

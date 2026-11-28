@@ -101,6 +101,47 @@ test.each([
   },
 )
 
+test("a held Responses stream the operator drops fails as a permanent refusal", async () => {
+  state.models = { object: "list", data: [model("/responses")] }
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  await seedProtocolDatabase()
+  const response = await fetchServer(
+    new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: routeModel, input: "hello", stream: true }),
+    }),
+  )
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader()
+  const decoder = new TextDecoder()
+  expect(decoder.decode((await reader.read()).value)).toContain(
+    SSE_HEARTBEAT_COMMENT,
+  )
+  expect(interceptEngine.dropAllPending("Not this one")).toBe(1)
+
+  let text = ""
+  for (;;) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    text += decoder.decode(chunk.value, { stream: true })
+  }
+  const failed = text
+    .split("\n")
+    .find(
+      (line) => line.startsWith("data: ") && line.includes("response.failed"),
+    )
+  const event = JSON.parse(failed?.slice(6) ?? "{}") as {
+    response?: { model?: string; error?: { code?: string } }
+  }
+  expect(upstreamPaths).toEqual([])
+  // Codex stops on invalid_prompt; an unknown code would be retried.
+  expect(event.response?.error?.code).toBe("invalid_prompt")
+  expect(event.response?.model).toBe(routeModel)
+})
+
 test("a held Google streamGenerateContent SSE gets a keepalive before forward", async () => {
   state.models = { object: "list", data: [model("/chat/completions")] }
   interceptEngine.updateConfig({ enabled: true, direction: "request" })

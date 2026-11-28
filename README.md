@@ -867,7 +867,12 @@ Turning Intercept off forwards everything it holds, including responses still
 being read. While a streaming request is held, or its response is read for
 review, the client's stream is opened and kept alive with SSE keep-alive
 frames, so clients and proxies do not time out while the operator decides;
-errors after that point arrive as in-stream errors.
+errors after that point arrive as in-stream errors. That early response
+carries the gateway's CORS, security, and request ID headers, but not headers
+decided later, such as header-based model fallback notices. Codex counts only
+Responses events, not keep-alive frames, so it may abandon a hold longer than
+about five minutes. `COPILOT_API_DISABLE_SSE_HEARTBEAT` turns the early
+response off along with other heartbeats.
 
 AI Assist sends a selected model a system prompt, the operator's user message,
 and a structured view of the held item: message text, tool calls, and tool

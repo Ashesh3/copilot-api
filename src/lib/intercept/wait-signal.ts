@@ -1,7 +1,17 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 
-/** The client's wire protocol, which decides how a late error is framed. */
+import { getRequestId } from "~/lib/request-session"
+
+/** The client's wire protocol, which decides how a late reply is framed. */
 export type StreamProtocol = "chat" | "messages" | "responses" | "google"
+
+/** What the route reported about its client once it parsed the request. */
+export interface StreamingClient {
+  protocol: StreamProtocol
+  /** The requested model, which a Responses failure envelope names. */
+  model?: string
+  requestId?: string
+}
 
 /**
  * Per inbound request: whether its client expects an SSE response, and
@@ -12,8 +22,9 @@ export type StreamProtocol = "chat" | "messages" | "responses" | "google"
  */
 export interface InterceptWait {
   readonly started: Promise<undefined>
-  /** Set by the route once it parsed a request that expects an SSE response. */
-  protocol?: StreamProtocol
+  /** Aborted when the client cancels the early response. */
+  readonly cancel: AbortController
+  client?: StreamingClient
 }
 
 interface InterceptWaitState extends InterceptWait {
@@ -30,6 +41,7 @@ export function runWithInterceptWait<T>(work: () => T): {
   const { promise, resolve } = Promise.withResolvers<undefined>()
   const wait: InterceptWaitState = {
     started: promise,
+    cancel: new AbortController(),
     start: () => {
       resolve(undefined)
     },
@@ -38,12 +50,20 @@ export function runWithInterceptWait<T>(work: () => T): {
 }
 
 /** The client of the current request expects an SSE response. */
-export function markStreamingClient(protocol: StreamProtocol): void {
+export function markStreamingClient(
+  protocol: StreamProtocol,
+  model?: string,
+): void {
   const wait = waitStorage.getStore()
-  if (wait) wait.protocol = protocol
+  if (wait) wait.client = { protocol, model, requestId: getRequestId() }
 }
 
 /** The current request has started waiting on Intercept. */
 export function signalInterceptWait(): void {
   waitStorage.getStore()?.start()
+}
+
+/** Aborted once the client of the current request cancels its early stream. */
+export function interceptWaitCancelSignal(): AbortSignal | undefined {
+  return waitStorage.getStore()?.cancel.signal
 }

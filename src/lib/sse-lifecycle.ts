@@ -67,7 +67,7 @@ export const resetSseHeartbeatCountForTest = (): void => {
  * without a redeploy if a client is ever found to mishandle comment frames.
  * Read per-call rather than cached so it can be toggled in tests.
  */
-const isHeartbeatDisabled = (): boolean =>
+export const isHeartbeatDisabled = (): boolean =>
   Boolean(process.env.COPILOT_API_DISABLE_SSE_HEARTBEAT)
 
 /** Sentinel distinguishing a timer win from a genuine upstream value. */
