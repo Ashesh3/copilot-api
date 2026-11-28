@@ -103,6 +103,14 @@ function mapContent<Content>(
   }) as Content
 }
 
+/** Responses instruction text may arrive as either input or output text. */
+function isMergeableTextType(edgeType: unknown, blockType: string): boolean {
+  return (
+    edgeType === blockType
+    || (blockType === "input_text" && edgeType === "output_text")
+  )
+}
+
 function insertContent<Block extends object>(
   content: string | Array<Block> | null | undefined,
   block: Block & { type: string; text: string },
@@ -117,7 +125,7 @@ function insertContent<Block extends object>(
   if (
     edge
     && "type" in edge
-    && edge.type === block.type
+    && isMergeableTextType(edge.type, block.type)
     && "text" in edge
     && typeof edge.text === "string"
   ) {

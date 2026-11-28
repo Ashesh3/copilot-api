@@ -251,6 +251,37 @@ test("compaction places an end append after the configured prompt and before sum
   expect(result.instructions).toBe("Top\n\nBase\n\nBottom\n\nSummarize.")
 })
 
+test("Responses force append merges into edge output_text blocks with a separator", () => {
+  configure([
+    { mode: "append", prompt: "Top" },
+    { mode: "append", prompt: "Bottom", position: "end" },
+  ])
+  const payload: ResponsesPayload = {
+    model: MODEL,
+    input: [
+      {
+        role: "system",
+        content: [
+          { type: "output_text", text: "First", annotations: [] },
+          { type: "output_text", text: "Last", annotations: [] },
+        ],
+      },
+      { role: "user", content: "Hello" },
+    ],
+  } as unknown as ResponsesPayload
+
+  forceResponsesSystemPrompt(payload, MODEL)
+
+  const [systemItem] = payload.input as Array<unknown>
+  expect(systemItem).toEqual({
+    role: "system",
+    content: [
+      { type: "output_text", text: "Top\n\nFirst", annotations: [] },
+      { type: "output_text", text: "Last\n\nBottom", annotations: [] },
+    ],
+  })
+})
+
 test("Messages replaces all system blocks and custom instruction turns with metadata intact", () => {
   configure([
     { mode: "replace", find: "OLD", replacement: "NEW" },
