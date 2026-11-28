@@ -37,6 +37,7 @@ const ASSISTANT: InterceptAssistantConfig = {
   autopilot: "off",
   model: "source-model",
   systemPrompt: "",
+  reasoningEffort: "low",
   instructionMode: "shared",
   sharedInstruction: "Rewrite the user turn",
   requestInstruction: "",
@@ -203,13 +204,23 @@ test("without a fallback rule the 422 reaches the operator", async () => {
   expect(calls.map((call) => call.model)).toEqual(["source-model"])
 })
 
-test("a model served only through the Responses API is offered and called there", async () => {
+test("a Responses-only model is offered and called there with the configured effort", async () => {
+  const base = model("responses-model")
   state.models = {
     object: "list",
     data: [
-      { ...model("responses-model"), supported_endpoints: ["/responses"] },
+      {
+        ...base,
+        supported_endpoints: ["/responses"],
+        // The model's default is its first level, so "low" must be the setting.
+        capabilities: {
+          ...base.capabilities,
+          supports: { reasoning_effort: ["medium", "high", "low"] },
+        },
+      },
     ],
   }
+  let sentReasoning: unknown
   const operations: Array<AssistantDiffOp> = [
     { op: "edit", id: "msg-0", find: "hello", replace: "hi" },
   ]
@@ -218,6 +229,7 @@ test("a model served only through the Responses API is offered and called there"
     const url = new URL(input instanceof Request ? input.url : String(input))
     const body = JSON.parse(init?.body as string) as Record<string, unknown>
     calls.push({ path: url.pathname, model: body.model, stream: body.stream })
+    sentReasoning = body.reasoning
     return Promise.resolve(
       Response.json({
         id: "resp_assistant",
@@ -253,4 +265,5 @@ test("a model served only through the Responses API is offered and called there"
 
   expect(calls.map((call) => call.path)).toEqual(["/responses"])
   expect(suggestion.operations).toEqual(reply.operations)
+  expect(sentReasoning).toMatchObject({ effort: "low" })
 })

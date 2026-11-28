@@ -17,8 +17,10 @@ import {
   runWithModelFallback,
 } from "~/lib/model-fallback"
 import {
+  getModelReasoningConfig,
   normalizeReasoningEffortForModel,
   type ReasoningEffort,
+  usesImplicitReasoningDefault,
 } from "~/lib/model-suffix"
 import { runAsIndependentRequest } from "~/lib/request-scopes"
 import { state } from "~/lib/state"
@@ -568,22 +570,17 @@ function chatReplyText(
 async function sendToCopilot(
   destination: Extract<AssistantDestination, { kind: "copilot" }>,
   payload: ChatCompletionsPayload,
-  options: { effort?: ReasoningEffort; signal?: AbortSignal },
+  signal: AbortSignal | undefined,
 ): Promise<string> {
-  const { effort, signal } = options
   if (destination.endpoint === "/chat/completions") {
-    if (effort) payload.reasoning_effort = effort
     return chatReplyText(await createChatCompletions(payload, { signal }))
   }
   if (destination.endpoint === "/responses") {
-    const result = await createResponses(
-      chatCompletionsToResponses(payload, effort),
-      {
-        vision: false,
-        initiator: detectInitiator(payload.messages),
-        signal,
-      },
-    )
+    const result = await createResponses(chatCompletionsToResponses(payload), {
+      vision: false,
+      initiator: detectInitiator(payload.messages),
+      signal,
+    })
     if (Symbol.asyncIterator in result) {
       throw new Error("The assistant model returned a stream")
     }
@@ -599,11 +596,26 @@ async function sendToCopilot(
   return chatReplyText(anthropicResponseToChat(result, payload.model))
 }
 
+/**
+ * The effort a Copilot model receives: clamped to its levels, and none for a
+ * model without levels or one configured to keep its implicit default.
+ */
+function copilotEffort(
+  model: string,
+  requested: ReasoningEffort | undefined,
+): ReasoningEffort | undefined {
+  if (!getModelReasoningConfig(model) || usesImplicitReasoningDefault(model)) {
+    return undefined
+  }
+  return normalizeReasoningEffortForModel(model, requested)
+}
+
 /** One attempt; the fallback runner supplies the model for retries. */
 async function sendAssistantAttempt(
   source: ChatCompletionsPayload,
-  signal: AbortSignal | undefined,
+  options: { effort?: ReasoningEffort; signal?: AbortSignal },
 ): Promise<{ model: string; content: string }> {
+  const { signal } = options
   const payload = applyModelFallbackToPayload(structuredClone(source))
   const { model } = payload
   const destination = resolveAssistantDestination(payload)
@@ -612,21 +624,24 @@ async function sendAssistantAttempt(
       `${model} cannot run AI Assist: it is not an available chat model`,
     )
   }
-  const effort = normalizeReasoningEffortForModel(
-    model,
-    getModelFallbackEffort(),
-  )
+  // A fallback rule's own effort wins for the model it falls back to.
+  const requested = getModelFallbackEffort(options.effort)
   if (destination.kind === "custom") {
     const result = await createCustomProviderChatCompletions(
       destination.reference,
       { ...payload, model: destination.reference.upstreamModel },
-      { signal, reasoningEffort: effort },
+      {
+        signal,
+        reasoningEffort: normalizeReasoningEffortForModel(model, requested),
+      },
     )
     return { model, content: chatReplyText(result) }
   }
+  const effort = copilotEffort(model, requested)
+  if (effort) payload.reasoning_effort = effort
   return {
     model,
-    content: await sendToCopilot(destination, payload, { effort, signal }),
+    content: await sendToCopilot(destination, payload, signal),
   }
 }
 
@@ -634,9 +649,10 @@ async function invokeAssistantModel(options: {
   model: string
   system: string
   user: string
+  effort?: ReasoningEffort
   signal?: AbortSignal
 }): Promise<{ model: string; content: string }> {
-  const { signal } = options
+  const { effort, signal } = options
   const payload = assistantPayload(options.model, options.system, options.user)
   // A separate request: the held request's account, fallback, telemetry and
   // response headers stay untouched, and its own traffic is never intercepted.
@@ -648,7 +664,7 @@ async function invokeAssistantModel(options: {
         async () =>
           await runWithModelFallback(
             { payload, signal },
-            async () => await sendAssistantAttempt(payload, signal),
+            async () => await sendAssistantAttempt(payload, { effort, signal }),
           ),
       ),
   )
@@ -694,10 +710,12 @@ export async function runInterceptAssistant(
     instruction,
     systemPrompt: options.config.systemPrompt,
   })
+  const { reasoningEffort } = options.config
   const reply = await invokeAssistantModel({
     model,
     system: prompt.system,
     user: prompt.user,
+    effort: reasoningEffort === "default" ? undefined : reasoningEffort,
     signal,
   })
   const { summary, operations } = parseAssistantDiffResponse(reply.content)

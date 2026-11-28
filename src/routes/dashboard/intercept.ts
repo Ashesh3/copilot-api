@@ -20,6 +20,7 @@ import {
   StaleRevisionError,
 } from "~/lib/intercept/engine"
 import { validateFilterRegex } from "~/lib/intercept/filters"
+import { INTERCEPT_ASSISTANT_EFFORTS } from "~/lib/intercept/types"
 
 const filterConditionSchema = z
   .object({
@@ -71,6 +72,7 @@ const configPatchSchema = z.object({
       autoRun: z.boolean(),
       autopilot: z.enum(["off", "request", "response", "both"]).default("off"),
       model: z.string().max(256),
+      reasoningEffort: z.enum(INTERCEPT_ASSISTANT_EFFORTS),
       systemPrompt: z.string().max(16000),
       instructionMode: z.enum(["shared", "separate"]),
       sharedInstruction: z.string().max(16000),

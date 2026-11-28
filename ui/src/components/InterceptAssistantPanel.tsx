@@ -15,9 +15,27 @@ import { TextInput } from "@astryxdesign/core/TextInput"
 
 import type {
   InterceptAssistantConfig,
+  InterceptAssistantEffort,
   InterceptAutopilot,
   InterceptPhase,
 } from "../../../src/lib/intercept/types"
+
+const EFFORT_LABELS: Record<InterceptAssistantEffort, string> = {
+  default: "Model default",
+  none: "None",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Max",
+}
+
+const EFFORT_OPTIONS = (
+  Object.entries(EFFORT_LABELS) as Array<[InterceptAssistantEffort, string]>
+).map(([value, label]) => ({ value, label }))
+
+const MODEL_DESCRIPTION = "Runs as its own request; model fallbacks apply."
 
 const AUTOPILOT_PHASES: Record<InterceptAutopilot, Array<InterceptPhase>> = {
   off: [],
@@ -115,6 +133,7 @@ export function InterceptAssistantPanel({
           {modelOptions.length > 0 ?
             <Selector
               label="Model"
+              description={MODEL_DESCRIPTION}
               placeholder="Choose a model"
               value={assistant.model || undefined}
               options={modelOptions}
@@ -123,11 +142,26 @@ export function InterceptAssistantPanel({
           : <TextInput
               className="intercept-mono-field"
               label="Model"
+              description={MODEL_DESCRIPTION}
               placeholder="gpt-4.1-mini"
               value={assistant.model}
               onChange={(model) => onChange({ ...assistant, model })}
             />
           }
+          <Selector
+            label="Reasoning effort"
+            description="Lower is faster. Clamped to the levels the model supports."
+            value={assistant.reasoningEffort}
+            options={EFFORT_OPTIONS}
+            onChange={(value) => {
+              const option = EFFORT_OPTIONS.find(
+                (entry) => entry.value === value,
+              )
+              if (option) {
+                onChange({ ...assistant, reasoningEffort: option.value })
+              }
+            }}
+          />
         </div>
 
         <div className="intercept-assistant-section">

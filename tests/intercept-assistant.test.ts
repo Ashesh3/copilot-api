@@ -32,6 +32,7 @@ const ASSISTANT: InterceptAssistantConfig = {
   autopilot: "off",
   model: "test-model",
   systemPrompt: "",
+  reasoningEffort: "low",
   instructionMode: "shared",
   sharedInstruction: "Rewrite the user turn",
   requestInstruction: "",

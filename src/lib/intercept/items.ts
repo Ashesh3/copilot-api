@@ -55,6 +55,7 @@ export function normalizeAssistant(
     autoRun: assistant.autoRun,
     autopilot: assistant.autopilot,
     model: assistant.model.trim(),
+    reasoningEffort: assistant.reasoningEffort,
     systemPrompt: assistant.systemPrompt,
     instructionMode:
       assistant.instructionMode === "separate" ? "separate" : "shared",

@@ -873,6 +873,9 @@ and a structured view of the held item: message text, tool calls, and tool
 results, with images, documents, and signed or encrypted blocks named but not
 included. Any model the Chat Completions route can serve is available,
 including Copilot models reached only through the Responses or Messages APIs.
+Its reasoning effort defaults to low for speed, is clamped to the levels the
+model supports, and is not sent to models without reasoning levels; "Model
+default" leaves it to the model, and a fallback rule's own effort still wins.
 The system prompt is editable (blank uses the default); the reply format the
 gateway parses is always appended to it. The model replies with edit
 operations, preferably find-and-replace edits of just the changed text, which

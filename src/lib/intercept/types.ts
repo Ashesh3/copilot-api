@@ -46,6 +46,21 @@ export type InterceptInstructionMode = "shared" | "separate"
 /** Directions in which Autopilot applies the assistant's changes and forwards. */
 export type InterceptAutopilot = "off" | InterceptDirection
 
+/** AI Assist reasoning effort; "default" sends none, so the model's default applies. */
+export const INTERCEPT_ASSISTANT_EFFORTS = [
+  "default",
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const
+
+export type InterceptAssistantEffort =
+  (typeof INTERCEPT_ASSISTANT_EFFORTS)[number]
+
 export interface InterceptAssistantConfig {
   enabled: boolean
   /** Auto-run assistant LLM as soon as an item is intercepted. */
@@ -56,6 +71,8 @@ export interface InterceptAssistantConfig {
    */
   autopilot: InterceptAutopilot
   model: string
+  /** Clamped to the levels the model supports; ignored by models without any. */
+  reasoningEffort: InterceptAssistantEffort
   /**
    * The assistant's system prompt: role and editing style. The reply format
    * contract is always appended to it.
@@ -283,6 +300,7 @@ export const DEFAULT_INTERCEPT_CONFIG: InterceptConfig = {
     autoRun: true,
     autopilot: "off",
     model: "",
+    reasoningEffort: "low",
     systemPrompt: DEFAULT_ASSISTANT_SYSTEM_PROMPT,
     instructionMode: "shared",
     sharedInstruction: "",
