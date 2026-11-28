@@ -56,6 +56,7 @@ import {
   summarizeItem,
 } from "./items"
 import { DEFAULT_INTERCEPT_CONFIG } from "./types"
+import { signalInterceptWait } from "./wait-signal"
 
 export interface InterceptRequestInput {
   method: string
@@ -724,6 +725,7 @@ export class InterceptEngine {
       `[Intercept] Holding REQUEST ${item.id.slice(0, 8)} ${input.method} ${input.path} (model=${item.model ?? "unknown"})`,
     )
 
+    signalInterceptWait()
     const resolution = await this.enqueueItem(item, reservedBytes, input.signal)
     if (resolution.action === "drop") {
       throw droppedError(resolution.reason, resolution.status)
@@ -822,6 +824,8 @@ export class InterceptEngine {
 
     const expiresAtMs = Date.now() + this.config.timeoutSeconds * 1000
     const confirmedAtStart = responseMatchConfirmed(this.config, context)
+    // Reading the rest of the upstream stream can take as long as the hold.
+    signalInterceptWait()
     const copy = await this.captureResponse(input, {
       expiresAtMs,
       // Both the rules the read began under and the current rules must

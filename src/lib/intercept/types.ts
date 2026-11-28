@@ -1,3 +1,5 @@
+import { DEFAULT_ASSISTANT_SYSTEM_PROMPT } from "./assistant-prompt"
+
 export type InterceptDirection = "both" | "request" | "response"
 
 export type InterceptPhase = "request" | "response"
@@ -54,6 +56,11 @@ export interface InterceptAssistantConfig {
    */
   autopilot: InterceptAutopilot
   model: string
+  /**
+   * The assistant's system prompt: role and editing style. The reply format
+   * contract is always appended to it.
+   */
+  systemPrompt: string
   instructionMode: InterceptInstructionMode
   sharedInstruction: string
   requestInstruction: string
@@ -123,6 +130,14 @@ export interface CanonicalView {
 }
 
 export type AssistantDiffOp =
+  | {
+      /** Replace the single exact occurrence of `find` in the item's text. */
+      op: "edit"
+      id: string
+      find: string
+      replace: string
+      reason?: string
+    }
   | {
       op: "replace"
       id: string
@@ -268,6 +283,7 @@ export const DEFAULT_INTERCEPT_CONFIG: InterceptConfig = {
     autoRun: true,
     autopilot: "off",
     model: "",
+    systemPrompt: DEFAULT_ASSISTANT_SYSTEM_PROMPT,
     instructionMode: "shared",
     sharedInstruction: "",
     requestInstruction: "",

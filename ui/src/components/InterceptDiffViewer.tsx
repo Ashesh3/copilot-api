@@ -37,9 +37,27 @@ interface InterceptDiffViewerProps {
 }
 
 const OP_LABEL: Record<AssistantDiffOp["op"], string> = {
+  edit: "Edit",
   replace: "Replace",
   delete: "Delete",
   insert_after: "Insert",
+}
+
+/** Text an item is reviewed and edited by: tool calls by their arguments. */
+function itemText(item: CanonicalItem): string {
+  return item.kind === "tool_call" && !item.opaque ?
+      (item.toolArguments ?? item.content)
+    : item.content
+}
+
+/** Warns when an edit's `find` text does not occur exactly once in its item. */
+function editMatchNote(item: CanonicalItem, find: string): string {
+  const text = itemText(item)
+  const first = find ? text.indexOf(find) : -1
+  if (first === -1) return " · text not found in item"
+  return text.includes(find, first + find.length) ?
+      " · text matches more than once"
+    : ""
 }
 
 /** Executable identity of a tool item; changes here alter what the client runs. */
@@ -88,14 +106,7 @@ function OpDiff({
   op: AssistantDiffOp
   target: CanonicalItem | undefined
 }) {
-  // Tool calls are reviewed by their arguments, as the editor shows them.
-  let targetText = "(item not found)"
-  if (target) {
-    targetText =
-      target.kind === "tool_call" && !target.opaque ?
-        (target.toolArguments ?? target.content)
-      : target.content
-  }
+  const targetText = target ? itemText(target) : "(item not found)"
   if (op.op === "delete") {
     return (
       <div className="intercept-diff is-single">
@@ -105,6 +116,14 @@ function OpDiff({
           text={targetText}
           facts={target}
         />
+      </div>
+    )
+  }
+  if (op.op === "edit") {
+    return (
+      <div className="intercept-diff">
+        <DiffSide tone="before" label="Removed" text={op.find} facts={target} />
+        <DiffSide tone="after" label="Added" text={op.replace} />
       </div>
     )
   }
@@ -252,8 +271,11 @@ export function InterceptDiffViewer({
                   : <Text type="supporting">
                       <code>{op.id}</code>
                       {target ?
-                        ` · ${KIND_LABEL[target.kind]}`
+                        ` · ${target.label || KIND_LABEL[target.kind]}`
                       : " · not found"}
+                      {op.op === "edit" && target ?
+                        editMatchNote(target, op.find)
+                      : null}
                       {(
                         op.op === "replace"
                         && op.toolName !== undefined

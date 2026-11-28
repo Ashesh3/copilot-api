@@ -27,7 +27,10 @@ import type {
 } from "../../../src/lib/intercept/types"
 
 import { EmptyState } from "../components/common"
-import { InterceptAssistantPanel } from "../components/InterceptAssistantPanel"
+import {
+  InterceptAssistantPanel,
+  type InterceptAssistantDefaults,
+} from "../components/InterceptAssistantPanel"
 import { InterceptDetail } from "../components/InterceptDetail"
 import { InterceptFiltersPanel } from "../components/InterceptFiltersPanel"
 import {
@@ -49,6 +52,7 @@ const API = "/dashboard/api/intercept"
 
 interface InterceptStateResponse extends InterceptSnapshot {
   availableModels: Array<string>
+  assistantDefaults: InterceptAssistantDefaults
 }
 
 interface ConfigUpdateResponse {
@@ -562,6 +566,7 @@ export default function InterceptScreen() {
         </div>
         <InterceptAssistantPanel
           assistant={assistant}
+          assistantDefaults={state.assistantDefaults}
           availableModels={state.availableModels}
           onChange={setAssistantDraft}
         />

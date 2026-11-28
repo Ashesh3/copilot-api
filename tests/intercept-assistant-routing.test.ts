@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 
 import type {
+  AssistantDiffOp,
   InterceptAssistantConfig,
   InterceptPendingItem,
 } from "~/lib/intercept/types"
 import type { Model } from "~/services/copilot/get-models"
 
 import { setConfigForTest } from "~/lib/config"
-import { runInterceptAssistant } from "~/lib/intercept/assistant"
+import {
+  listAssistantModels,
+  runInterceptAssistant,
+} from "~/lib/intercept/assistant"
 import {
   setModelFallbackConfigForTest,
   validateModelFallbackConfig,
@@ -32,6 +36,7 @@ const ASSISTANT: InterceptAssistantConfig = {
   autoRun: false,
   autopilot: "off",
   model: "source-model",
+  systemPrompt: "",
   instructionMode: "shared",
   sharedInstruction: "Rewrite the user turn",
   requestInstruction: "",
@@ -196,4 +201,56 @@ test("without a fallback rule the 422 reaches the operator", async () => {
 
   expect(failure).toBeInstanceOf(Error)
   expect(calls.map((call) => call.model)).toEqual(["source-model"])
+})
+
+test("a model served only through the Responses API is offered and called there", async () => {
+  state.models = {
+    object: "list",
+    data: [
+      { ...model("responses-model"), supported_endpoints: ["/responses"] },
+    ],
+  }
+  const operations: Array<AssistantDiffOp> = [
+    { op: "edit", id: "msg-0", find: "hello", replace: "hi" },
+  ]
+  const reply = { summary: "Greeting changed", operations }
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    const body = JSON.parse(init?.body as string) as Record<string, unknown>
+    calls.push({ path: url.pathname, model: body.model, stream: body.stream })
+    return Promise.resolve(
+      Response.json({
+        id: "resp_assistant",
+        object: "response",
+        created_at: 1,
+        model: body.model,
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            id: "msg_assistant",
+            role: "assistant",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: JSON.stringify(reply),
+                annotations: [],
+              },
+            ],
+          },
+        ],
+        usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+      }),
+    )
+  }) as typeof fetch
+
+  expect(listAssistantModels()).toEqual(["responses-model"])
+  const suggestion = await runInterceptAssistant({
+    item: heldItem(),
+    config: { ...ASSISTANT, model: "responses-model" },
+  })
+
+  expect(calls.map((call) => call.path)).toEqual(["/responses"])
+  expect(suggestion.operations).toEqual(reply.operations)
 })

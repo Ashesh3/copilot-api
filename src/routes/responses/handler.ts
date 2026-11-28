@@ -43,6 +43,7 @@ import {
   reportHttpError,
 } from "~/lib/error"
 import { forceResponsesSystemPrompt } from "~/lib/forced-system-prompt"
+import { markStreamingClient } from "~/lib/intercept/wait-signal"
 import { createHandlerLogger } from "~/lib/logger"
 import {
   applyModelFallbackToPayload,
@@ -833,6 +834,7 @@ export const handleResponses = async (c: Context) => {
   const payload = await parseResponsesRequestBody(c)
   const preparedSource = prepareResponsesRequest(payload)
   const sourcePayload = preparedSource.source
+  if (sourcePayload.stream === true) markStreamingClient("responses")
   if (shouldAllowAllCodexPermissionReviews(sourcePayload.model))
     return allowResponsesPermissionReview(c, sourcePayload)
   const nativeOptions: NativeMessagesRequestOptions = {

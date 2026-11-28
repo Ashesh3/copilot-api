@@ -9,6 +9,10 @@ import {
   assistantDiffOpsSchema,
   listAssistantModels,
 } from "~/lib/intercept/assistant"
+import {
+  ASSISTANT_RESPONSE_CONTRACT,
+  DEFAULT_ASSISTANT_SYSTEM_PROMPT,
+} from "~/lib/intercept/assistant-prompt"
 import { CanonicalEditError } from "~/lib/intercept/canonical"
 import {
   CaptureBudgetError,
@@ -67,6 +71,7 @@ const configPatchSchema = z.object({
       autoRun: z.boolean(),
       autopilot: z.enum(["off", "request", "response", "both"]).default("off"),
       model: z.string().max(256),
+      systemPrompt: z.string().max(16000),
       instructionMode: z.enum(["shared", "separate"]),
       sharedInstruction: z.string().max(16000),
       requestInstruction: z.string().max(16000),
@@ -185,6 +190,10 @@ export function handleGetInterceptState(c: Context) {
   return c.json({
     ...interceptEngine.getSnapshot(),
     availableModels: listAssistantModels(),
+    assistantDefaults: {
+      systemPrompt: DEFAULT_ASSISTANT_SYSTEM_PROMPT,
+      responseFormat: ASSISTANT_RESPONSE_CONTRACT,
+    },
   })
 }
 

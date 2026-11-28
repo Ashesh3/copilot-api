@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { randomUUID } from "node:crypto"
 
 import { resolveCopilotRequestAttribution } from "~/lib/copilot-request-context"
+import { respondWithInterceptKeepalive } from "~/lib/intercept/keepalive-response"
 import { runWithRequestRoutingScopes } from "~/lib/request-scopes"
 import { resolveRoutingAffinityFromHeaders } from "~/lib/routing-affinity"
 import { webToolsMiddleware } from "~/services/web/middleware"
@@ -280,3 +281,10 @@ server.route("/v1beta/models", googleAIRoutes)
 server.route("/models", googleAIRoutes)
 
 server.all("*", transparentProxy)
+
+/** The app's entry point: Intercept keeps held streaming requests alive. */
+export async function fetchServer(request: Request): Promise<Response> {
+  return await respondWithInterceptKeepalive(
+    async () => await server.fetch(request),
+  )
+}
