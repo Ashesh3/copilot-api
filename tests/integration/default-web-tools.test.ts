@@ -6,6 +6,13 @@ import { state } from "~/lib/state"
 import { executeWebSearch } from "~/services/copilot/mcp-web-search"
 
 import { isGithubOrigin } from "../helpers/github-origin"
+import {
+  bufferedAnswer,
+  expectPageContent,
+  finishHostedPageRead,
+  type HostedPageReadRecord,
+  startHostedPageRead,
+} from "./hosted-page-reads"
 import { rejectsModelAsUnsupported, test } from "./live-models"
 import { rankToolCapableResponsesModels } from "./model-candidates"
 import { initializeTestState, postJSON, useIntegrationFixture } from "./setup"
@@ -36,97 +43,16 @@ const originalFetch = globalThis.fetch
 const destinations: Array<{ host: string; path: string; status: number }> = []
 const pageOriginAttempts: Array<string> = []
 const openedUrls: Array<string> = []
-type HostedPageRead = "ok" | "cache_miss" | "error"
 /** How GitHub's hosted reader answered each page read in the running test. */
-const hostedPageReads: Array<{ result: HostedPageRead }> = []
+const hostedPageReads: Array<HostedPageReadRecord> = []
 let model = ""
-
-const HOSTED_READER_MARKER = "GitHub-hosted webpage reader"
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
-/** Text of the message blocks in a Messages, Responses, or reader result. */
-function messageText(value: unknown): string {
-  if (!isRecord(value)) return ""
-  const messages =
-    Array.isArray(value.output) ?
-      value.output.filter(
-        (item: unknown) =>
-          isRecord(item)
-          && item.type === "message"
-          && item.role === "assistant",
-      )
-    : [value]
-  return messages
-    .flatMap((message: unknown) =>
-      isRecord(message) && Array.isArray(message.content) ?
-        (message.content as Array<unknown>)
-      : [],
-    )
-    .map((part) =>
-      (
-        isRecord(part)
-        && (part.type === "text" || part.type === "output_text")
-        && typeof part.text === "string"
-      ) ?
-        part.text
-      : "",
-    )
-    .join("")
-}
-
-function bufferedAnswer(body: string): string {
-  try {
-    return messageText(JSON.parse(body) as unknown)
-  } catch {
-    return ""
-  }
-}
-
-/**
- * A read counts as a cache miss only when GitHub completed the request and the
- * reader's structured answer reports that failure. Anything else is an error.
- */
-function hostedPageReadResult(value: unknown): HostedPageRead {
-  if (!isRecord(value) || value.status !== "completed" || value.error)
-    return "error"
-  let answer: unknown
-  try {
-    answer = JSON.parse(
-      messageText(value)
-        .replace(/^```(?:json)?\s*/u, "")
-        .replace(/\s*```$/u, ""),
-    ) as unknown
-  } catch {
-    return "error"
-  }
-  if (!isRecord(answer) || typeof answer.content !== "string") return "error"
-  if (answer.status === "ok") return "ok"
-  return answer.status === "error" && /cache miss/iu.test(answer.content) ?
-      "cache_miss"
-    : "error"
-}
-
-/** Record a reader request as an error until its response is classified. */
-function startHostedPageRead(
-  url: URL,
-  init: RequestInit | undefined,
-): { result: HostedPageRead } | undefined {
-  if (
-    url.pathname !== "/responses"
-    || typeof init?.body !== "string"
-    || !init.body.includes(HOSTED_READER_MARKER)
-  )
-    return undefined
-  const read = { result: "error" as HostedPageRead }
-  hostedPageReads.push(read)
-  return read
-}
-
 function recordResponsesOutput(
   value: unknown,
-  read: { result: HostedPageRead } | undefined,
+  read: HostedPageReadRecord | undefined,
 ): void {
   const output =
     isRecord(value) && Array.isArray(value.output) ? value.output : []
@@ -140,32 +66,7 @@ function recordResponsesOutput(
     )
       openedUrls.push(item.action.url)
   }
-  if (read) read.result = hostedPageReadResult(value)
-}
-
-/**
- * GitHub's hosted reader is sometimes unable to open any page and answers
- * "Cache miss" for every URL, whatever the gateway sends. The gateway then
- * reports the failure, so the page-content check becomes a warning only when
- * every hosted page read in the test failed that way and the client still
- * received an answer. All other checks run.
- */
-function expectPageContent(label: string, text: string, answer: string): void {
-  const unavailable =
-    hostedPageReads.length > 0
-    && hostedPageReads.every((read) => read.result === "cache_miss")
-  if (unavailable && !text.includes("Example Domain")) {
-    expect(answer.trim()).not.toBe("")
-    const message = `Skipped the page-content check in live test "${label}": GitHub-hosted page reading answered "Cache miss" for every page it opened.`
-    console.warn(message)
-    if (process.env.GITHUB_ACTIONS === "true") {
-      process.stdout.write(
-        `::warning file=tests/integration/default-web-tools.test.ts,title=GitHub-hosted page reading unavailable::${message}\n`,
-      )
-    }
-    return
-  }
-  expect(text).toContain("Example Domain")
+  finishHostedPageRead(read, value)
 }
 
 beforeEach(async () => {
@@ -198,7 +99,7 @@ beforeEach(async () => {
       pageOriginAttempts.push(url.hostname)
       throw new Error("Web tool attempted forbidden page-origin egress")
     }
-    const read = startHostedPageRead(url, init)
+    const read = startHostedPageRead(hostedPageReads, url, init)
     const response = await originalFetch(input, init)
     if (
       url.pathname === "/responses"
@@ -247,7 +148,12 @@ test("live default web search searches and opens pages entirely on GitHub", asyn
   ).toBe(true)
   expect(openedUrls).toContain("https://example.com/")
   expect(pageOriginAttempts).toEqual([])
-  expectPageContent("live default web search", body, bufferedAnswer(body))
+  expectPageContent({
+    label: "live default web search",
+    reads: hostedPageReads,
+    text: body,
+    answer: bufferedAnswer(body),
+  })
   expect(body).not.toContain('"name":"_copilot_web_')
 }, 180_000)
 
@@ -282,7 +188,12 @@ test("live Responses clients open pages on GitHub without client configuration",
   ).toBe(true)
   expect(openedUrls).toContain("https://example.com/")
   expect(pageOriginAttempts).toEqual([])
-  expectPageContent("live Responses clients", body, bufferedAnswer(body))
+  expectPageContent({
+    label: "live Responses clients",
+    reads: hostedPageReads,
+    text: body,
+    answer: bufferedAnswer(body),
+  })
   expect(body).not.toContain(
     '"type":"function_call","name":"_copilot_web_search"',
   )
@@ -306,7 +217,12 @@ test("live streaming page reading stays GitHub-only with one terminal", async ()
   expect(openedUrls).toContain("https://example.com/")
   expect(pageOriginAttempts).toEqual([])
   const answer = streamedText(body)
-  expectPageContent("live streaming page reading", answer, answer)
+  expectPageContent({
+    label: "live streaming page reading",
+    reads: hostedPageReads,
+    text: answer,
+    answer,
+  })
   expect(body.match(/event: message_stop/g)).toHaveLength(1)
   expect(body).not.toContain('"name":"_copilot_web_')
 }, 180_000)
