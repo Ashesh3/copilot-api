@@ -315,6 +315,49 @@ test.each(["start", "end"] as const)(
   },
 )
 
+test("Chat and Messages force append at the end keep a separator when refilling an emptied last block", () => {
+  configure([
+    { mode: "replace", find: "Remove me", replacement: "" },
+    { mode: "append", prompt: "Added", position: "end" },
+  ])
+  const chat: { messages: Array<Message> } = {
+    messages: [
+      {
+        role: "system",
+        content: [
+          { type: "text", text: "Client system" },
+          { type: "text", text: "Remove me" },
+        ],
+      },
+      { role: "user", content: "Hello" },
+    ],
+  }
+  const messages: AnthropicMessagesPayload = {
+    model: MODEL,
+    system: [
+      { type: "text", text: "Client system" },
+      { type: "text", text: "Remove me", cache_control: { type: "ephemeral" } },
+    ],
+    messages: [{ role: "user", content: "Hello" }],
+  }
+
+  forceChatSystemPrompt(chat, MODEL)
+  forceMessagesSystemPrompt(messages, MODEL)
+
+  expect(chat.messages[0].content).toEqual([
+    { type: "text", text: "Client system" },
+    { type: "text", text: "\n\nAdded" },
+  ])
+  expect(messages.system).toEqual([
+    { type: "text", text: "Client system" },
+    {
+      type: "text",
+      text: "\n\nAdded",
+      cache_control: { type: "ephemeral" },
+    },
+  ])
+})
+
 test("Messages replaces all system blocks and custom instruction turns with metadata intact", () => {
   configure([
     { mode: "replace", find: "OLD", replacement: "NEW" },
@@ -469,7 +512,11 @@ test.each([false, true])(
     expect(payload.system).toEqual(
       append ?
         [
-          { type: "text", text: "New", cache_control: { type: "ephemeral" } },
+          {
+            type: "text",
+            text: "New\n\n",
+            cache_control: { type: "ephemeral" },
+          },
           { type: "text", text: "Keep" },
         ]
       : [{ type: "text", text: "Keep" }],

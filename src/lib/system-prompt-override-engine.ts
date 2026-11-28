@@ -139,11 +139,10 @@ function insertContent<Block extends object>(
     && typeof edge.text === "string"
   ) {
     let text = write.add(edge.text, block.text, position)
-    // Responses-to-Chat translation joins text blocks directly, so an emptied
-    // Responses edge block still needs a separator from the text beside it.
+    // Translators join instruction blocks with "", " ", or "\n", so an emptied
+    // edge block keeps the usual blank-line separator from the text beside it.
     const joinsOtherText =
-      block.type === "input_text"
-      && !edge.text
+      !edge.text
       && content.some(
         (item, itemIndex) => itemIndex !== index && hasBlockText(item),
       )
