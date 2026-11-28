@@ -3,10 +3,12 @@ import { afterEach, describe, expect, test } from "bun:test"
 import {
   buildAssistantPrompt,
   type InterceptAssistantResult,
-  isInterceptBypassed,
   parseAssistantDiffResponse,
-  runBypassingIntercept,
 } from "~/lib/intercept/assistant"
+import {
+  isInterceptBypassed,
+  runBypassingIntercept,
+} from "~/lib/intercept/assistant-model"
 import {
   applyCanonicalDiffOps,
   parseCanonicalView,
@@ -22,6 +24,7 @@ import {
 import {
   type AssistantDiffOp,
   DEFAULT_INTERCEPT_CONFIG,
+  INTERCEPT_ASSISTANT_KINDS,
   type InterceptAssistantConfig,
   type InterceptFilterCondition,
 } from "~/lib/intercept/types"
@@ -507,6 +510,8 @@ function suggestion(
     previewBody: null,
     previewCanonical: null,
     durationMs: 0,
+    reusedItemCount: 0,
+    reusedOperationCount: 0,
   }
 }
 
@@ -516,6 +521,7 @@ const AUTOPILOT_ASSISTANT: Omit<InterceptAssistantConfig, "autopilot"> = {
   model: "test-model",
   systemPrompt: "",
   reasoningEffort: "low",
+  messageKinds: [...INTERCEPT_ASSISTANT_KINDS],
   instructionMode: "shared",
   sharedInstruction: "Rewrite the user turn",
   requestInstruction: "",

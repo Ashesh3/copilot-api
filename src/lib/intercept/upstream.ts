@@ -7,7 +7,7 @@ import {
 import { replaceModelFallbackResponse } from "~/lib/model-fallback"
 import { getClientSessionId } from "~/lib/request-session"
 
-import { isInterceptBypassed } from "./assistant"
+import { isInterceptBypassed } from "./assistant-model"
 import { extractModelFromBody } from "./canonical"
 import { type InterceptRequestSnapshot, interceptEngine } from "./engine"
 import { replayConflictError } from "./items"

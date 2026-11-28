@@ -21,6 +21,7 @@ import type {
   InterceptConfig,
   InterceptDirection,
   InterceptFilterConfig,
+  InterceptItemSummary,
   InterceptPendingItem,
   InterceptSnapshot,
   InterceptTimeoutAction,
@@ -28,6 +29,7 @@ import type {
 
 import { EmptyState } from "../components/common"
 import {
+  assistantSettingsError,
   InterceptAssistantPanel,
   type InterceptAssistantDefaults,
 } from "../components/InterceptAssistantPanel"
@@ -49,6 +51,19 @@ import {
 import { useToast } from "../lib/toast"
 
 const API = "/dashboard/api/intercept"
+/** Live updates; while it is not open, the state is polled instead. */
+const SOCKET_PATH = `${API}/ws`
+const POLL_MS = 4000
+const RECONNECT_MIN_MS = 1000
+const RECONNECT_MAX_MS = 30_000
+
+/** JSON text frames sent by the live-updates socket. */
+type SocketMessage =
+  | { event: "snapshot"; data: { snapshot: InterceptSnapshot } }
+  | { event: "config"; data: { config: InterceptConfig } }
+  | { event: "queued" | "updated"; data: { item: InterceptItemSummary } }
+  | { event: "resolved"; data: { id: string } }
+  | { event: "ping"; data: number }
 
 interface InterceptStateResponse extends InterceptSnapshot {
   availableModels: Array<string>
@@ -78,15 +93,58 @@ function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback
 }
 
-/** Item id carried by `queued` / `updated` (item.id) and `resolved` (id) events. */
-function eventItemId(data: string): string | undefined {
+function parseSocketMessage(data: unknown): SocketMessage | undefined {
+  if (typeof data !== "string") return undefined
   try {
-    const parsed = JSON.parse(data) as { id?: unknown; item?: { id?: unknown } }
-    const id = parsed.item?.id ?? parsed.id
-    return typeof id === "string" ? id : undefined
+    return JSON.parse(data) as SocketMessage
   } catch {
     return undefined
   }
+}
+
+/** Held items stay ordered oldest first, as in the server snapshot. */
+function withQueued(
+  state: InterceptStateResponse,
+  item: InterceptItemSummary,
+): InterceptStateResponse {
+  const pending = [
+    ...state.pending.filter((entry) => entry.id !== item.id),
+    item,
+  ].sort((a, b) => a.createdAtMs - b.createdAtMs)
+  return {
+    ...state,
+    pending,
+    stats: { ...state.stats, pendingCount: pending.length },
+  }
+}
+
+function replaceSummary(
+  list: Array<InterceptItemSummary>,
+  item: InterceptItemSummary,
+): Array<InterceptItemSummary> | undefined {
+  if (!list.some((entry) => entry.id === item.id)) return undefined
+  return list.map((entry) => (entry.id === item.id ? item : entry))
+}
+
+/**
+ * Items outside both lists have aged out of Recent (or are announced by a
+ * later frame), so an update for one changes nothing shown.
+ */
+function withUpdated(
+  state: InterceptStateResponse,
+  item: InterceptItemSummary,
+): InterceptStateResponse {
+  const pending = replaceSummary(state.pending, item)
+  if (pending) return { ...state, pending }
+  const recent = replaceSummary(state.recent, item)
+  return recent ? { ...state, recent } : state
+}
+
+function assistantFailureMessage(item: InterceptItemSummary): string {
+  const name = `${item.phase} ${item.id.slice(0, 8)}`
+  return item.assistantError ?
+      `AI Assist failed for ${name}: ${item.assistantError}`
+    : `AI Assist failed for ${name}`
 }
 
 function rulesFromConfig(config: InterceptConfig): RulesDraft {
@@ -126,6 +184,11 @@ export default function InterceptScreen() {
   const [isDisabling, setIsDisabling] = useState(false)
   const effectiveIdRef = useRef<string | undefined>(undefined)
   const refreshSeqRef = useRef(0)
+  /** Sequence number of the state GET still awaited, if any. */
+  const refreshInFlightRef = useRef<number | undefined>(undefined)
+  const hasStateRef = useRef(false)
+  /** Last seen AI Assist status per item, to toast each new failure once. */
+  const assistantStatusRef = useRef<ReadonlyMap<string, string> | null>(null)
   // Bumped whenever an edit response replaces the detail, so a detail GET
   // that started earlier cannot overwrite it with an older body.
   const detailWriteRef = useRef(0)
@@ -134,20 +197,26 @@ export default function InterceptScreen() {
   // while this screen is mounted, may update state.
   const refresh = useCallback(async () => {
     const seq = ++refreshSeqRef.current
+    refreshInFlightRef.current = seq
     const ticket = beginInterceptDraftSnapshot()
     try {
       const next = await get<InterceptStateResponse>(API)
       if (seq !== refreshSeqRef.current) return
+      hasStateRef.current = true
       setState(next)
       retainHeldInterceptDrafts(ticket, next.pending)
       setLoadError(null)
     } catch (err) {
       if (seq !== refreshSeqRef.current) return
       setLoadError(errorMessage(err, "Could not load intercept state"))
+    } finally {
+      if (refreshInFlightRef.current === seq) {
+        refreshInFlightRef.current = undefined
+      }
     }
   }, [])
 
-  /** Summaries and the selected item's detail, for reconnects and Refresh. */
+  /** Summaries and the selected item's detail, for polling and Refresh. */
   const refreshAll = useCallback(async () => {
     setDetailVersion((version) => version + 1)
     await refresh()
@@ -162,43 +231,146 @@ export default function InterceptScreen() {
 
   useEffect(() => {
     void refresh()
-    const source = new EventSource(`${API}/events`)
+    let socket: WebSocket | undefined
     let hasOpened = false
-    // Events may have been missed while disconnected; reload the selected
-    // detail as well as the summaries.
-    const handleOpen = () => {
-      if (hasOpened) void refreshAll()
-      hasOpened = true
+    let retryDelay = RECONNECT_MIN_MS
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    let pollTimer: ReturnType<typeof setInterval> | undefined
+
+    // While the socket is down, poll so the page never goes stale.
+    const startPolling = () => {
+      pollTimer ??= setInterval(() => void refreshAll(), POLL_MS)
     }
-    const handleStateEvent = () => {
-      void refresh()
+    const stopPolling = () => {
+      clearInterval(pollTimer)
+      pollTimer = undefined
     }
-    const handleItemEvent = (event: MessageEvent<string>) => {
-      void refresh()
-      const id = eventItemId(event.data)
-      if (id !== undefined && id === effectiveIdRef.current) {
+
+    const reloadDetail = (id?: string) => {
+      if (id === undefined || id === effectiveIdRef.current) {
         setDetailVersion((version) => version + 1)
       }
     }
-    source.addEventListener("open", handleOpen)
-    source.addEventListener("snapshot", handleStateEvent)
-    source.addEventListener("config", handleStateEvent)
-    source.addEventListener("queued", handleStateEvent)
-    source.addEventListener("updated", handleItemEvent)
-    source.addEventListener("resolved", handleItemEvent)
+
+    // Socket frames arrive in server order, so applying them supersedes any
+    // state GET still in flight; that GET is reissued so nothing it was
+    // fetched for is lost. Before the first GET lands there is nothing to
+    // patch (the snapshot lacks the model list), so a GET loads everything.
+    const applyEvent = (
+      update: (prev: InterceptStateResponse) => InterceptStateResponse,
+    ) => {
+      if (!hasStateRef.current) {
+        void refresh()
+        return
+      }
+      const interrupted = refreshInFlightRef.current !== undefined
+      refreshSeqRef.current += 1
+      setState((prev) => (prev ? update(prev) : prev))
+      if (interrupted) void refresh()
+    }
+
+    const applyMessage = (message: SocketMessage) => {
+      switch (message.event) {
+        case "snapshot": {
+          // Drafts are pruned by GETs only: a snapshot sent by the server
+          // cannot prove an item resolved before a draft for it was opened.
+          const { snapshot } = message.data
+          applyEvent((prev) => ({ ...prev, ...snapshot }))
+          break
+        }
+        case "config": {
+          const { config } = message.data
+          applyEvent((prev) => ({ ...prev, config }))
+          break
+        }
+        case "queued": {
+          const { item } = message.data
+          applyEvent((prev) => withQueued(prev, item))
+          break
+        }
+        case "updated": {
+          const { item } = message.data
+          applyEvent((prev) => withUpdated(prev, item))
+          reloadDetail(item.id)
+          break
+        }
+        case "resolved": {
+          // Moving an item to Recent changes counts the event does not carry.
+          void refresh()
+          reloadDetail(message.data.id)
+          break
+        }
+        default: {
+          // `ping` only keeps idle proxies from closing the socket.
+          break
+        }
+      }
+    }
+
+    const handleOpen = () => {
+      retryDelay = RECONNECT_MIN_MS
+      stopPolling()
+      // The first frame is a snapshot of the summaries; events for the
+      // selected item may have been missed while disconnected.
+      if (hasOpened) reloadDetail()
+      hasOpened = true
+    }
+    const handleMessage = (event: MessageEvent) => {
+      const message = parseSocketMessage(event.data)
+      if (message) applyMessage(message)
+    }
+    // Reconnect with backoff; poll until the socket is open again.
+    const handleClose = (event: CloseEvent) => {
+      if (event.target !== socket) return
+      socket = undefined
+      startPolling()
+      retryTimer = setTimeout(connect, retryDelay)
+      retryDelay = Math.min(retryDelay * 2, RECONNECT_MAX_MS)
+    }
+
+    function connect() {
+      retryTimer = undefined
+      const url = new URL(SOCKET_PATH, globalThis.location.href)
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+      socket = new WebSocket(url)
+      socket.addEventListener("open", handleOpen)
+      socket.addEventListener("message", handleMessage)
+      socket.addEventListener("close", handleClose)
+    }
+
+    startPolling()
+    connect()
     const seqRef = refreshSeqRef
     return () => {
       // Responses still in flight belong to this mount; ignore them.
       seqRef.current += 1
-      source.removeEventListener("open", handleOpen)
-      source.removeEventListener("snapshot", handleStateEvent)
-      source.removeEventListener("config", handleStateEvent)
-      source.removeEventListener("queued", handleStateEvent)
-      source.removeEventListener("updated", handleItemEvent)
-      source.removeEventListener("resolved", handleItemEvent)
-      source.close()
+      stopPolling()
+      clearTimeout(retryTimer)
+      socket?.removeEventListener("open", handleOpen)
+      socket?.removeEventListener("message", handleMessage)
+      socket?.removeEventListener("close", handleClose)
+      socket?.close()
+      socket = undefined
     }
   }, [refresh, refreshAll])
+
+  // Toast each AI Assist failure once, when an item's status turns to error.
+  useEffect(() => {
+    if (!state) return
+    const previous = assistantStatusRef.current
+    const next = new Map<string, string>()
+    for (const item of [...state.pending, ...state.recent]) {
+      next.set(item.id, item.assistantStatus)
+      if (
+        previous
+        && item.assistantStatus === "error"
+        && previous.get(item.id) !== "error"
+      ) {
+        toast.error(assistantFailureMessage(item))
+      }
+    }
+    assistantStatusRef.current = next
+  }, [state, toast])
 
   const listItems =
     queueView === "pending" ? (state?.pending ?? []) : (state?.recent ?? [])
@@ -353,6 +525,7 @@ export default function InterceptScreen() {
   }
 
   const saveAssistant = async () => {
+    if (assistantSettingsError(assistant)) return
     setIsSaving(true)
     const saved = await patchConfig({ assistant })
     setIsSaving(false)
@@ -559,7 +732,10 @@ export default function InterceptScreen() {
               label="Save assistant"
               variant="primary"
               isLoading={isSaving}
-              isDisabled={!assistantDirty}
+              isDisabled={
+                !assistantDirty
+                || assistantSettingsError(assistant) !== undefined
+              }
               onClick={() => void saveAssistant()}
             />
           </HStack>

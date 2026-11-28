@@ -61,6 +61,19 @@ export const INTERCEPT_ASSISTANT_EFFORTS = [
 export type InterceptAssistantEffort =
   (typeof INTERCEPT_ASSISTANT_EFFORTS)[number]
 
+/** Message types AI Assist can read and change, in prompt order. */
+export const INTERCEPT_ASSISTANT_KINDS = [
+  "system",
+  "developer",
+  "user",
+  "assistant",
+  "thinking",
+  "tool_call",
+  "tool_result",
+] as const
+
+export type InterceptAssistantKind = (typeof INTERCEPT_ASSISTANT_KINDS)[number]
+
 export interface InterceptAssistantConfig {
   enabled: boolean
   /** Auto-run assistant LLM as soon as an item is intercepted. */
@@ -73,6 +86,8 @@ export interface InterceptAssistantConfig {
   model: string
   /** Clamped to the levels the model supports; ignored by models without any. */
   reasoningEffort: InterceptAssistantEffort
+  /** Only items of these kinds are sent to the assistant and may be changed. */
+  messageKinds: Array<InterceptAssistantKind>
   /**
    * The assistant's system prompt: role and editing style. The reply format
    * contract is always appended to it.
@@ -193,6 +208,13 @@ export interface AssistantSuggestion {
   durationMs: number
   /** Item revision the assistant read; applying it to a newer revision is refused. */
   revision: number
+  /**
+   * Items whose earlier result in this Intercept session was reused instead of
+   * sending them to the model again.
+   */
+  reusedItemCount: number
+  /** The first this-many operations are those reused results. */
+  reusedOperationCount: number
 }
 
 export type InterceptItemStatus =
@@ -270,6 +292,7 @@ export interface InterceptItemSummary {
   preview: string
   assistantStatus: InterceptPendingItem["assistantStatus"]
   assistantOpCount: number
+  assistantError?: string
   autopilot: boolean
 }
 
@@ -301,6 +324,7 @@ export const DEFAULT_INTERCEPT_CONFIG: InterceptConfig = {
     autopilot: "off",
     model: "",
     reasoningEffort: "low",
+    messageKinds: [...INTERCEPT_ASSISTANT_KINDS],
     systemPrompt: DEFAULT_ASSISTANT_SYSTEM_PROMPT,
     instructionMode: "shared",
     sharedInstruction: "",

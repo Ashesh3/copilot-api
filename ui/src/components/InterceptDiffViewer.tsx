@@ -1,3 +1,4 @@
+import { Badge } from "@astryxdesign/core/Badge"
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
 import { CheckboxInput } from "@astryxdesign/core/CheckboxInput"
@@ -243,6 +244,7 @@ export function InterceptDiffViewer({
     currentItems,
   )
   const opCount = suggestion.operations.length
+  const reusedItems = suggestion.reusedItemCount
 
   return (
     <section className="intercept-suggestion" aria-label="AI suggestion">
@@ -254,6 +256,12 @@ export function InterceptDiffViewer({
             {suggestion.durationMs} ms · {opCount} change
             {opCount === 1 ? "" : "s"}
           </Text>
+          {reusedItems > 0 ?
+            <Text type="supporting">
+              Reused results for {reusedItems} item
+              {reusedItems === 1 ? "" : "s"} handled earlier in this session
+            </Text>
+          : null}
         </div>
         {readOnly ? null : (
           <HStack gap={2}>
@@ -332,6 +340,9 @@ export function InterceptDiffViewer({
                     />
                   )}
                   <Text weight="semibold">{OP_LABEL[op.op]}</Text>
+                  {index < suggestion.reusedOperationCount ?
+                    <Badge variant="neutral" label="Reused" />
+                  : null}
                   {op.op === "insert_after" ?
                     <Text type="supporting">
                       {KIND_LABEL[op.kind]}{" "}

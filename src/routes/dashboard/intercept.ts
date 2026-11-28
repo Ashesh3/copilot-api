@@ -1,14 +1,12 @@
 import type { Context } from "hono"
 
-import { streamSSE } from "hono/streaming"
 import { z } from "zod"
 
-import { isAdminSessionActive } from "~/lib/admin-auth"
 import {
   AssistantDiffError,
   assistantDiffOpsSchema,
-  listAssistantModels,
 } from "~/lib/intercept/assistant"
+import { listAssistantModels } from "~/lib/intercept/assistant-model"
 import {
   ASSISTANT_RESPONSE_CONTRACT,
   DEFAULT_ASSISTANT_SYSTEM_PROMPT,
@@ -20,7 +18,10 @@ import {
   StaleRevisionError,
 } from "~/lib/intercept/engine"
 import { validateFilterRegex } from "~/lib/intercept/filters"
-import { INTERCEPT_ASSISTANT_EFFORTS } from "~/lib/intercept/types"
+import {
+  INTERCEPT_ASSISTANT_EFFORTS,
+  INTERCEPT_ASSISTANT_KINDS,
+} from "~/lib/intercept/types"
 
 const filterConditionSchema = z
   .object({
@@ -73,6 +74,9 @@ const configPatchSchema = z.object({
       autopilot: z.enum(["off", "request", "response", "both"]).default("off"),
       model: z.string().max(256),
       reasoningEffort: z.enum(INTERCEPT_ASSISTANT_EFFORTS),
+      messageKinds: z
+        .array(z.enum(INTERCEPT_ASSISTANT_KINDS))
+        .min(1, "Choose at least one message type for AI Assist"),
       systemPrompt: z.string().max(16000),
       instructionMode: z.enum(["shared", "separate"]),
       sharedInstruction: z.string().max(16000),
@@ -123,6 +127,8 @@ const dropSchema = z.object({ reason: z.string().max(500).optional() })
 const triggerAssistantSchema = z.object({
   instruction: z.string().max(16000).optional(),
   model: z.string().max(256).optional(),
+  /** Send every item to the model, ignoring this session's earlier results. */
+  fresh: z.boolean().optional(),
 })
 
 const applyAssistantSchema = z.object({
@@ -313,68 +319,4 @@ export function handleRejectInterceptAssistant(c: Context) {
     c.req.param("id") ?? "",
   )
   return updated ? c.json(updated) : notHeld(c)
-}
-
-const HEARTBEAT_MS = 15_000
-/** A client this far behind reconnects and starts again from a snapshot. */
-const MAX_QUEUED_EVENTS = 500
-
-export function handleInterceptEvents(c: Context) {
-  c.header("Cache-Control", "no-store")
-  return streamSSE(c, async (stream) => {
-    const { promise: finished, resolve: finish } = Promise.withResolvers<null>()
-    let closed = false
-    let queued = 0
-    let delivery = Promise.resolve()
-
-    const close = () => {
-      if (closed) return
-      closed = true
-      clearInterval(heartbeat)
-      unsubscribe()
-      finish(null)
-    }
-
-    // Every event is delivered only while the session that opened the stream
-    // is current: logout, a password change, or expiry ends it at once. The
-    // check never extends the session, so an open stream cannot keep it alive.
-    const deliver = async (message: { event: string; data: string }) => {
-      if (closed) return
-      if (!(await isAdminSessionActive(c.req.raw))) {
-        close()
-        return
-      }
-      await stream.writeSSE(message)
-    }
-
-    // Writes run one at a time and in order.
-    const send = (event: string, data: string) => {
-      if (closed) return
-      if (queued >= MAX_QUEUED_EVENTS) {
-        close()
-        return
-      }
-      queued += 1
-      delivery = delivery
-        .then(() => deliver({ event, data }))
-        .catch(close)
-        .finally(() => {
-          queued -= 1
-        })
-    }
-
-    // Cleanup is registered and the snapshot queued in the same tick as the
-    // subscription, so no event is lost and an early disconnect is seen.
-    stream.onAbort(close)
-    const unsubscribe = interceptEngine.subscribe((event) => {
-      send(event.type, JSON.stringify(event))
-    })
-    const heartbeat = setInterval(() => {
-      send("ping", String(Date.now()))
-    }, HEARTBEAT_MS)
-    send("snapshot", JSON.stringify(interceptEngine.getSnapshot()))
-    if (stream.aborted) close()
-
-    await finished
-  })
 }

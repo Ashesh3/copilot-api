@@ -1,62 +1,5 @@
-import { AsyncLocalStorage } from "node:async_hooks"
 import { randomUUID } from "node:crypto"
 import { z } from "zod"
-
-import type { CopilotInferenceEndpoint } from "~/lib/endpoint-routing"
-import type { Model } from "~/services/copilot/get-models"
-
-import {
-  runWithRoutedModelSelection,
-  selectCatalogRoutedModel,
-  usesPooledAccounts,
-} from "~/lib/account-router"
-import {
-  createCustomProviderChatCompletions,
-  type CustomProviderModelReference,
-  getCustomProviderModels,
-  resolveCustomProviderModel,
-} from "~/lib/custom-providers"
-import {
-  applyModelFallbackToPayload,
-  getModelFallbackRedirect,
-  runWithModelFallback,
-} from "~/lib/model-fallback"
-import {
-  getLoadedModelRedirects,
-  type ModelRedirectRequest,
-  type ModelRedirectResult,
-  type ModelRedirectVerbosity,
-} from "~/lib/model-redirect"
-import { resolveModelRedirectRules } from "~/lib/model-redirect-resolver"
-import { normalizeModelName } from "~/lib/model-resolver"
-import { getModelRoutingSafety } from "~/lib/model-routing-safety"
-import {
-  getModelReasoningConfig,
-  parseModelSuffix,
-  type ReasoningEffort,
-  usesImplicitReasoningDefault,
-} from "~/lib/model-suffix"
-import { runAsIndependentRequest } from "~/lib/request-scopes"
-import { state } from "~/lib/state"
-import { tokenPool } from "~/lib/token-pool"
-import {
-  anthropicResponseToChat,
-  chatPayloadToAnthropic,
-} from "~/routes/chat-completions/anthropic-bridge"
-import {
-  chatCompletionsToResponses,
-  getResponsesResultOutputText,
-} from "~/routes/chat-completions/responses-fallback"
-import { selectChatUpstreamEndpoint } from "~/routes/chat-completions/responses-fallback-executor"
-import { detectInitiator } from "~/services/copilot/copilot-payload-helpers"
-import { createAnthropicMessages } from "~/services/copilot/create-anthropic-messages"
-import {
-  type ChatCompletionResponse,
-  type ChatCompletionsPayload,
-  createChatCompletions,
-} from "~/services/copilot/create-chat-completions"
-import { createResponses } from "~/services/copilot/create-responses"
-import { finalizeResponsesRequest } from "~/services/copilot/responses-contract"
 
 import type {
   AssistantDiffOp,
@@ -68,6 +11,13 @@ import type {
 } from "./types"
 
 import {
+  type AssistantSessionCache,
+  assistantCacheScope,
+  itemCacheKeys,
+  START_KEY,
+} from "./assistant-cache"
+import { invokeAssistantModel } from "./assistant-model"
+import {
   ASSISTANT_RESPONSE_CONTRACT,
   DEFAULT_ASSISTANT_SYSTEM_PROMPT,
 } from "./assistant-prompt"
@@ -78,190 +28,10 @@ import {
   parseCanonicalView,
   serializeCanonicalItemsToBody,
 } from "./canonical"
-
-const interceptBypassStorage = new AsyncLocalStorage<boolean>()
-
-export function isInterceptBypassed(): boolean {
-  return interceptBypassStorage.getStore() === true
-}
-
-export function runBypassingIntercept<T>(work: () => T): T {
-  return interceptBypassStorage.run(true, work)
-}
+import { INTERCEPT_ASSISTANT_KINDS } from "./types"
 
 /** Operations that cannot be applied to the item they were written for. */
 export class AssistantDiffError extends Error {}
-
-// --- Destinations -----------------------------------------------------------
-
-/** A requested model ID resolved the way the Chat Completions route does. */
-interface AssistantRoute {
-  model: string
-  effort?: ReasoningEffort
-  verbosity?: ModelRedirectVerbosity
-}
-
-type AssistantRedirect = (request: ModelRedirectRequest) => ModelRedirectResult
-
-function assistantPayload(
-  model: string,
-  system: string,
-  user: string,
-): ChatCompletionsPayload {
-  return {
-    model,
-    stream: false,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-  }
-}
-
-function customChatReference(
-  model: string,
-): CustomProviderModelReference | undefined {
-  return resolveCustomProviderModel({
-    model,
-    kind: "chat",
-    copilotModelIds: new Set(state.models?.data.map((entry) => entry.id)),
-  })
-}
-
-/**
- * `applyModelRedirect`, synchronous so the picker lists IDs exactly as a
- * request resolves them: unsafe or looping rule sets redirect nothing.
- */
-function createAssistantRedirect(): AssistantRedirect {
-  const rules = getModelRoutingSafety().safe ? getLoadedModelRedirects() : []
-  return (request) => {
-    const result = resolveModelRedirectRules(rules, request)
-    return result.loop ?
-        {
-          model: request.model,
-          effort: request.effort,
-          verbosity: request.verbosity,
-          redirected: false,
-        }
-      : result
-  }
-}
-
-const EFFORT_ORDER: ReadonlyArray<ReasoningEffort> = [
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-]
-
-/**
- * `effort` on the model's scale: kept when supported, otherwise the nearest
- * supported level (the lower one on a tie), never the model's default, so a
- * low setting never turns into a slower one. Models without levels keep it.
- */
-function clampEffort(
-  model: string,
-  effort: ReasoningEffort | undefined,
-): ReasoningEffort | undefined {
-  const supported = getModelReasoningConfig(model)?.supportedEfforts
-  if (!effort || !supported?.length || supported.includes(effort)) return effort
-  const target = EFFORT_ORDER.indexOf(effort)
-  const distance = (level: ReasoningEffort) =>
-    Math.abs(EFFORT_ORDER.indexOf(level) - target)
-  return [...supported]
-    .sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b))
-    .reduce((best, level) => (distance(level) < distance(best) ? level : best))
-}
-
-/**
- * Chat's model resolution: a reasoning suffix (`model:high`) wins over the
- * configured effort; a custom provider model keeps its own ID, any other is
- * normalized and redirected, and each effort is clamped to its model.
- */
-function resolveAssistantRoute(
-  requested: string,
-  configuredEffort: ReasoningEffort | undefined,
-  redirect: AssistantRedirect,
-): AssistantRoute {
-  const { baseModel, reasoningEffort: suffixEffort } =
-    parseModelSuffix(requested)
-  const normalized = normalizeModelName(baseModel)
-  const effort = clampEffort(normalized, suffixEffort ?? configuredEffort)
-  if (customChatReference(baseModel)) return { model: baseModel, effort }
-  const target = redirect({ model: normalized, effort })
-  const model = normalizeModelName(target.model)
-  return {
-    model,
-    effort: clampEffort(model, target.effort),
-    verbosity: target.verbosity,
-  }
-}
-
-/**
- * The Copilot endpoint the Chat Completions route sends or translates to for
- * `selectedModel`, so models served only through Responses or Messages work.
- */
-function assistantEndpoint(
-  payload: ChatCompletionsPayload,
-  selectedModel: Model | undefined,
-): CopilotInferenceEndpoint | undefined {
-  if (!selectedModel) return undefined
-  const decision = selectChatUpstreamEndpoint({ payload, selectedModel })
-  return "target" in decision ? decision.target : undefined
-}
-
-/**
- * The model rows of every account that may serve `model`. The merged catalog
- * keeps only the first account's row, whose endpoints can differ.
- */
-function servingModelRows(model: string): Array<Model> {
-  if (!usesPooledAccounts()) {
-    const row = state.models?.data.find((entry) => entry.id === model)
-    return row ? [row] : []
-  }
-  return tokenPool
-    .getEligibleAccountsForModel(model)
-    .flatMap((account) => tokenPool.getModelForAccount(model, account.id) ?? [])
-}
-
-function isAssistantModelAvailable(
-  id: string,
-  redirect: AssistantRedirect,
-): boolean {
-  const { model } = resolveAssistantRoute(id, undefined, redirect)
-  if (customChatReference(model)) return true
-  const payload = assistantPayload(model, "", "")
-  return servingModelRows(model).some(
-    (row) => assistantEndpoint(payload, row) !== undefined,
-  )
-}
-
-/** Redirect sources the Chat route accepts, as the models listing names them. */
-function redirectSourceIds(): Array<string> {
-  return getLoadedModelRedirects()
-    .filter((rule) => rule.enabled)
-    .map((rule) =>
-      rule.sourceEffort === "all" || rule.sourceEffort === "default" ?
-        rule.sourceModel
-      : `${rule.sourceModel}:${rule.sourceEffort}`,
-    )
-}
-
-/** Model IDs AI Assist can call, each resolving as it will be sent. */
-export function listAssistantModels(): Array<string> {
-  const ids = new Set(state.models?.data.map((entry) => entry.id) ?? [])
-  for (const listing of getCustomProviderModels()) {
-    if (listing.kind === "chat") ids.add(listing.id)
-  }
-  for (const id of redirectSourceIds()) ids.add(id)
-  const redirect = createAssistantRedirect()
-  return [...ids]
-    .filter((id) => isAssistantModelAvailable(id, redirect))
-    .sort((a, b) => a.localeCompare(b))
-}
 
 // --- Prompt projection ------------------------------------------------------
 
@@ -395,6 +165,12 @@ export function buildAssistantPrompt(options: {
   item: InterceptPendingItem
   instruction: string
   systemPrompt?: string
+  /** Items the model may change; all of the item's items by default. */
+  targets?: ReadonlyArray<CanonicalItem>
+  /** Request items shown read-only for a response; its request by default. */
+  context?: ReadonlyArray<CanonicalItem>
+  /** Lines shown above the target items, such as what was left out. */
+  notes?: ReadonlyArray<string>
 }): { system: string; user: string; targets: AssistantTargets } {
   const { item, instruction } = options
   const phase = item.phase.toUpperCase()
@@ -413,20 +189,22 @@ export function buildAssistantPrompt(options: {
   }
   parts.push("", "# Operator scenario", instruction.trim(), "")
 
-  const context = item.requestContext?.canonical
-  if (item.phase === "response" && context && context.items.length > 0) {
+  const context = options.context ?? item.requestContext?.canonical.items ?? []
+  if (item.phase === "response" && context.length > 0) {
     parts.push(
       "# REQUEST CONTEXT (the request that produced this response; read-only)",
-      formatItems(selectItems(context.items, CONTEXT_CHAR_BUDGET)),
+      formatItems(selectItems(context, CONTEXT_CHAR_BUDGET)),
       "",
     )
   }
 
-  const selection = selectItems(item.canonical.items, TARGET_CHAR_BUDGET)
-  parts.push(
-    `# TARGET ITEMS (the ${item.phase} you are editing)`,
-    formatItems(selection),
+  const selection = selectItems(
+    options.targets ?? item.canonical.items,
+    TARGET_CHAR_BUDGET,
   )
+  parts.push(`# TARGET ITEMS (the ${item.phase} you are editing)`)
+  if (options.notes?.length) parts.push(...options.notes, "")
+  parts.push(formatItems(selection))
 
   return {
     system: resolveAssistantSystemPrompt(options.systemPrompt),
@@ -671,163 +449,6 @@ export function parseAssistantDiffResponse(raw: string): {
   }
 }
 
-// --- Invocation -------------------------------------------------------------
-
-function replyText(content: unknown): string {
-  if (typeof content !== "string" || !content.trim()) {
-    throw new Error("The assistant model returned no text")
-  }
-  return content
-}
-
-function chatReplyText(
-  result: ChatCompletionResponse | AsyncIterable<unknown>,
-): string {
-  if (Symbol.asyncIterator in result) {
-    throw new Error("The assistant model returned a stream")
-  }
-  return replyText(result.choices[0]?.message.content)
-}
-
-/** Send through the Copilot endpoint the Chat Completions route would use. */
-async function sendToCopilot(options: {
-  endpoint: CopilotInferenceEndpoint
-  selectedModel: Model
-  payload: ChatCompletionsPayload
-  verbosity: ModelRedirectVerbosity | undefined
-  signal: AbortSignal | undefined
-}): Promise<string> {
-  const { endpoint, payload, signal } = options
-  if (endpoint === "/chat/completions") {
-    return chatReplyText(await createChatCompletions(payload, { signal }))
-  }
-  if (endpoint === "/responses") {
-    const translated = chatCompletionsToResponses(payload)
-    if (options.verbosity) {
-      translated.text = { ...translated.text, verbosity: options.verbosity }
-    }
-    // Finalized here without the gateway's default effort, so "Model default"
-    // leaves the effort to the model.
-    const { body } = finalizeResponsesRequest(translated, {
-      implicitDefault: usesImplicitReasoningDefault(payload.model),
-    })
-    const result = await createResponses(body, {
-      vision: false,
-      initiator: detectInitiator(payload.messages),
-      signal,
-      prepared: true,
-    })
-    if (Symbol.asyncIterator in result) {
-      throw new Error("The assistant model returned a stream")
-    }
-    return replyText(getResponsesResultOutputText(result))
-  }
-  const result = await createAnthropicMessages(
-    await chatPayloadToAnthropic(payload, options.selectedModel, signal),
-    { signal },
-  )
-  if (Symbol.asyncIterator in result) {
-    throw new Error("The assistant model returned a stream")
-  }
-  return chatReplyText(anthropicResponseToChat(result, payload.model))
-}
-
-/**
- * The effort a Copilot model receives: clamped to its levels, and none for a
- * model without levels. A requested effort is sent even to a model set to
- * keep its implicit default; that setting only stops a default being added.
- */
-function copilotEffort(
-  model: string,
-  requested: ReasoningEffort | undefined,
-): ReasoningEffort | undefined {
-  if (!getModelReasoningConfig(model)) return undefined
-  return clampEffort(model, requested)
-}
-
-/** One attempt; the fallback runner supplies the model for retries. */
-async function sendAssistantAttempt(
-  source: ChatCompletionsPayload,
-  options: { effort?: ReasoningEffort; signal?: AbortSignal },
-): Promise<{ model: string; content: string }> {
-  const { signal } = options
-  const route = resolveAssistantRoute(
-    source.model,
-    options.effort,
-    createAssistantRedirect(),
-  )
-  const payload = { ...structuredClone(source), model: route.model }
-  applyModelFallbackToPayload(payload, {
-    effort: route.effort,
-    verbosity: route.verbosity,
-  })
-  const { model } = payload
-  // A fallback rule's own effort and verbosity win for its target model.
-  const fallback = getModelFallbackRedirect()
-  const effort =
-    model === route.model && !fallback ?
-      route.effort
-    : clampEffort(model, fallback?.effort ?? route.effort)
-  const reference = customChatReference(model)
-  if (reference) {
-    const result = await createCustomProviderChatCompletions(
-      reference,
-      { ...payload, model: reference.upstreamModel },
-      { signal, reasoningEffort: effort },
-    )
-    return { model, content: chatReplyText(result) }
-  }
-  // The account is chosen first; its own model row decides the endpoint.
-  const routed = await selectCatalogRoutedModel(model)
-  const selectedModel = routed.model
-  const endpoint = assistantEndpoint(payload, selectedModel)
-  if (!selectedModel || !endpoint) {
-    throw new Error(
-      `${model} cannot run AI Assist: it is not an available chat model`,
-    )
-  }
-  const sentEffort = copilotEffort(model, effort)
-  if (sentEffort) payload.reasoning_effort = sentEffort
-  const content = await runWithRoutedModelSelection(
-    routed,
-    async () =>
-      await sendToCopilot({
-        endpoint,
-        selectedModel,
-        payload,
-        verbosity: fallback?.verbosity ?? route.verbosity,
-        signal,
-      }),
-  )
-  return { model, content }
-}
-
-async function invokeAssistantModel(options: {
-  model: string
-  system: string
-  user: string
-  effort?: ReasoningEffort
-  signal?: AbortSignal
-}): Promise<{ model: string; content: string }> {
-  const { effort, signal } = options
-  const payload = assistantPayload(options.model, options.system, options.user)
-  // A separate request: the held request's account, fallback, telemetry and
-  // response headers stay untouched, and its own traffic is never intercepted.
-  // Model IDs, redirects and configured model fallbacks resolve as on the
-  // Chat Completions route.
-  return await runAsIndependentRequest(
-    "Intercept Assistant",
-    async () =>
-      await runBypassingIntercept(
-        async () =>
-          await runWithModelFallback(
-            { payload, signal },
-            async () => await sendAssistantAttempt(payload, { effort, signal }),
-          ),
-      ),
-  )
-}
-
 export interface RunInterceptAssistantOptions {
   /** Snapshot of the held item; the engine binds the result to its revision. */
   item: InterceptPendingItem
@@ -836,6 +457,10 @@ export interface RunInterceptAssistantOptions {
   modelOverride?: string
   /** Aborted when the item resolves or a newer run replaces this one. */
   signal?: AbortSignal
+  /** This Intercept session's earlier results; without it nothing is reused. */
+  cache?: AssistantSessionCache
+  /** Send every item to the model, ignoring `cache`. */
+  fresh?: boolean
 }
 
 export type InterceptAssistantResult = Omit<AssistantSuggestion, "revision">
@@ -844,67 +469,314 @@ export type InterceptAssistantRunner = (
   options: RunInterceptAssistantOptions,
 ) => Promise<InterceptAssistantResult>
 
+/** The model a run calls, or an error naming what is missing. */
+function runModel(
+  options: Pick<RunInterceptAssistantOptions, "config" | "modelOverride">,
+): string {
+  const model = (options.modelOverride ?? options.config.model).trim()
+  if (!model) throw new Error("Select an assistant model in AI Assist settings")
+  return model
+}
+
+/** The user message a run sends, or an error naming what is missing. */
+function runInstruction(
+  options: Pick<
+    RunInterceptAssistantOptions,
+    "config" | "instructionOverride" | "item"
+  >,
+): string {
+  const instruction =
+    options.instructionOverride?.trim()
+    || resolveAssistantInstruction(options.config, options.item.phase)
+  if (!instruction) {
+    throw new Error(
+      `No AI Assist user message is set for ${options.item.phase}s`,
+    )
+  }
+  return instruction
+}
+
+/** The cache scope of a run: everything that changes the assistant's answer. */
+export function assistantRunScope(
+  options: Pick<
+    RunInterceptAssistantOptions,
+    "config" | "instructionOverride" | "modelOverride" | "item"
+  >,
+): string {
+  return assistantCacheScope({
+    model: runModel(options),
+    reasoningEffort: options.config.reasoningEffort,
+    systemPrompt: options.config.systemPrompt,
+    instruction: runInstruction(options),
+    messageKinds: options.config.messageKinds,
+  })
+}
+
+interface AssistantPlan {
+  /** Cache key per item id. */
+  keys: Map<string, string>
+  /** Earlier results for items handled before, addressed to this item. */
+  reused: Array<AssistantDiffOp>
+  reusedItemCount: number
+  /** Items of the selected types the model has not handled yet. */
+  fresh: Array<CanonicalItem>
+  /** Items left out because their type is not selected. */
+  otherKinds: number
+  /** Read-only request items to show a response's model. */
+  context: Array<CanonicalItem>
+  contextKeys: Array<string>
+}
+
+function planContext(
+  plan: AssistantPlan,
+  options: { item: InterceptPendingItem; kinds: ReadonlySet<string> },
+  memory: { cache?: AssistantSessionCache; scope: string },
+): void {
+  const context = options.item.requestContext?.canonical.items ?? []
+  const keys = itemCacheKeys(context)
+  for (const [index, entry] of context.entries()) {
+    const key = keys[index]
+    const seen =
+      memory.cache?.wasShown(memory.scope, key)
+      || memory.cache?.lookup(memory.scope, key, null) !== undefined
+    if (!options.kinds.has(entry.kind) || seen) continue
+    plan.context.push(entry)
+    plan.contextKeys.push(key)
+  }
+}
+
+function planAssistantRun(
+  options: RunInterceptAssistantOptions,
+  scope: string,
+): AssistantPlan {
+  const { item } = options
+  const cache = options.fresh ? undefined : options.cache
+  const kinds = new Set<string>(options.config.messageKinds)
+  const items = item.canonical.items
+  const keys = itemCacheKeys(items)
+  const plan: AssistantPlan = {
+    keys: new Map(items.map((entry, index) => [entry.id, keys[index]])),
+    reused: [],
+    reusedItemCount: 0,
+    fresh: [],
+    otherKinds: 0,
+    context: [],
+    contextKeys: [],
+  }
+  for (const [index, entry] of items.entries()) {
+    if (!kinds.has(entry.kind)) {
+      plan.otherKinds += 1
+      continue
+    }
+    const earlier = cache?.lookup(scope, keys[index], entry.id)
+    if (!earlier) {
+      plan.fresh.push(entry)
+      continue
+    }
+    plan.reusedItemCount += 1
+    plan.reused.push(...earlier)
+  }
+  if (plan.reusedItemCount > 0) {
+    const start = cache?.lookup(scope, `${START_KEY}:${item.phase}`, null)
+    if (start) plan.reused.unshift(...start)
+  }
+  planContext(plan, { item, kinds }, { cache, scope })
+  return plan
+}
+
+function planNotes(
+  plan: AssistantPlan,
+  kinds: ReadonlyArray<string>,
+): Array<string> {
+  const notes: Array<string> = []
+  if (plan.reusedItemCount > 0) {
+    notes.push(
+      `(${plan.reusedItemCount} items handled earlier in this session are not shown; their changes are kept. Do not insert at the very start again.)`,
+    )
+  }
+  if (plan.otherKinds > 0) {
+    notes.push(`(${plan.otherKinds} items of other kinds are not shown.)`)
+  }
+  if (kinds.length < INTERCEPT_ASSISTANT_KINDS.length) {
+    notes.push(
+      `Change and insert only items of these kinds: ${kinds.join(", ")}.`,
+    )
+  }
+  return notes
+}
+
+function checkInsertKinds(
+  operations: ReadonlyArray<AssistantDiffOp>,
+  kinds: ReadonlyArray<string>,
+): void {
+  for (const op of operations) {
+    if (op.op === "insert_after" && !kinds.includes(op.kind)) {
+      throw new AssistantDiffError(
+        `AI Assist may only insert ${kinds.join(", ")} items, not ${op.kind}`,
+      )
+    }
+  }
+}
+
+const REPLY_EXCERPT_LENGTH = 600
+
+/** What was wrong with a reply, with the reply, for the operator and the log. */
+function describeBadReply(error: AssistantDiffError, reply: string): Error {
+  const text = reply.trim()
+  const excerpt =
+    text.length > REPLY_EXCERPT_LENGTH ?
+      `${text.slice(0, REPLY_EXCERPT_LENGTH)}…`
+    : text
+  return new AssistantDiffError(
+    `${error.message}\nModel reply: ${excerpt || "(empty)"}`,
+  )
+}
+
+interface ModelAnswer {
+  model: string
+  summary: string
+  operations: Array<AssistantDiffOp>
+  /** Ids of the items the model was shown and may have changed. */
+  shown: ReadonlyArray<string>
+}
+
+/** Ask the model about `plan.fresh`; its operations, checked against the item. */
+async function askModel(
+  options: RunInterceptAssistantOptions,
+  plan: AssistantPlan,
+): Promise<ModelAnswer> {
+  const { item, config } = options
+  const prompt = buildAssistantPrompt({
+    item,
+    instruction: runInstruction(options),
+    systemPrompt: config.systemPrompt,
+    targets: plan.fresh,
+    context: plan.context,
+    notes: planNotes(plan, config.messageKinds),
+  })
+  const reply = await invokeAssistantModel({
+    model: runModel(options),
+    system: prompt.system,
+    user: prompt.user,
+    effort:
+      config.reasoningEffort === "default" ? undefined : config.reasoningEffort,
+    signal: options.signal,
+  })
+  try {
+    const { summary, operations } = parseAssistantDiffResponse(reply.content)
+    checkInsertKinds(operations, config.messageKinds)
+    validateDiffOps(item.canonical.items, operations, prompt.targets)
+    return {
+      model: reply.model,
+      summary,
+      operations,
+      shown: [...prompt.targets.keys()],
+    }
+  } catch (error) {
+    if (error instanceof AssistantDiffError) {
+      throw describeBadReply(error, reply.content)
+    }
+    throw error
+  }
+}
+
+/** Remember what the model decided for each item it was shown. */
+function rememberAnswer(
+  options: RunInterceptAssistantOptions & { cache: AssistantSessionCache },
+  run: { scope: string; plan: AssistantPlan; answer: ModelAnswer },
+): void {
+  const { cache, item } = options
+  const { scope, plan, answer } = run
+  for (const id of answer.shown) {
+    const key = plan.keys.get(id)
+    if (key === undefined) continue
+    const own = answer.operations.filter((op) =>
+      op.op === "insert_after" ? op.afterId === id : op.id === id,
+    )
+    cache.remember(scope, key, { itemId: id, operations: own })
+  }
+  const start = answer.operations.filter(
+    (op) => op.op === "insert_after" && op.afterId === null,
+  )
+  if (start.length > 0) {
+    const startKey = `${START_KEY}:${item.phase}`
+    const earlier = cache.lookup(scope, startKey, null) ?? []
+    cache.remember(scope, startKey, {
+      itemId: null,
+      operations: [...earlier, ...start],
+    })
+  }
+  cache.markShown(scope, plan.contextKeys)
+}
+
+function preview(
+  item: InterceptPendingItem,
+  operations: ReadonlyArray<AssistantDiffOp>,
+): { previewBody: string | null; previewCanonical: CanonicalView | null } {
+  if (operations.length === 0) {
+    return { previewBody: null, previewCanonical: null }
+  }
+  // Throws CanonicalEditError when the result cannot be written back.
+  const previewBody = serializeCanonicalItemsToBody({
+    originalBody: item.currentBody,
+    canonical: item.canonical,
+    items: applyCanonicalDiffOps(item.canonical.items, operations),
+    contentType: item.responseContentType,
+  })
+  return {
+    previewBody,
+    previewCanonical: parseCanonicalView({
+      path: item.path,
+      phase: item.phase,
+      body: previewBody,
+      contentType: item.responseContentType,
+    }),
+  }
+}
+
+/**
+ * Propose changes for a held item. Items of the selected message types that
+ * this session already handled reuse their earlier result; only the rest go
+ * to the model, and none at all when nothing is new.
+ */
 export async function runInterceptAssistant(
   options: RunInterceptAssistantOptions,
 ): Promise<InterceptAssistantResult> {
   const startedAt = Date.now()
-  const { item, signal } = options
+  const { item, cache } = options
   if (!item.canonical.editable) {
     throw new Error(
       `AI Assist needs a structured payload. ${item.canonical.readOnlyReason ?? "This one can only be edited as raw text."}`,
     )
   }
-  const model = (options.modelOverride ?? options.config.model).trim()
-  if (!model) throw new Error("Select an assistant model in AI Assist settings")
-  const instruction =
-    options.instructionOverride?.trim()
-    || resolveAssistantInstruction(options.config, item.phase)
-  if (!instruction) {
-    throw new Error(`No AI Assist instruction is set for ${item.phase}s`)
-  }
+  const scope = assistantRunScope(options)
+  const plan = planAssistantRun(options, scope)
 
-  const prompt = buildAssistantPrompt({
-    item,
-    instruction,
-    systemPrompt: options.config.systemPrompt,
-  })
-  const { reasoningEffort } = options.config
-  const reply = await invokeAssistantModel({
-    model,
-    system: prompt.system,
-    user: prompt.user,
-    effort: reasoningEffort === "default" ? undefined : reasoningEffort,
-    signal,
-  })
-  const { summary, operations } = parseAssistantDiffResponse(reply.content)
-  validateDiffOps(item.canonical.items, operations, prompt.targets)
-
-  let previewBody: string | null = null
-  let previewCanonical: CanonicalView | null = null
-  if (operations.length > 0) {
-    // Throws CanonicalEditError when the result cannot be written back.
-    previewBody = serializeCanonicalItemsToBody({
-      originalBody: item.currentBody,
-      canonical: item.canonical,
-      items: applyCanonicalDiffOps(item.canonical.items, operations),
-      contentType: item.responseContentType,
-    })
-    previewCanonical = parseCanonicalView({
-      path: item.path,
-      phase: item.phase,
-      body: previewBody,
-      contentType: item.responseContentType,
-    })
+  let model = runModel(options)
+  let summary =
+    plan.reusedItemCount > 0 ?
+      `Reused earlier results for ${plan.reusedItemCount} items`
+    : "No items of the selected message types to review"
+  let operations = plan.reused
+  if (plan.fresh.length > 0) {
+    const answer = await askModel(options, plan)
+    model = answer.model
+    summary = answer.summary
+    operations = [...plan.reused, ...answer.operations]
+    // Reused and new changes must apply together.
+    validateDiffOps(item.canonical.items, operations)
+    if (cache) rememberAnswer({ ...options, cache }, { scope, plan, answer })
   }
 
   return {
     id: randomUUID(),
     createdAt: new Date().toISOString(),
-    model: reply.model,
+    model,
     summary,
     operations,
-    previewBody,
-    previewCanonical,
+    ...preview(item, operations),
     durationMs: Date.now() - startedAt,
+    reusedItemCount: plan.reusedItemCount,
+    reusedOperationCount: plan.reused.length,
   }
 }

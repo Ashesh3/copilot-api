@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 
 import type { InterceptAssistantResult } from "~/lib/intercept/assistant"
+import type { AssistantSessionCache } from "~/lib/intercept/assistant-cache"
 
 import {
   DEBUG_CAPTURE_MEMORY_MAX_BYTES,
@@ -16,6 +17,7 @@ import {
   StaleRevisionError,
 } from "~/lib/intercept/engine"
 import { retainedBytes } from "~/lib/intercept/held-body"
+import { DEFAULT_INTERCEPT_CONFIG } from "~/lib/intercept/types"
 
 const engines: Array<InterceptEngine> = []
 
@@ -151,6 +153,8 @@ describe("capture memory", () => {
         previewBody: null,
         previewCanonical: null,
         durationMs: 0,
+        reusedItemCount: 0,
+        reusedOperationCount: 0,
         revision: 0,
       },
     })
@@ -291,6 +295,8 @@ describe("held request edits", () => {
       previewBody: null,
       previewCanonical: null,
       durationMs: 0,
+      reusedItemCount: 0,
+      reusedOperationCount: 0,
     }
     const engine = newEngine(() => Promise.resolve(suggestion))
     engine.updateConfig({ enabled: true, direction: "request" })
@@ -305,6 +311,74 @@ describe("held request edits", () => {
     expect(engine.getItem(id)?.revision).toBe(0)
     engine.applyAssistantDiff(id, { suggestionId: "reviewed", revision: 0 })
     expect(engine.getItem(id)?.currentBody).toContain("assisted")
+    engine.forwardAllPending()
+    await pending
+  })
+})
+
+describe("AI Assist session", () => {
+  const assistant = {
+    ...DEFAULT_INTERCEPT_CONFIG.assistant,
+    enabled: true,
+    autoRun: false,
+    model: "test-model",
+    sharedInstruction: "Rewrite the user turn",
+  }
+  const noChanges: InterceptAssistantResult = {
+    id: "none",
+    createdAt: new Date(0).toISOString(),
+    model: "test-model",
+    summary: "No change",
+    operations: [],
+    previewBody: null,
+    previewCanonical: null,
+    durationMs: 0,
+    reusedItemCount: 0,
+    reusedOperationCount: 0,
+  }
+
+  test("changing AI Assist settings or turning Intercept off forgets this session's results", async () => {
+    let cache: AssistantSessionCache | undefined
+    const engine = newEngine((options) => {
+      cache = options.cache
+      cache?.remember("scope", "key", { itemId: null, operations: [] })
+      return Promise.resolve(noChanges)
+    })
+    engine.updateConfig({ enabled: true, direction: "request", assistant })
+    const queued = nextQueued(engine)
+    const pending = engine.interceptRequest(chatRequest("original"))
+    const id = await queued
+
+    await engine.triggerAssistant(id)
+    expect(cache?.size).toBe(1)
+    engine.updateConfig({
+      assistant: { ...assistant, reasoningEffort: "high" },
+    })
+    expect(cache?.size).toBe(0)
+
+    await engine.triggerAssistant(id)
+    expect(cache?.size).toBe(1)
+    engine.updateConfig({ enabled: false })
+    expect(cache?.size).toBe(0)
+    await pending
+  })
+
+  test("an automatic run that cannot start tells the operator why", async () => {
+    const engine = newEngine(() => Promise.resolve(noChanges))
+    engine.updateConfig({
+      enabled: true,
+      direction: "request",
+      assistant: { ...assistant, autoRun: true, sharedInstruction: "" },
+    })
+    const queued = nextQueued(engine)
+    const pending = engine.interceptRequest(chatRequest("original"))
+    await queued
+
+    const [held] = engine.getSnapshot().pending
+    expect(held.assistantStatus).toBe("error")
+    expect(held.assistantError).toContain(
+      "AI Assist did not run: no user message is set for requests",
+    )
     engine.forwardAllPending()
     await pending
   })

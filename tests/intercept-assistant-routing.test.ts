@@ -8,10 +8,11 @@ import type {
 import type { Model } from "~/services/copilot/get-models"
 
 import { setConfigForTest } from "~/lib/config"
-import {
-  listAssistantModels,
-  runInterceptAssistant,
-} from "~/lib/intercept/assistant"
+import { runInterceptAssistant } from "~/lib/intercept/assistant"
+import { AssistantSessionCache } from "~/lib/intercept/assistant-cache"
+import { listAssistantModels } from "~/lib/intercept/assistant-model"
+import { parseCanonicalView } from "~/lib/intercept/canonical"
+import { INTERCEPT_ASSISTANT_KINDS } from "~/lib/intercept/types"
 import {
   setModelFallbackConfigForTest,
   validateModelFallbackConfig,
@@ -67,6 +68,7 @@ const ASSISTANT: InterceptAssistantConfig = {
   model: "source-model",
   systemPrompt: "",
   reasoningEffort: "low",
+  messageKinds: [...INTERCEPT_ASSISTANT_KINDS],
   instructionMode: "shared",
   sharedInstruction: "Rewrite the user turn",
   requestInstruction: "",
@@ -199,6 +201,26 @@ afterEach(() => {
   setConfigForTest(null)
 })
 
+function responsesReply(model: unknown, text: string): Response {
+  return Response.json({
+    id: "resp_assistant",
+    object: "response",
+    created_at: 1,
+    model,
+    status: "completed",
+    output: [
+      {
+        type: "message",
+        id: "msg_assistant",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text, annotations: [] }],
+      },
+    ],
+    usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+  })
+}
+
 /** Answer every upstream call as a completed Responses result carrying `reply`. */
 function respondFromResponses(reply: {
   summary: string
@@ -206,32 +228,36 @@ function respondFromResponses(reply: {
 }): void {
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const body = recordCall(input, init)
-    return Promise.resolve(
-      Response.json({
-        id: "resp_assistant",
-        object: "response",
-        created_at: 1,
-        model: body.model,
-        status: "completed",
-        output: [
-          {
-            type: "message",
-            id: "msg_assistant",
-            role: "assistant",
-            status: "completed",
-            content: [
-              {
-                type: "output_text",
-                text: JSON.stringify(reply),
-                annotations: [],
-              },
-            ],
-          },
-        ],
-        usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
-      }),
-    )
+    return Promise.resolve(responsesReply(body.model, JSON.stringify(reply)))
   }) as typeof fetch
+}
+
+/** Answer upstream calls with `replies` in turn; each call's prompt is kept. */
+function respondInTurn(replies: Array<string>): Array<string> {
+  const prompts: Array<string> = []
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const body = recordCall(input, init)
+    prompts.push(JSON.stringify(body.input))
+    return Promise.resolve(responsesReply(body.model, replies.shift() ?? ""))
+  }) as typeof fetch
+  return prompts
+}
+
+/** A held chat request carrying `messages`, parsed the way the engine does. */
+function conversation(
+  messages: Array<{ role: string; content: string }>,
+): InterceptPendingItem {
+  const body = JSON.stringify({ model: "client-model", messages })
+  return {
+    ...heldItem(),
+    originalBody: body,
+    currentBody: body,
+    canonical: parseCanonicalView({
+      path: "/chat/completions",
+      phase: "request",
+      body,
+    }),
+  }
 }
 
 function withEndpoints(id: string, endpoints: Array<string>): Model {
@@ -432,4 +458,94 @@ test("multi-account: a model is offered when another account serves it", async (
   })
 
   expect(listAssistantModels()).toEqual(["pooled-model"])
+})
+
+/**
+ * List a Responses-only test model. A model call refreshes the catalog from
+ * the account pool, which does not know test models, so list it per run.
+ */
+function listModel(): void {
+  state.models = {
+    object: "list",
+    data: [withEndpoints("responses-model", ["/responses"])],
+  }
+}
+
+test("a growing conversation sends only its new messages and reuses earlier results", async () => {
+  const prompts = respondInTurn([
+    JSON.stringify({
+      summary: "first",
+      operations: [{ op: "edit", id: "msg-0", find: "hello", replace: "hi" }],
+    }),
+    JSON.stringify({
+      summary: "second",
+      operations: [
+        { op: "edit", id: "msg-1", find: "weather", replace: "forecast" },
+      ],
+    }),
+  ])
+  const cache = new AssistantSessionCache()
+  const config = { ...ASSISTANT, model: "responses-model" }
+  const first = [{ role: "user", content: "hello" }]
+  const grown = [...first, { role: "user", content: "what is the weather" }]
+
+  listModel()
+  await runInterceptAssistant({ item: conversation(first), config, cache })
+  listModel()
+  const second = await runInterceptAssistant({
+    item: conversation(grown),
+    config,
+    cache,
+  })
+  listModel()
+  const third = await runInterceptAssistant({
+    item: conversation(grown),
+    config,
+    cache,
+  })
+
+  expect(prompts).toHaveLength(2)
+  expect(prompts[1]).toContain("what is the weather")
+  expect(prompts[1]).not.toContain("hello")
+  expect(second.reusedItemCount).toBe(1)
+  expect(second.operations).toEqual([
+    { op: "edit", id: "msg-0", find: "hello", replace: "hi" },
+    { op: "edit", id: "msg-1", find: "weather", replace: "forecast" },
+  ])
+  expect(second.reusedOperationCount).toBe(1)
+  // Nothing new: no model call, every result reused.
+  expect(third.reusedItemCount).toBe(2)
+  expect(third.operations).toEqual(second.operations)
+})
+
+test("message types limit what the model sees and may insert", async () => {
+  state.models = {
+    object: "list",
+    data: [withEndpoints("responses-model", ["/responses"])],
+  }
+  const prompts = respondInTurn([
+    JSON.stringify({
+      summary: "adds a system rule",
+      operations: [
+        { op: "insert_after", afterId: null, kind: "system", content: "x" },
+      ],
+    }),
+  ])
+
+  const failure = await runInterceptAssistant({
+    item: conversation([
+      { role: "system", content: "secret system rules" },
+      { role: "user", content: "hello" },
+    ]),
+    config: { ...ASSISTANT, model: "responses-model", messageKinds: ["user"] },
+  }).then(
+    () => undefined,
+    (error: unknown) => error,
+  )
+
+  expect(prompts[0]).not.toContain("secret system rules")
+  expect(prompts[0]).toContain("hello")
+  expect(String(failure)).toContain("may only insert user items")
+  // The operator sees what the model actually answered.
+  expect(String(failure)).toContain("Model reply:")
 })

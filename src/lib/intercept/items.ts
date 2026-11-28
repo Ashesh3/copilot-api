@@ -14,6 +14,7 @@ import type {
 } from "./types"
 
 import { redactHeaders } from "./held-body"
+import { INTERCEPT_ASSISTANT_KINDS } from "./types"
 
 /** 403: dropped by the operator. 504: no decision in time. 499: client gone. */
 export type DropStatus = 403 | 499 | 504
@@ -56,6 +57,10 @@ export function normalizeAssistant(
     autopilot: assistant.autopilot,
     model: assistant.model.trim(),
     reasoningEffort: assistant.reasoningEffort,
+    // Canonical order, without repeats, so equal choices compare equal.
+    messageKinds: INTERCEPT_ASSISTANT_KINDS.filter((kind) =>
+      assistant.messageKinds.includes(kind),
+    ),
     systemPrompt: assistant.systemPrompt,
     instructionMode:
       assistant.instructionMode === "separate" ? "separate" : "shared",
@@ -96,6 +101,7 @@ export function summarizeItem(
     preview,
     assistantStatus: item.assistantStatus,
     assistantOpCount: item.assistantSuggestion?.operations.length ?? 0,
+    ...(item.assistantError ? { assistantError: item.assistantError } : {}),
     autopilot: item.autopilot === true,
   }
 }

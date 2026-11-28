@@ -1431,6 +1431,10 @@ body {
   gap: var(--spacing-1);
 }
 
+.intercept-row-error {
+  color: var(--color-error);
+}
+
 .intercept-row-preview {
   overflow: hidden;
   color: var(--color-text-secondary);
@@ -1783,6 +1787,11 @@ body {
   font-family: var(--font-family-code);
   font-size: var(--text-supporting-size);
   line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.intercept-assistant-error {
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 

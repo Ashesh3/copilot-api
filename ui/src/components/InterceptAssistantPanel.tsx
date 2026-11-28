@@ -1,6 +1,7 @@
 import { Banner } from "@astryxdesign/core/Banner"
 import { Button } from "@astryxdesign/core/Button"
 import { Card } from "@astryxdesign/core/Card"
+import { CheckboxList, CheckboxListItem } from "@astryxdesign/core/CheckboxList"
 import { Collapsible } from "@astryxdesign/core/Collapsible"
 import {
   SegmentedControl,
@@ -16,6 +17,7 @@ import { TextInput } from "@astryxdesign/core/TextInput"
 import type {
   InterceptAssistantConfig,
   InterceptAssistantEffort,
+  InterceptAssistantKind,
   InterceptAutopilot,
   InterceptPhase,
 } from "../../../src/lib/intercept/types"
@@ -34,6 +36,28 @@ const EFFORT_LABELS: Record<InterceptAssistantEffort, string> = {
 const EFFORT_OPTIONS = (
   Object.entries(EFFORT_LABELS) as Array<[InterceptAssistantEffort, string]>
 ).map(([value, label]) => ({ value, label }))
+
+/** Exhaustive over `INTERCEPT_ASSISTANT_KINDS`, in the same order. */
+const KIND_LABELS: Record<InterceptAssistantKind, string> = {
+  system: "System",
+  developer: "Developer",
+  user: "User",
+  assistant: "Assistant",
+  thinking: "Thinking",
+  tool_call: "Tool call",
+  tool_result: "Tool result",
+}
+
+const KIND_OPTIONS = Object.keys(KIND_LABELS) as Array<InterceptAssistantKind>
+
+/** Mirrors the config route's refusal of an empty `messageKinds`. */
+export function assistantSettingsError(
+  assistant: InterceptAssistantConfig,
+): string | undefined {
+  return assistant.messageKinds.length === 0 ?
+      "Choose at least one message type for AI Assist"
+    : undefined
+}
 
 const MODEL_DESCRIPTION = "Runs as its own request; model fallbacks apply."
 
@@ -102,6 +126,7 @@ export function InterceptAssistantPanel({
     modelOptions.unshift({ label: assistant.model, value: assistant.model })
   }
   const gaps = assistant.enabled ? autopilotGaps(assistant) : []
+  const kindsError = assistantSettingsError(assistant)
 
   return (
     <Card>
@@ -112,6 +137,11 @@ export function InterceptAssistantPanel({
             <Text type="supporting">
               Reads each held item as structured messages, never the raw HTTP
               payload, and proposes edits you review before forwarding.
+            </Text>
+            <Text type="supporting">
+              Results are remembered for this Intercept session and reused for
+              messages already handled. Changing these settings or turning
+              Intercept off clears them.
             </Text>
           </VStack>
           <HStack gap={4} vAlign="center" wrap="wrap">
@@ -162,6 +192,35 @@ export function InterceptAssistantPanel({
               }
             }}
           />
+        </div>
+
+        <div className="intercept-assistant-section">
+          <CheckboxList
+            label="Message types"
+            description="Only these message types are sent to the assistant, and only they may be changed."
+            density="compact"
+            width={360}
+            value={assistant.messageKinds}
+            status={
+              kindsError ? { type: "error", message: kindsError } : undefined
+            }
+            onChange={(values) =>
+              onChange({
+                ...assistant,
+                messageKinds: KIND_OPTIONS.filter((kind) =>
+                  values.includes(kind),
+                ),
+              })
+            }
+          >
+            {KIND_OPTIONS.map((kind) => (
+              <CheckboxListItem
+                key={kind}
+                value={kind}
+                label={KIND_LABELS[kind]}
+              />
+            ))}
+          </CheckboxList>
         </div>
 
         <div className="intercept-assistant-section">

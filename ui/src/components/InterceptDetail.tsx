@@ -137,7 +137,10 @@ export function InterceptDetail({
   )
   const [wrap, setWrap] = useState(true)
   const [isActing, setIsActing] = useState(false)
-  const [isRunningAssistant, setIsRunningAssistant] = useState(false)
+  // Which run this view started; the server may also be running one (autoRun).
+  const [assistantRun, setAssistantRun] = useState<"cached" | "fresh" | null>(
+    null,
+  )
 
   let activeTab = tab
   if (
@@ -327,23 +330,22 @@ export function InterceptDetail({
     }
   }
 
-  async function runAssistant() {
-    setIsRunningAssistant(true)
+  /** `fresh` sends every item to the model, ignoring this session's earlier results. */
+  async function runAssistant(fresh: boolean) {
+    setAssistantRun(fresh ? "fresh" : "cached")
     try {
       if (!(await commitDraft())) return
       const updated = await post<InterceptPendingItem>(
         itemPath(item.id, "/assistant"),
+        fresh ? { fresh: true } : undefined,
       )
       onItemChange(updated)
-      if (updated.assistantError) {
-        toast.error(updated.assistantError)
-      } else {
-        setTab("suggestion")
-      }
+      // The screen toasts every assistant failure; the banner below explains it.
+      if (!updated.assistantError) setTab("suggestion")
     } catch (err) {
       reportError(err, "AI Assist failed")
     } finally {
-      setIsRunningAssistant(false)
+      setAssistantRun(null)
     }
   }
 
@@ -606,10 +608,25 @@ export function InterceptDetail({
               variant="secondary"
               icon={<SparklesIcon />}
               isLoading={
-                isRunningAssistant || item.assistantStatus === "running"
+                assistantRun === "cached"
+                || (assistantRun === null && item.assistantStatus === "running")
               }
-              isDisabled={isActing || isSaving}
-              onClick={() => void runAssistant()}
+              isDisabled={isActing || isSaving || assistantRun === "fresh"}
+              onClick={() => void runAssistant(false)}
+            />
+            <Button
+              label="Run without cache"
+              size="sm"
+              variant="ghost"
+              tooltip="Send every message to the model, ignoring results reused from earlier in this session"
+              isLoading={assistantRun === "fresh"}
+              isDisabled={
+                isActing
+                || isSaving
+                || assistantRun === "cached"
+                || item.assistantStatus === "running"
+              }
+              onClick={() => void runAssistant(true)}
             />
             {revertAction}
             <Button
@@ -721,7 +738,11 @@ export function InterceptDetail({
           <Banner
             status="error"
             title="AI Assist failed"
-            description={item.assistantError}
+            description={
+              <span className="intercept-assistant-error">
+                {item.assistantError}
+              </span>
+            }
           />
         : null}
         {renderBody()}
