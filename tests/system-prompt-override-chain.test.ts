@@ -192,9 +192,29 @@ test("Messages force append at the end adds a text block after a trailing non-te
     content: [
       { type: "text", text: "Custom" },
       { type: "image", source: { type: "url", url: "https://x/a.png" } },
-      { type: "text", text: "Bottom" },
+      { type: "text", text: "\n\nBottom" },
     ],
   })
+})
+
+test("Responses force append at the end separates a new block from a trailing image", () => {
+  configure([{ mode: "append", prompt: "Bottom", position: "end" }])
+  const image = { type: "input_image", image_url: "https://x/a.png" }
+  const payload: ResponsesPayload = {
+    model: MODEL,
+    input: [
+      { role: "developer", content: [image] },
+      { role: "user", content: "Hello" },
+    ],
+  } as unknown as ResponsesPayload
+
+  forceResponsesSystemPrompt(payload, MODEL)
+
+  const [developerItem] = payload.input as Array<{ content: unknown }>
+  expect(developerItem.content).toEqual([
+    image,
+    { type: "input_text", text: "\n\nBottom" },
+  ])
 })
 
 test("Responses force append at the end uses instructions, or the instruction input when they are absent", () => {

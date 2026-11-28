@@ -84,18 +84,6 @@ function assertContent(content: unknown): void {
   )
 }
 
-const TEXT_BLOCK_TYPES = new Set<unknown>(["text", "input_text", "output_text"])
-
-function hasBlockText(block: object): boolean {
-  return (
-    "type" in block
-    && TEXT_BLOCK_TYPES.has(block.type)
-    && "text" in block
-    && typeof block.text === "string"
-    && block.text !== ""
-  )
-}
-
 /** Transform text only; retain block metadata, role controls, and other data. */
 function mapContent<Content>(
   content: Content,
@@ -105,7 +93,10 @@ function mapContent<Content>(
   if (typeof content === "string") return rewrite(content) as Content
   if (!Array.isArray(content)) return content
   return content.map((block: Record<string, unknown>) => {
-    const isText = TEXT_BLOCK_TYPES.has(block.type)
+    const isText =
+      block.type === "text"
+      || block.type === "input_text"
+      || block.type === "output_text"
     return isText && typeof block.text === "string" ?
         { ...block, text: rewrite(block.text) }
       : block
@@ -118,6 +109,19 @@ function isMergeableTextType(edgeType: unknown, blockType: string): boolean {
     edgeType === blockType
     || (blockType === "input_text" && edgeType === "output_text")
   )
+}
+
+/**
+ * Some translators join blocks with "", " ", or "\n" (and may turn non-text
+ * blocks into text placeholders), so end text that lands in its own block
+ * after other blocks starts with a blank line. Beginning keeps its output.
+ */
+function ownBlockPrompt(
+  prompt: string,
+  position: SystemPromptAppendPosition,
+  precededByBlocks: boolean,
+): string {
+  return position === "end" && precededByBlocks ? `\n\n${prompt}` : prompt
 }
 
 function insertContent<Block extends object>(
@@ -138,22 +142,16 @@ function insertContent<Block extends object>(
     && "text" in edge
     && typeof edge.text === "string"
   ) {
-    let text = write.add(edge.text, block.text, position)
-    // Some translators join instruction blocks with "", " ", or "\n", so an end
-    // append that refills an emptied last block keeps a blank line before it.
-    // Beginning keeps its original output for existing rules.
-    const joinsOtherText =
-      position === "end"
-      && !edge.text
-      && content.some(
-        (item, itemIndex) => itemIndex !== index && hasBlockText(item),
-      )
-    if (joinsOtherText) text = `\n\n${text}`
+    const text =
+      edge.text ?
+        write.add(edge.text, block.text, position)
+      : write.add("", ownBlockPrompt(block.text, position, content.length > 1))
     return content.map((item, itemIndex) =>
       itemIndex === index ? { ...edge, text } : item,
     )
   }
-  const added = { ...block, text: write.add("", block.text) }
+  const prompt = ownBlockPrompt(block.text, position, content.length > 0)
+  const added = { ...block, text: write.add("", prompt) }
   return position === "end" ? [...content, added] : [added, ...content]
 }
 
