@@ -32,7 +32,6 @@ import { normalizeModelName } from "~/lib/model-resolver"
 import { getModelRoutingSafety } from "~/lib/model-routing-safety"
 import {
   getModelReasoningConfig,
-  normalizeReasoningEffortForModel,
   parseModelSuffix,
   type ReasoningEffort,
   usesImplicitReasoningDefault,
@@ -148,6 +147,35 @@ function createAssistantRedirect(): AssistantRedirect {
   }
 }
 
+const EFFORT_ORDER: ReadonlyArray<ReasoningEffort> = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]
+
+/**
+ * `effort` on the model's scale: kept when supported, otherwise the nearest
+ * supported level (the lower one on a tie), never the model's default, so a
+ * low setting never turns into a slower one. Models without levels keep it.
+ */
+function clampEffort(
+  model: string,
+  effort: ReasoningEffort | undefined,
+): ReasoningEffort | undefined {
+  const supported = getModelReasoningConfig(model)?.supportedEfforts
+  if (!effort || !supported?.length || supported.includes(effort)) return effort
+  const target = EFFORT_ORDER.indexOf(effort)
+  const distance = (level: ReasoningEffort) =>
+    Math.abs(EFFORT_ORDER.indexOf(level) - target)
+  return [...supported]
+    .sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b))
+    .reduce((best, level) => (distance(level) < distance(best) ? level : best))
+}
+
 /**
  * Chat's model resolution: a reasoning suffix (`model:high`) wins over the
  * configured effort; a custom provider model keeps its own ID, any other is
@@ -161,16 +189,13 @@ function resolveAssistantRoute(
   const { baseModel, reasoningEffort: suffixEffort } =
     parseModelSuffix(requested)
   const normalized = normalizeModelName(baseModel)
-  const effort = normalizeReasoningEffortForModel(
-    normalized,
-    suffixEffort ?? configuredEffort,
-  )
+  const effort = clampEffort(normalized, suffixEffort ?? configuredEffort)
   if (customChatReference(baseModel)) return { model: baseModel, effort }
   const target = redirect({ model: normalized, effort })
   const model = normalizeModelName(target.model)
   return {
     model,
-    effort: normalizeReasoningEffortForModel(model, target.effort),
+    effort: clampEffort(model, target.effort),
     verbosity: target.verbosity,
   }
 }
@@ -709,16 +734,15 @@ async function sendToCopilot(options: {
 
 /**
  * The effort a Copilot model receives: clamped to its levels, and none for a
- * model without levels or one configured to keep its implicit default.
+ * model without levels. A requested effort is sent even to a model set to
+ * keep its implicit default; that setting only stops a default being added.
  */
 function copilotEffort(
   model: string,
   requested: ReasoningEffort | undefined,
 ): ReasoningEffort | undefined {
-  if (!getModelReasoningConfig(model) || usesImplicitReasoningDefault(model)) {
-    return undefined
-  }
-  return normalizeReasoningEffortForModel(model, requested)
+  if (!getModelReasoningConfig(model)) return undefined
+  return clampEffort(model, requested)
 }
 
 /** One attempt; the fallback runner supplies the model for retries. */
@@ -743,7 +767,7 @@ async function sendAssistantAttempt(
   const effort =
     model === route.model && !fallback ?
       route.effort
-    : normalizeReasoningEffortForModel(model, fallback?.effort ?? route.effort)
+    : clampEffort(model, fallback?.effort ?? route.effort)
   const reference = customChatReference(model)
   if (reference) {
     const result = await createCustomProviderChatCompletions(

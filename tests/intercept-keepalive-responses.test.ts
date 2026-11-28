@@ -181,6 +181,48 @@ test("a held Google streamGenerateContent SSE gets a keepalive before forward", 
   expect(text).toContain("keepalive answer")
   expect(text).toContain('"finishReason":"STOP"')
 })
+
+test("a held Google stream the operator drops ends with a Google error", async () => {
+  state.models = { object: "list", data: [model("/chat/completions")] }
+  interceptEngine.updateConfig({ enabled: true, direction: "request" })
+  await seedProtocolDatabase()
+  const response = await fetchServer(
+    new Request(
+      `http://localhost/v1beta/models/${routeModel}:streamGenerateContent?alt=sse`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${PROTOCOL_GATEWAY_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "hello" }] }],
+        }),
+      },
+    ),
+  )
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader()
+  const decoder = new TextDecoder()
+  expect(decoder.decode((await reader.read()).value)).toContain(
+    SSE_HEARTBEAT_COMMENT,
+  )
+  expect(interceptEngine.dropAllPending("Not this one")).toBe(1)
+
+  let text = ""
+  for (;;) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    text += decoder.decode(chunk.value, { stream: true })
+  }
+  const line = text.split("\n").find((entry) => entry.includes('"error"'))
+  const event = JSON.parse(line?.slice("data: ".length) ?? "{}") as {
+    error?: { code?: unknown; status?: unknown; message?: unknown }
+  }
+  expect(event.error?.code).toBe(403)
+  expect(event.error?.status).toBe("PERMISSION_DENIED")
+  expect(String(event.error?.message)).toContain("Dropped by Intercept")
+})
+
 function model(endpoint: "/responses" | "/chat/completions"): Model {
   return {
     id: routeModel,

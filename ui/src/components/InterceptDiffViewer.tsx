@@ -63,6 +63,22 @@ function editMatchProblem(text: string, find: string): string | undefined {
 }
 
 /**
+ * Edits to one item depend on each other (each searches the text the earlier
+ * ones left), so a subset could change a different occurrence: they are
+ * selected together.
+ */
+function sharesEditChain(
+  operations: ReadonlyArray<AssistantDiffOp>,
+  index: number,
+  toggled: number,
+): boolean {
+  if (index === toggled) return true
+  const a = operations[index]
+  const b = operations[toggled]
+  return a.op === "edit" && b.op === "edit" && a.id === b.id
+}
+
+/**
  * Match notes per operation, evaluated the way the server applies them: in
  * order, each edit against the text the preceding selected operations on the
  * same item left. Deselected edits are checked but do not change the text;
@@ -307,7 +323,9 @@ export function InterceptDiffViewer({
                       onChange={(checked) =>
                         setSelected((prev) =>
                           prev.map((value, i) =>
-                            i === index ? checked : value,
+                            sharesEditChain(suggestion.operations, i, index) ?
+                              checked
+                            : value,
                           ),
                         )
                       }

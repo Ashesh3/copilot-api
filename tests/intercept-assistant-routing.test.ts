@@ -336,6 +336,31 @@ test("a Responses-only model is offered and called there with the configured eff
   expect(calls[0]?.reasoning).toMatchObject({ effort: "low" })
 })
 
+test("an effort below the model's levels clamps to its lowest, not its default", async () => {
+  const base = model("responses-model")
+  state.models = {
+    object: "list",
+    data: [
+      {
+        ...base,
+        supported_endpoints: ["/responses"],
+        capabilities: {
+          ...base.capabilities,
+          supports: { reasoning_effort: ["medium", "high", "low"] },
+        },
+      },
+    ],
+  }
+  respondFromResponses({ summary: "No change", operations: [] })
+
+  await runInterceptAssistant({
+    item: heldItem(),
+    config: { ...ASSISTANT, model: "responses-model", reasoningEffort: "none" },
+  })
+
+  expect(calls[0]?.reasoning).toMatchObject({ effort: "low" })
+})
+
 test('"Model default" sends no effort on Responses to a model without levels', async () => {
   state.models = {
     object: "list",

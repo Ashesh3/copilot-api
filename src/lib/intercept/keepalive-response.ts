@@ -249,7 +249,32 @@ function errorEvents(
     const data = error ? body : { error: { message, type: "api_error" } }
     return [{ data: JSON.stringify(data) }, { data: "[DONE]" }]
   }
+  // Google's envelope: a numeric code and a status name, whatever the app sent.
+  const googleShaped =
+    typeof error?.code === "number" && typeof error.status === "string"
   const data =
-    error ? body : { error: { code: status, message, status: "INTERNAL" } }
+    googleShaped ? body : (
+      { error: { code: status, message, status: googleStatus(status) } }
+    )
   return [{ data: JSON.stringify(data) }]
+}
+
+const GOOGLE_STATUSES: Readonly<Record<number, string>> = {
+  400: "INVALID_ARGUMENT",
+  401: "UNAUTHENTICATED",
+  403: "PERMISSION_DENIED",
+  404: "NOT_FOUND",
+  409: "ABORTED",
+  429: "RESOURCE_EXHAUSTED",
+  499: "CANCELLED",
+  501: "UNIMPLEMENTED",
+  503: "UNAVAILABLE",
+  504: "DEADLINE_EXCEEDED",
+}
+
+function googleStatus(status: number): string {
+  return (
+    GOOGLE_STATUSES[status]
+    ?? (status < 500 ? "FAILED_PRECONDITION" : "INTERNAL")
+  )
 }
