@@ -370,7 +370,13 @@ export function forcedSystemPromptBehavior(
       message: `Applied ${forced.overrides.length} system prompt override rules for ${forced.model} in order`,
       data: {
         model: forced.model,
-        modes: forced.overrides.map((rule) => rule.mode).join(", "),
+        modes: forced.overrides
+          .map((rule) =>
+            rule.mode === "append" && rule.position === "end" ?
+              "append (end)"
+            : rule.mode,
+          )
+          .join(", "),
         removedSystemPrompts: removed,
         replacements: outcome.replacements ?? 0,
       },

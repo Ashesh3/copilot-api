@@ -101,6 +101,156 @@ test("repeated append rules execute separately and preserve whitespace", () => {
   expect(payload.instructions).toBe(" Prefix \n\n Prefix \n\nOriginal")
 })
 
+test("Chat force append at the end adds to the same existing prompt", () => {
+  configure([
+    { mode: "append", prompt: "Top", position: "start" },
+    { mode: "append", prompt: "Bottom", position: "end" },
+  ])
+  const payload: { messages: Array<Message> } = {
+    messages: [
+      { role: "developer", content: "Developer" },
+      { role: "system", content: "Client system" },
+      { role: "system", content: "Later system" },
+      { role: "user", content: "Hello" },
+    ],
+  }
+
+  forceChatSystemPrompt(payload, MODEL)
+
+  expect(payload.messages).toEqual([
+    { role: "developer", content: "Developer" },
+    { role: "system", content: "Top\n\nClient system\n\nBottom" },
+    { role: "system", content: "Later system" },
+    { role: "user", content: "Hello" },
+  ])
+})
+
+test("Chat force append at the end creates a system prompt when none exists", () => {
+  configure([{ mode: "append", prompt: "Bottom", position: "end" }])
+  const payload: { messages: Array<Message> } = {
+    messages: [{ role: "user", content: "Hello" }],
+  }
+
+  forceChatSystemPrompt(payload, MODEL)
+
+  expect(payload.messages).toEqual([
+    { role: "system", content: "Bottom" },
+    { role: "user", content: "Hello" },
+  ])
+})
+
+test("Messages force append at the end extends the last system text block and keeps its metadata", () => {
+  configure([{ mode: "append", prompt: "Bottom", position: "end" }])
+  const payload: AnthropicMessagesPayload = {
+    model: MODEL,
+    system: [
+      { type: "text", text: "Header" },
+      {
+        type: "text",
+        text: "Main",
+        cache_control: { type: "ephemeral", ttl: "1h" },
+      },
+    ],
+    messages: [{ role: "user", content: "Hello" }],
+  }
+
+  const behavior = forceMessagesSystemPrompt(payload, MODEL)
+
+  expect(payload.system).toEqual([
+    { type: "text", text: "Header" },
+    {
+      type: "text",
+      text: "Main\n\nBottom",
+      cache_control: { type: "ephemeral", ttl: "1h" },
+    },
+  ])
+  expect(behavior?.data?.modes).toBe("append (end)")
+})
+
+test("Messages force append at the end adds a text block after a trailing non-text block", () => {
+  configure([{ mode: "append", prompt: "Bottom", position: "end" }])
+  const payload: AnthropicMessagesPayload = {
+    model: MODEL,
+    messages: [
+      {
+        role: "system",
+        content: [
+          { type: "text", text: "Custom" },
+          { type: "image", source: { type: "url", url: "https://x/a.png" } },
+        ],
+      },
+      { role: "user", content: "Hello" },
+    ],
+  } as unknown as AnthropicMessagesPayload
+
+  forceMessagesSystemPrompt(payload, MODEL)
+
+  expect(payload.system).toBeUndefined()
+  const [systemTurn] = payload.messages as Array<unknown>
+  expect(systemTurn).toEqual({
+    role: "system",
+    content: [
+      { type: "text", text: "Custom" },
+      { type: "image", source: { type: "url", url: "https://x/a.png" } },
+      { type: "text", text: "Bottom" },
+    ],
+  })
+})
+
+test("Responses force append at the end uses instructions, or the instruction input when they are absent", () => {
+  configure([{ mode: "append", prompt: "Bottom", position: "end" }])
+  const withInstructions: ResponsesPayload = {
+    model: MODEL,
+    instructions: "Original",
+    input: "Hello",
+  }
+  const withInput: ResponsesPayload = {
+    model: MODEL,
+    input: [
+      {
+        role: "developer",
+        content: [
+          { type: "input_text", text: "One" },
+          { type: "input_text", text: "Two" },
+        ],
+      },
+      { role: "user", content: "Hello" },
+    ],
+  }
+
+  forceResponsesSystemPrompt(withInstructions, MODEL)
+  forceResponsesSystemPrompt(withInput, MODEL)
+
+  expect(withInstructions.instructions).toBe("Original\n\nBottom")
+  expect(withInput.instructions).toBeUndefined()
+  expect(withInput.input).toEqual([
+    {
+      role: "developer",
+      content: [
+        { type: "input_text", text: "One" },
+        { type: "input_text", text: "Two\n\nBottom" },
+      ],
+    },
+    { role: "user", content: "Hello" },
+  ])
+})
+
+test("compaction places an end append after the configured prompt and before summary instructions", () => {
+  configure([
+    { mode: "clear", prompt: "Base" },
+    { mode: "append", prompt: "Bottom", position: "end" },
+    { mode: "append", prompt: "Top" },
+  ])
+
+  const result = forceCompactionSystemPrompt({
+    requestedModel: MODEL,
+    instructions: "Summarize.",
+    input: [{ role: "user", content: "Keep" }],
+  })
+
+  expect(result.instructions).toBe("Top\n\nBase\n\nBottom\n\nSummarize.")
+})
+
 test("Messages replaces all system blocks and custom instruction turns with metadata intact", () => {
   configure([
     { mode: "replace", find: "OLD", replacement: "NEW" },

@@ -1,5 +1,9 @@
+/** Where force append puts its text; rules without a position use `start`. */
+export type SystemPromptAppendPosition = "start" | "end"
+
 export type SystemPromptOverride =
-  | { mode: "clear" | "append" | "prepend"; prompt: string }
+  | { mode: "append"; prompt: string; position?: SystemPromptAppendPosition }
+  | { mode: "clear" | "prepend"; prompt: string }
   | { mode: "replace"; find: string; replacement: string }
 
 export const MAX_SYSTEM_PROMPT_OVERRIDES = 32
@@ -32,31 +36,31 @@ function hasOnlyFields(
   )
 }
 
-function validateSystemPromptOverride(value: unknown): string | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return "must be a rule object"
+function validateReplaceRule(
+  rule: Record<string, unknown>,
+): string | undefined {
+  if (!hasOnlyFields(rule, ["mode", "find", "replacement"])) {
+    return "must contain only mode, find, and replacement"
   }
-  const rule = value as Record<string, unknown>
-  if (rule.mode === "replace") {
-    if (!hasOnlyFields(rule, ["mode", "find", "replacement"])) {
-      return "must contain only mode, find, and replacement"
-    }
-    if (typeof rule.find !== "string" || rule.find.length === 0) {
-      return "find must be a non-empty string"
-    }
-    if (typeof rule.replacement !== "string") {
-      return "replacement must be a string"
-    }
-    return undefined
+  if (typeof rule.find !== "string" || rule.find.length === 0) {
+    return "find must be a non-empty string"
   }
-  if (
-    rule.mode !== "clear"
-    && rule.mode !== "append"
-    && rule.mode !== "prepend"
-  ) {
-    return "mode must be clear, append, prepend, or replace"
+  if (typeof rule.replacement !== "string") {
+    return "replacement must be a string"
   }
-  if (!hasOnlyFields(rule, ["mode", "prompt"])) {
+  return undefined
+}
+
+/** Clear, append, and prepend rules carry a prompt; only append has a position. */
+function validatePromptRule(rule: Record<string, unknown>): string | undefined {
+  if (rule.mode === "append" && Object.hasOwn(rule, "position")) {
+    if (!hasOnlyFields(rule, ["mode", "prompt", "position"])) {
+      return "must contain only mode, prompt, and position"
+    }
+    if (rule.position !== "start" && rule.position !== "end") {
+      return "position must be start or end"
+    }
+  } else if (!hasOnlyFields(rule, ["mode", "prompt"])) {
     return "must contain only mode and prompt"
   }
   if (typeof rule.prompt !== "string") return "prompt must be a string"
@@ -64,6 +68,22 @@ function validateSystemPromptOverride(value: unknown): string | undefined {
     return "prompt must contain non-whitespace text"
   }
   return undefined
+}
+
+function validateSystemPromptOverride(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return "must be a rule object"
+  }
+  const rule = value as Record<string, unknown>
+  if (rule.mode === "replace") return validateReplaceRule(rule)
+  if (
+    rule.mode !== "clear"
+    && rule.mode !== "append"
+    && rule.mode !== "prepend"
+  ) {
+    return "mode must be clear, append, prepend, or replace"
+  }
+  return validatePromptRule(rule)
 }
 
 /** Validation never changes rule order or literal text, including whitespace. */
