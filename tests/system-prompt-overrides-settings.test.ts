@@ -10,6 +10,8 @@ test("stored prompt overrides retain their exact content and take precedence ove
   const systemPromptOverrides: Array<SystemPromptOverride> = [
     { mode: "clear", prompt: "" },
     { mode: "append", prompt: "  Literal prompt\n" },
+    { mode: "append", prompt: "Closing prompt", position: "end" },
+    { mode: "append", prompt: "Explicit start", position: "start" },
     { mode: "replace", find: " \n", replacement: "" },
     { mode: "prepend", prompt: " Legacy separate prompt " },
   ]
@@ -59,6 +61,11 @@ test.each(
     [{ mode: "clear", prompt: "", replacement: "y" }],
     [{ mode: "replace", find: "x", replacement: "", prompt: "ambiguous" }],
     [{ mode: "append", prompt: "x", enabled: true }],
+    [{ mode: "append", prompt: "x", position: "middle" }],
+    [{ mode: "append", prompt: "x", position: null }],
+    [{ mode: "prepend", prompt: "x", position: "end" }],
+    [{ mode: "clear", prompt: "x", position: "start" }],
+    [{ mode: "append", prompt: "x", position: "end", enabled: true }],
     Array.from({ length: 33 }, () => ({ mode: "clear", prompt: "" })),
     [
       { mode: "append", prompt: "x".repeat(100_000) },

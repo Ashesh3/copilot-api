@@ -6,8 +6,13 @@ import { Selector } from "@astryxdesign/core/Selector"
 import { HStack, VStack } from "@astryxdesign/core/Stack"
 import { Heading, Text } from "@astryxdesign/core/Text"
 import { TextArea } from "@astryxdesign/core/TextArea"
+import {
+  ToggleButton,
+  ToggleButtonGroup,
+} from "@astryxdesign/core/ToggleButton"
 import { useEffect, useRef } from "react"
 
+import type { SystemPromptAppendPosition } from "../../../src/lib/system-prompt-overrides"
 import type {
   SystemPromptOverrideMode,
   SystemPromptOverrideRow,
@@ -20,6 +25,7 @@ import {
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, Trash2Icon } from "../icons"
 import {
   createSystemPromptOverrideRow,
+  getSystemPromptAppendPositionOptions,
   getSystemPromptOverrideFieldErrors,
   getSystemPromptOverrideOptions,
   moveSystemPromptOverride,
@@ -27,15 +33,28 @@ import {
 } from "../lib/system-prompt-override-form"
 import { IconAction } from "./common"
 
-const MODE_DESCRIPTIONS: Record<SystemPromptOverrideMode, string> = {
+const MODE_DESCRIPTIONS: Record<
+  Exclude<SystemPromptOverrideMode, "append">,
+  string
+> = {
   clear:
     "Remove all system and developer prompts. Optionally replace them with the text below; leave it empty to clear only.",
-  append:
-    "Add this text to the top of the existing system prompt. Creates a system prompt if none exists.",
   replace:
     "Replace every exact match in system and developer text. Matching is case-sensitive and literal; no match leaves the text unchanged.",
   prepend:
     "Add a separate system prompt before the existing prompts. This preserves your previous configuration.",
+}
+
+const APPEND_DESCRIPTIONS: Record<SystemPromptAppendPosition, string> = {
+  start:
+    "Add this text to the beginning of the existing system prompt. Creates a system prompt if none exists.",
+  end: "Add this text to the end of the existing system prompt. Creates a system prompt if none exists.",
+}
+
+function describeRow(row: SystemPromptOverrideRow): string {
+  return row.mode === "append" ?
+      APPEND_DESCRIPTIONS[row.position]
+    : MODE_DESCRIPTIONS[row.mode]
 }
 
 interface SystemPromptOverridesProps {
@@ -206,9 +225,39 @@ export function SystemPromptOverrides({
                           color="secondary"
                           id={`${row.id}-description`}
                         >
-                          {MODE_DESCRIPTIONS[row.mode]}
+                          {describeRow(row)}
                         </Text>
                       </VStack>
+
+                      {row.mode === "append" ?
+                        <VStack gap={1}>
+                          <Text type="label" color="secondary">
+                            Position
+                          </Text>
+                          <ToggleButtonGroup
+                            label={`Position for configuration ${index + 1}`}
+                            value={row.position}
+                            onChange={(position) => {
+                              if (position)
+                                updateRow(row.id, {
+                                  position:
+                                    position as SystemPromptAppendPosition,
+                                })
+                            }}
+                            isDisabled={isDisabled}
+                          >
+                            {getSystemPromptAppendPositionOptions().map(
+                              (option) => (
+                                <ToggleButton
+                                  key={option.value}
+                                  value={option.value}
+                                  label={option.label}
+                                />
+                              ),
+                            )}
+                          </ToggleButtonGroup>
+                        </VStack>
+                      : null}
 
                       {row.mode === "replace" ?
                         <VStack gap={3}>

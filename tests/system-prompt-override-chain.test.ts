@@ -101,6 +101,283 @@ test("repeated append rules execute separately and preserve whitespace", () => {
   expect(payload.instructions).toBe(" Prefix \n\n Prefix \n\nOriginal")
 })
 
+test("Chat force append at the end adds to the same existing prompt", () => {
+  configure([
+    { mode: "append", prompt: "Top", position: "start" },
+    { mode: "append", prompt: "Bottom", position: "end" },
+  ])
+  const payload: { messages: Array<Message> } = {
+    messages: [
+      { role: "developer", content: "Developer" },
+      { role: "system", content: "Client system" },
+      { role: "system", content: "Later system" },
+      { role: "user", content: "Hello" },
+    ],
+  }
+
+  forceChatSystemPrompt(payload, MODEL)
+
+  expect(payload.messages).toEqual([
+    { role: "developer", content: "Developer" },
+    { role: "system", content: "Top\n\nClient system\n\nBottom" },
+    { role: "system", content: "Later system" },
+    { role: "user", content: "Hello" },
+  ])
+})
+
+test("Chat force append at the end creates a system prompt when none exists", () => {
+  configure([{ mode: "append", prompt: "Bottom", position: "end" }])
+  const payload: { messages: Array<Message> } = {
+    messages: [{ role: "user", content: "Hello" }],
+  }
+
+  forceChatSystemPrompt(payload, MODEL)
+
+  expect(payload.messages).toEqual([
+    { role: "system", content: "Bottom" },
+    { role: "user", content: "Hello" },
+  ])
+})
+
+test("Messages force append at the end extends the last system text block and keeps its metadata", () => {
+  configure([{ mode: "append", prompt: "Bottom", position: "end" }])
+  const payload: AnthropicMessagesPayload = {
+    model: MODEL,
+    system: [
+      { type: "text", text: "Header" },
+      {
+        type: "text",
+        text: "Main",
+        cache_control: { type: "ephemeral", ttl: "1h" },
+      },
+    ],
+    messages: [{ role: "user", content: "Hello" }],
+  }
+
+  const behavior = forceMessagesSystemPrompt(payload, MODEL)
+
+  expect(payload.system).toEqual([
+    { type: "text", text: "Header" },
+    {
+      type: "text",
+      text: "Main\n\nBottom",
+      cache_control: { type: "ephemeral", ttl: "1h" },
+    },
+  ])
+  expect(behavior?.data?.modes).toBe("append (end)")
+})
+
+test("Messages force append at the end adds a text block after a trailing non-text block", () => {
+  configure([{ mode: "append", prompt: "Bottom", position: "end" }])
+  const payload: AnthropicMessagesPayload = {
+    model: MODEL,
+    messages: [
+      {
+        role: "system",
+        content: [
+          { type: "text", text: "Custom" },
+          { type: "image", source: { type: "url", url: "https://x/a.png" } },
+        ],
+      },
+      { role: "user", content: "Hello" },
+    ],
+  } as unknown as AnthropicMessagesPayload
+
+  forceMessagesSystemPrompt(payload, MODEL)
+
+  expect(payload.system).toBeUndefined()
+  const [systemTurn] = payload.messages as Array<unknown>
+  expect(systemTurn).toEqual({
+    role: "system",
+    content: [
+      { type: "text", text: "Custom" },
+      { type: "image", source: { type: "url", url: "https://x/a.png" } },
+      { type: "text", text: "\n\nBottom" },
+    ],
+  })
+})
+
+test("Responses force append at the end separates a new block from a trailing image", () => {
+  configure([{ mode: "append", prompt: "Bottom", position: "end" }])
+  const image = { type: "input_image", image_url: "https://x/a.png" }
+  const payload: ResponsesPayload = {
+    model: MODEL,
+    input: [
+      { role: "developer", content: [image] },
+      { role: "user", content: "Hello" },
+    ],
+  } as unknown as ResponsesPayload
+
+  forceResponsesSystemPrompt(payload, MODEL)
+
+  const [developerItem] = payload.input as Array<{ content: unknown }>
+  expect(developerItem.content).toEqual([
+    image,
+    { type: "input_text", text: "\n\nBottom" },
+  ])
+})
+
+test("Responses force append at the end uses instructions, or the instruction input when they are absent", () => {
+  configure([{ mode: "append", prompt: "Bottom", position: "end" }])
+  const withInstructions: ResponsesPayload = {
+    model: MODEL,
+    instructions: "Original",
+    input: "Hello",
+  }
+  const withInput: ResponsesPayload = {
+    model: MODEL,
+    input: [
+      {
+        role: "developer",
+        content: [
+          { type: "input_text", text: "One" },
+          { type: "input_text", text: "Two" },
+        ],
+      },
+      { role: "user", content: "Hello" },
+    ],
+  }
+
+  forceResponsesSystemPrompt(withInstructions, MODEL)
+  forceResponsesSystemPrompt(withInput, MODEL)
+
+  expect(withInstructions.instructions).toBe("Original\n\nBottom")
+  expect(withInput.instructions).toBeUndefined()
+  expect(withInput.input).toEqual([
+    {
+      role: "developer",
+      content: [
+        { type: "input_text", text: "One" },
+        { type: "input_text", text: "Two\n\nBottom" },
+      ],
+    },
+    { role: "user", content: "Hello" },
+  ])
+})
+
+test("compaction places an end append after the configured prompt and before summary instructions", () => {
+  configure([
+    { mode: "clear", prompt: "Base" },
+    { mode: "append", prompt: "Bottom", position: "end" },
+    { mode: "append", prompt: "Top" },
+  ])
+
+  const result = forceCompactionSystemPrompt({
+    requestedModel: MODEL,
+    instructions: "Summarize.",
+    input: [{ role: "user", content: "Keep" }],
+  })
+
+  expect(result.instructions).toBe("Top\n\nBase\n\nBottom\n\nSummarize.")
+})
+
+test("Responses force append merges into edge output_text blocks with a separator", () => {
+  configure([
+    { mode: "append", prompt: "Top" },
+    { mode: "append", prompt: "Bottom", position: "end" },
+  ])
+  const payload: ResponsesPayload = {
+    model: MODEL,
+    input: [
+      {
+        role: "system",
+        content: [
+          { type: "output_text", text: "First", annotations: [] },
+          { type: "output_text", text: "Last", annotations: [] },
+        ],
+      },
+      { role: "user", content: "Hello" },
+    ],
+  } as unknown as ResponsesPayload
+
+  forceResponsesSystemPrompt(payload, MODEL)
+
+  const [systemItem] = payload.input as Array<unknown>
+  expect(systemItem).toEqual({
+    role: "system",
+    content: [
+      { type: "output_text", text: "Top\n\nFirst", annotations: [] },
+      { type: "output_text", text: "Last\n\nBottom", annotations: [] },
+    ],
+  })
+})
+
+test.each(["start", "end"] as const)(
+  "Responses force append at %s refills an emptied edge block, separating only end text",
+  (position) => {
+    configure([
+      { mode: "replace", find: "Remove me", replacement: "" },
+      { mode: "append", prompt: "Added", position },
+    ])
+    const edge = { type: "input_text", text: "Remove me" }
+    const kept = { type: "input_text", text: "Client system" }
+    const payload: ResponsesPayload = {
+      model: MODEL,
+      input: [
+        {
+          role: "system",
+          content: position === "end" ? [kept, edge] : [edge, kept],
+        },
+        { role: "user", content: "Hello" },
+      ],
+    }
+
+    forceResponsesSystemPrompt(payload, MODEL)
+
+    const [systemItem] = payload.input as Array<{ content: unknown }>
+    const added = {
+      type: "input_text",
+      text: position === "end" ? "\n\nAdded" : "Added",
+    }
+    expect(systemItem.content).toEqual(
+      position === "end" ? [kept, added] : [added, kept],
+    )
+  },
+)
+
+test("Chat and Messages force append at the end keep a separator when refilling an emptied last block", () => {
+  configure([
+    { mode: "replace", find: "Remove me", replacement: "" },
+    { mode: "append", prompt: "Added", position: "end" },
+  ])
+  const chat: { messages: Array<Message> } = {
+    messages: [
+      {
+        role: "system",
+        content: [
+          { type: "text", text: "Client system" },
+          { type: "text", text: "Remove me" },
+        ],
+      },
+      { role: "user", content: "Hello" },
+    ],
+  }
+  const messages: AnthropicMessagesPayload = {
+    model: MODEL,
+    system: [
+      { type: "text", text: "Client system" },
+      { type: "text", text: "Remove me", cache_control: { type: "ephemeral" } },
+    ],
+    messages: [{ role: "user", content: "Hello" }],
+  }
+
+  forceChatSystemPrompt(chat, MODEL)
+  forceMessagesSystemPrompt(messages, MODEL)
+
+  expect(chat.messages[0].content).toEqual([
+    { type: "text", text: "Client system" },
+    { type: "text", text: "\n\nAdded" },
+  ])
+  expect(messages.system).toEqual([
+    { type: "text", text: "Client system" },
+    {
+      type: "text",
+      text: "\n\nAdded",
+      cache_control: { type: "ephemeral" },
+    },
+  ])
+})
+
 test("Messages replaces all system blocks and custom instruction turns with metadata intact", () => {
   configure([
     { mode: "replace", find: "OLD", replacement: "NEW" },

@@ -213,8 +213,9 @@ capabilities and remote browsing service, not the proxy's access to page origins
   compaction requests, including requests served through redirects or fallback.
   Each configuration selects one mode: **Clear system prompts** removes the
   existing system/developer prompts and optionally supplies a new prompt;
-  **Force append** prefixes text inside the existing prompt; **Find and replace**
-  replaces every literal, case-sensitive match in system/developer text.
+  **Force append** adds text inside the existing prompt, at its beginning or
+  end (beginning by default); **Find and replace** replaces every literal,
+  case-sensitive match in system/developer text.
   Configurations can be added, removed, and reordered. Existing saved prompt
   settings retain their behavior. Claude permission-review classifier requests
   and gateway compaction instructions keep their required prompts.

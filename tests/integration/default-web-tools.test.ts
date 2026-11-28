@@ -6,6 +6,13 @@ import { state } from "~/lib/state"
 import { executeWebSearch } from "~/services/copilot/mcp-web-search"
 
 import { isGithubOrigin } from "../helpers/github-origin"
+import {
+  bufferedAnswer,
+  expectPageContent,
+  finishHostedPageRead,
+  type HostedPageReadRecord,
+  startHostedPageRead,
+} from "./hosted-page-reads"
 import { rejectsModelAsUnsupported, test } from "./live-models"
 import { rankToolCapableResponsesModels } from "./model-candidates"
 import { initializeTestState, postJSON, useIntegrationFixture } from "./setup"
@@ -36,7 +43,31 @@ const originalFetch = globalThis.fetch
 const destinations: Array<{ host: string; path: string; status: number }> = []
 const pageOriginAttempts: Array<string> = []
 const openedUrls: Array<string> = []
+/** How GitHub's hosted reader answered each page read in the running test. */
+const hostedPageReads: Array<HostedPageReadRecord> = []
 let model = ""
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+function recordResponsesOutput(
+  value: unknown,
+  read: HostedPageReadRecord | undefined,
+): void {
+  const output =
+    isRecord(value) && Array.isArray(value.output) ? value.output : []
+  for (const item of output as Array<unknown>) {
+    if (
+      isRecord(item)
+      && item.type === "web_search_call"
+      && isRecord(item.action)
+      && item.action.type === "open_page"
+      && typeof item.action.url === "string"
+    )
+      openedUrls.push(item.action.url)
+  }
+  finishHostedPageRead(read, value)
+}
 
 beforeEach(async () => {
   await initializeTestState()
@@ -58,6 +89,7 @@ beforeEach(async () => {
   destinations.length = 0
   pageOriginAttempts.length = 0
   openedUrls.length = 0
+  hostedPageReads.length = 0
   globalThis.fetch = (async (
     input: string | URL | Request,
     init?: RequestInit,
@@ -67,25 +99,14 @@ beforeEach(async () => {
       pageOriginAttempts.push(url.hostname)
       throw new Error("Web tool attempted forbidden page-origin egress")
     }
+    const read = startHostedPageRead(hostedPageReads, url, init)
     const response = await originalFetch(input, init)
     if (
       url.pathname === "/responses"
       && response.ok
       && response.headers.get("content-type")?.includes("application/json")
     ) {
-      const value = (await response.clone().json()) as {
-        output?: Array<{
-          type?: string
-          action?: { type?: string; url?: string }
-        }>
-      }
-      for (const item of value.output ?? [])
-        if (
-          item.type === "web_search_call"
-          && item.action?.type === "open_page"
-          && item.action.url
-        )
-          openedUrls.push(item.action.url)
+      recordResponsesOutput(await response.clone().json(), read)
     }
     destinations.push({
       host: url.hostname,
@@ -125,9 +146,14 @@ test("live default web search searches and opens pages entirely on GitHub", asyn
       (item) => item.path === "/responses" && item.status === 200,
     ),
   ).toBe(true)
-  expect(body).toContain("Example Domain")
   expect(openedUrls).toContain("https://example.com/")
   expect(pageOriginAttempts).toEqual([])
+  expectPageContent({
+    label: "live default web search",
+    reads: hostedPageReads,
+    text: body,
+    answer: bufferedAnswer(body),
+  })
   expect(body).not.toContain('"name":"_copilot_web_')
 }, 180_000)
 
@@ -162,7 +188,12 @@ test("live Responses clients open pages on GitHub without client configuration",
   ).toBe(true)
   expect(openedUrls).toContain("https://example.com/")
   expect(pageOriginAttempts).toEqual([])
-  expect(body).toContain("Example Domain")
+  expectPageContent({
+    label: "live Responses clients",
+    reads: hostedPageReads,
+    text: body,
+    answer: bufferedAnswer(body),
+  })
   expect(body).not.toContain(
     '"type":"function_call","name":"_copilot_web_search"',
   )
@@ -185,7 +216,13 @@ test("live streaming page reading stays GitHub-only with one terminal", async ()
   expect(response.status).toBe(200)
   expect(openedUrls).toContain("https://example.com/")
   expect(pageOriginAttempts).toEqual([])
-  expect(streamedText(body)).toContain("Example Domain")
+  const answer = streamedText(body)
+  expectPageContent({
+    label: "live streaming page reading",
+    reads: hostedPageReads,
+    text: answer,
+    answer,
+  })
   expect(body.match(/event: message_stop/g)).toHaveLength(1)
   expect(body).not.toContain('"name":"_copilot_web_')
 }, 180_000)
